@@ -31,10 +31,12 @@ class TestMaintainerRules(unittest.TestCase):
             self.assertIn('Signed-off-by:', content)
             self.assertIn('<username>/<topic_name>', content)
 
-            # 2. Record rule in existing category
-            rules.record_preference('Git & Commits', 'Always rebase on main before testing.')
+            # 2. Record rule in existing category (case-insensitive)
+            rules.record_preference('git & commits', 'Always rebase on main before testing.')
             updated = rules.load_content()
             self.assertIn('Always rebase on main before testing.', updated)
+            # Should not create duplicate heading
+            self.assertEqual(updated.lower().count('## git & commits'), 1)
 
             # 3. Record rule in new category
             rules.record_preference('Documentation', 'Always include mermaid diagrams in design docs.')

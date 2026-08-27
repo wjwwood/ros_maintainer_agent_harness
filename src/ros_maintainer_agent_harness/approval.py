@@ -15,6 +15,7 @@
 import dataclasses
 import datetime
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import uuid
@@ -79,8 +80,10 @@ class ApprovalManager:
     def _save_requests(self, requests: Dict[str, ApprovalRequest]) -> None:
         self.approvals_file.parent.mkdir(parents=True, exist_ok=True)
         data = {tid: req.to_dict() for tid, req in requests.items()}
-        with open(self.approvals_file, 'w', encoding='utf-8') as f:
+        temp_file = self.approvals_file.with_suffix(f".tmp.{os.getpid()}")
+        with open(temp_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
+        os.replace(temp_file, self.approvals_file)
 
     def create_request(
         self,

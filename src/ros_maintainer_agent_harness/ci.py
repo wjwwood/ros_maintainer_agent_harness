@@ -15,6 +15,7 @@
 import dataclasses
 import datetime
 import json
+import os
 from pathlib import Path
 import re
 import time
@@ -60,8 +61,10 @@ class CITracker:
     def _save_runs(self, runs: List[CIRunRecord]) -> None:
         self.storage_file.parent.mkdir(parents=True, exist_ok=True)
         data = [r.to_dict() for r in runs]
-        with open(self.storage_file, 'w', encoding='utf-8') as f:
+        temp_file = self.storage_file.with_suffix(f".tmp.{os.getpid()}")
+        with open(temp_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
+        os.replace(temp_file, self.storage_file)
 
     def record_run(
         self,
@@ -124,18 +127,24 @@ def parse_pr_url(pr_url: str) -> Tuple[Optional[str], Optional[int]]:
 
     Examples:
         - https://github.com/ros2/rclcpp/pull/160 -> ('ros2/rclcpp', 160)
+        - https://github.com/ros2/rclcpp/pull/160#issuecomment-123456 -> ('ros2/rclcpp', 160)
+        - https://github.com/ros2/rclcpp/pull/160?tab=files -> ('ros2/rclcpp', 160)
+        - https://github.com/ros2/rclcpp/pull/160/files -> ('ros2/rclcpp', 160)
         - ros2/rclcpp#160 -> ('ros2/rclcpp', 160)
     """
     if not pr_url:
         return (None, None)
 
-    # Shorthand: ros2/rclcpp#160
-    m_short = re.match(r'^([^/]+/[^/#]+)#(\d+)$', pr_url.strip())
+    raw = pr_url.strip()
+
+    # 1. Shorthand: ros2/rclcpp#160
+    m_short = re.match(r'^([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)#(\d+)$', raw)
     if m_short:
         return (m_short.group(1), int(m_short.group(2)))
 
-    # Full GitHub PR URL: https://github.com/ros2/rclcpp/pull/160
-    m_url = re.match(r'^https?://github\.com/([^/]+/[^/]+)/pull/(\d+)(?:/.*)?$', pr_url.strip())
+    # 2. Full GitHub PR URL (clean query and comment anchor)
+    cleaned = raw.split('#')[0].split('?')[0].rstrip('/')
+    m_url = re.match(r'^https?://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)/pull/(\d+)(?:/.*)?$', cleaned)
     if m_url:
         return (m_url.group(1), int(m_url.group(2)))
 

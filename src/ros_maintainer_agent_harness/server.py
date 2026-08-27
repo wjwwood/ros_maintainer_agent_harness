@@ -645,10 +645,13 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             maintainer: Name/handle of approving maintainer.
             comment: Optional maintainer explanation/comment.
         """
-        if approve:
-            req = approval_mgr.approve_request(ticket_id, maintainer=maintainer, comment=comment)
-        else:
-            req = approval_mgr.reject_request(ticket_id, maintainer=maintainer, comment=comment)
+        try:
+            if approve:
+                req = approval_mgr.approve_request(ticket_id, maintainer=maintainer, comment=comment)
+            else:
+                req = approval_mgr.reject_request(ticket_id, maintainer=maintainer, comment=comment)
+        except KeyError as e:
+            return {'success': False, 'status': 'NOT_FOUND', 'error': str(e)}
 
         timeline = TimelineLogger(req.session_id, workspace.sessions_dir / req.session_id, workspace.audit_log_path)
         timeline.log_action(

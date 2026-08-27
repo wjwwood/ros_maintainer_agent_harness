@@ -307,6 +307,9 @@ def parse_args():
 
     subparsers = parser.add_subparsers(dest='command')
 
+    # instructions
+    subparsers.add_parser('instructions', help='Show standard instructions and prompt for AI coding agents')
+
     # init
     subparsers.add_parser('init', help='Initialize workspace layout and default configs')
 
@@ -399,6 +402,12 @@ def parse_args():
     return parser.parse_args()
 
 
+def handle_instructions(args: argparse.Namespace) -> int:
+    from .instructions import get_agent_system_prompt
+    print(get_agent_system_prompt())
+    return 0
+
+
 def main():
     args = parse_args()
 
@@ -406,7 +415,9 @@ def main():
         print("Run `ros-maintainer-harness --help` for usage instructions.")
         return 0
 
-    if args.command == 'init':
+    if args.command == 'instructions':
+        return handle_instructions(args)
+    elif args.command == 'init':
         return handle_init(args)
     elif args.command == 'serve':
         return handle_serve(args)

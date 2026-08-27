@@ -117,7 +117,7 @@ class TestMCPServer(unittest.TestCase):
         subprocess.run(['git', 'add', '.'], cwd=str(repo_dir), check=True)
         subprocess.run(['git', 'commit', '-m', 'Commit 1'], cwd=str(repo_dir), check=True)
 
-        remote_dir = self.ws_root / 'remote.git'
+        remote_dir = self.ws_root / 'ros2' / 'test_repo.git'
         subprocess.run(['git', 'init', '--bare', str(remote_dir)], check=True)
         subprocess.run(['git', 'remote', 'add', 'origin', str(remote_dir)], cwd=str(repo_dir), check=True)
 

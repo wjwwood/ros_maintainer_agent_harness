@@ -56,6 +56,10 @@ class TimelineLogger:
 
         return entry.strip()
 
+    def log_milestone(self, milestone: str, message: str) -> str:
+        """Convenience method to log a milestone to timeline.md."""
+        return self.log_status(message=message, milestone=milestone)
+
     def log_action(
         self,
         action: str,

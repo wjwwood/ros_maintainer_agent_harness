@@ -31,6 +31,18 @@ class TestCI(unittest.TestCase):
             ('ros2/rclcpp', 160),
         )
         self.assertEqual(
+            parse_pr_url('https://github.com/ros2/rclcpp/pull/160#issuecomment-123456'),
+            ('ros2/rclcpp', 160),
+        )
+        self.assertEqual(
+            parse_pr_url('https://github.com/ros2/rclcpp/pull/160?tab=files'),
+            ('ros2/rclcpp', 160),
+        )
+        self.assertEqual(
+            parse_pr_url('https://github.com/ros2/rclcpp/pull/160/files'),
+            ('ros2/rclcpp', 160),
+        )
+        self.assertEqual(
             parse_pr_url('ros2/rosidl_typesupport_fastrtps#99'),
             ('ros2/rosidl_typesupport_fastrtps', 99),
         )

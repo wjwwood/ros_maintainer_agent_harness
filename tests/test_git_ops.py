@@ -21,6 +21,7 @@ from ros_maintainer_agent_harness.git_ops import (
     execute_git_push,
     extract_repo_full_name,
     get_current_branch,
+    get_current_commit_sha,
     get_repo_remote_url,
 )
 
@@ -33,7 +34,23 @@ class TestGitOps(unittest.TestCase):
             'ros2/rclcpp',
         )
         self.assertEqual(
+            extract_repo_full_name('http://github.com/ros2/rclcpp'),
+            'ros2/rclcpp',
+        )
+        self.assertEqual(
             extract_repo_full_name('git@github.com:ros2/rclcpp.git'),
+            'ros2/rclcpp',
+        )
+        self.assertEqual(
+            extract_repo_full_name('ssh://git@github.com/ros2/rclcpp.git'),
+            'ros2/rclcpp',
+        )
+        self.assertEqual(
+            extract_repo_full_name('ssh://git@github.com:22/ros2/rclcpp.git'),
+            'ros2/rclcpp',
+        )
+        self.assertEqual(
+            extract_repo_full_name('git://github.com/ros2/rclcpp.git'),
             'ros2/rclcpp',
         )
         self.assertEqual(
@@ -58,6 +75,9 @@ class TestGitOps(unittest.TestCase):
 
             # Test branch detection
             self.assertEqual(get_current_branch(repo_path), 'wjwwood/fix')
+            sha = get_current_commit_sha(repo_path)
+            self.assertIsNotNone(sha)
+            self.assertEqual(len(sha), 40)
 
             # Add dummy remote
             remote_repo = Path(temp_dir) / 'remote_repo.git'
