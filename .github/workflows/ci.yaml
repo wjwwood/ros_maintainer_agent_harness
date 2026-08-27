@@ -14,11 +14,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux apt-aligned Python versions (ROS 2 Rolling on Noble / Lyrical on Resolute)
-          - name: Linux (apt / Python 3.12 - Rolling)
+          # Linux apt-aligned Python versions
+          - name: Linux (apt / Python 3.12 - Noble/Jazzy)
             os: ubuntu-latest
             python-version: '3.12'
-          - name: Linux (apt / Python 3.13 - Lyrical)
+          - name: Linux (apt / Python 3.13 - Resolute/Rolling/Lyrical)
             os: ubuntu-latest
             python-version: '3.13'
 
