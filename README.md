@@ -47,7 +47,7 @@ When maintaining ROS 2 repositories with the assistance of an AI coding agent, t
 * **No Unapproved PR/Issue Creation**: Opening PRs or issues requires explicit maintainer review and approval.
 
 ### Configurable Maintainer Policies (`policy.yaml`)
-* **Branch Push Allowlist**: Regex patterns for allowable feature branches (e.g. `^wjwwood/.*$`).
+* **Branch Push Allowlist**: Regex patterns for allowable feature branches (e.g. `^<username>/.*$` or `^fix/.*$`).
 * **External Fork Protection**: Require explicit maintainer confirmation before pushing to 3rd-party contributor forks.
 * **Repository Scope**: Allowlisted GitHub organizations and repositories (`ros2/*`, `ros-tooling/*`).
 * **Jenkins CI Controls**: Maximum concurrent runs per PR, cooldown intervals, and auto-cancellation of superseded builds.

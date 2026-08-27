@@ -45,7 +45,7 @@ class TestWorkspaceLayout(unittest.TestCase):
 
             # Verify policy loading
             policy = layout.get_policy()
-            self.assertTrue(policy.is_branch_push_allowed('wjwwood/test_branch'))
+            self.assertTrue(policy.is_branch_push_allowed('maintainer/test_branch'))
 
 
 if __name__ == '__main__':

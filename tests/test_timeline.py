@@ -50,7 +50,7 @@ class TestTimelineLogger(unittest.TestCase):
             # 3. Log action
             logger.log_action(
                 action='git_push',
-                target='wjwwood/rclcpp:wjwwood/fix_linter',
+                target='maintainer/rclcpp:maintainer/fix_linter',
                 reason='Fixed cppcheck warning on lyrical',
                 status='APPROVED',
                 details={'commit_sha': '1234567'},

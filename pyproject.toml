@@ -7,7 +7,7 @@ name = "ros-maintainer-agent-harness"
 version = "0.1.0"
 description = "A development harness for AI agents assisting with ROS maintenance"
 readme = "README.md"
-authors = [{ name = "William Woodall", email = "wjwwood@google.com" }]
+authors = [{ name = "ROS Maintainers" }]
 license = { text = "Apache-2.0" }
 classifiers = [
     "Programming Language :: Python :: 3",

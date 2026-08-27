@@ -20,8 +20,8 @@ def dump_default_rules_md() -> str:
     return """# Maintainer Style & Preferences
 
 ## Git & Commits
-- Commits must include DCO sign-off: `Signed-off-by: William Woodall <wjwwood@google.com>`.
-- Branch naming format: `wjwwood/<topic_name>` (use underscores, not dashes).
+- Commits should include DCO sign-off: `Signed-off-by: <Maintainer Name> <maintainer@example.com>`.
+- Branch naming format: `<username>/<topic_name>` (use underscores, not dashes).
 - When fixing a commit on an active PR, prefer amending rather than squashing if preserving history is desired.
 
 ## CI Conventions

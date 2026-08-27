@@ -29,7 +29,7 @@ class TestMaintainerRules(unittest.TestCase):
             # 1. Default content when file doesn't exist
             content = rules.load_content()
             self.assertIn('Signed-off-by:', content)
-            self.assertIn('wjwwood/<topic_name>', content)
+            self.assertIn('<username>/<topic_name>', content)
 
             # 2. Record rule in existing category
             rules.record_preference('Git & Commits', 'Always rebase on main before testing.')

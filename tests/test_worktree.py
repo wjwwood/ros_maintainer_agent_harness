@@ -58,7 +58,7 @@ class TestSessionManager(unittest.TestCase):
             wt_path = mgr.attach_worktree(
                 session_id='session-pr-100',
                 repo_dir=source_repo,
-                branch_name='wjwwood/test_branch',
+                branch_name='maintainer/test_branch',
             )
 
             self.assertTrue(wt_path.is_dir())
@@ -72,14 +72,14 @@ class TestSessionManager(unittest.TestCase):
                 text=True,
                 check=True,
             )
-            self.assertEqual(res.stdout.strip(), 'wjwwood/test_branch')
+            self.assertEqual(res.stdout.strip(), 'maintainer/test_branch')
 
             # 4. List sessions
             sessions = mgr.list_sessions()
             self.assertEqual(len(sessions), 1)
             self.assertEqual(sessions[0].session_id, 'session-pr-100')
             self.assertIn('source_repo', sessions[0].active_branches)
-            self.assertEqual(sessions[0].active_branches['source_repo'], 'wjwwood/test_branch')
+            self.assertEqual(sessions[0].active_branches['source_repo'], 'maintainer/test_branch')
 
             # 5. Prune session
             pruned = mgr.prune_session('session-pr-100')

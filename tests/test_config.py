@@ -29,8 +29,9 @@ class TestConfig(unittest.TestCase):
         policy = HarnessPolicy()
 
         # Allowed branch patterns
-        self.assertTrue(policy.is_branch_push_allowed('wjwwood/fix_linter'))
-        self.assertTrue(policy.is_branch_push_allowed('wjwwood-patch-1'))
+        self.assertTrue(policy.is_branch_push_allowed('maintainer_user/fix_linter'))
+        self.assertTrue(policy.is_branch_push_allowed('fix/patch_1'))
+        self.assertTrue(policy.is_branch_push_allowed('patch-1'))
 
         # Blocked base distro branches (hard invariant)
         self.assertFalse(policy.is_branch_push_allowed('main'))
@@ -41,13 +42,11 @@ class TestConfig(unittest.TestCase):
         self.assertFalse(policy.is_branch_push_allowed('humble'))
 
         # Disallowed non-matching branches
-        self.assertFalse(policy.is_branch_push_allowed('random_user/feat'))
         self.assertFalse(policy.is_branch_push_allowed('feature_xyz'))
 
         # Allowed repos
         self.assertTrue(policy.is_repository_allowed('ros2/rclcpp'))
         self.assertTrue(policy.is_repository_allowed('ros-tooling/ros-github-scripts'))
-        self.assertTrue(policy.is_repository_allowed('wjwwood/rclcpp'))
         self.assertFalse(policy.is_repository_allowed('unrelated_org/repo'))
 
     def test_load_policy_from_file(self):
@@ -57,7 +56,7 @@ class TestConfig(unittest.TestCase):
                 f.write(dump_default_policy_yaml())
 
             policy = load_policy(config_file)
-            self.assertTrue(policy.is_branch_push_allowed('wjwwood/feature_1'))
+            self.assertTrue(policy.is_branch_push_allowed('user/feature_1'))
             self.assertTrue(policy.is_branch_push_allowed('fix/quick_patch'))
             self.assertFalse(policy.is_branch_push_allowed('rolling'))
 

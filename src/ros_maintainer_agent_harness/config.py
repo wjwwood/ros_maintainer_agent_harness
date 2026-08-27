@@ -24,17 +24,28 @@ DEFAULT_BLOCKED_BRANCH_PATTERNS = [
     r'^(rolling|jazzy|iron|humble|galactic|foxy|eloquent|dashing|crystal|bouncy|ardent)$',
 ]
 
+DEFAULT_ALLOWED_BRANCH_PATTERNS = [
+    r'^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$',
+    r'^fix/[a-zA-Z0-9_-]+$',
+    r'^patch-\d+$',
+]
+
+DEFAULT_ALLOWED_REPOSITORIES = [
+    'ros2/*',
+    'ros-tooling/*',
+]
+
 
 @dataclasses.dataclass
 class GitPushPolicy:
     allowed_branch_patterns: List[str] = dataclasses.field(
-        default_factory=lambda: [r'^wjwwood/.*$', r'^wjwwood-patch-.*$']
+        default_factory=lambda: list(DEFAULT_ALLOWED_BRANCH_PATTERNS)
     )
     blocked_branch_patterns: List[str] = dataclasses.field(
         default_factory=lambda: list(DEFAULT_BLOCKED_BRANCH_PATTERNS)
     )
     allowed_repositories: List[str] = dataclasses.field(
-        default_factory=lambda: ['ros2/*', 'ros-tooling/*', 'wjwwood/*']
+        default_factory=lambda: list(DEFAULT_ALLOWED_REPOSITORIES)
     )
     require_approval_for_external_forks: bool = True
     require_force_with_lease: bool = True
@@ -101,13 +112,13 @@ def load_policy(config_path: Path) -> HarnessPolicy:
     git_push_data = data.get('policies', {}).get('git_push', {})
     git_push_policy = GitPushPolicy(
         allowed_branch_patterns=git_push_data.get(
-            'allowed_branch_patterns', [r'^wjwwood/.*$', r'^wjwwood-patch-.*$']
+            'allowed_branch_patterns', list(DEFAULT_ALLOWED_BRANCH_PATTERNS)
         ),
         blocked_branch_patterns=git_push_data.get(
             'blocked_branch_patterns', list(DEFAULT_BLOCKED_BRANCH_PATTERNS)
         ),
         allowed_repositories=git_push_data.get(
-            'allowed_repositories', ['ros2/*', 'ros-tooling/*', 'wjwwood/*']
+            'allowed_repositories', list(DEFAULT_ALLOWED_REPOSITORIES)
         ),
         require_approval_for_external_forks=git_push_data.get(
             'require_approval_for_external_forks', True
@@ -142,7 +153,7 @@ def load_policy(config_path: Path) -> HarnessPolicy:
 
 def dump_default_policy_yaml() -> str:
     """Generate default policy.yaml string."""
-    return """# ROS 2 Maintainer Agent Harness - Policy Configuration
+    return """# ROS Maintainer Agent Harness - Policy Configuration
 version: 1
 
 identity:
@@ -152,15 +163,14 @@ identity:
 policies:
   git_push:
     allowed_branch_patterns:
-      - '^wjwwood/[a-zA-Z0-9_-]+$'
-      - '^wjwwood-patch-\\\\d+$'
+      - '^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$'
       - '^fix/[a-zA-Z0-9_-]+$'
+      - '^patch-\\\\d+$'
     blocked_branch_patterns:
       - '^(main|master|rolling|jazzy|iron|humble|galactic|foxy)$'
     allowed_repositories:
       - 'ros2/*'
       - 'ros-tooling/*'
-      - 'wjwwood/*'
     require_approval_for_external_forks: true
     require_force_with_lease: true
 

@@ -95,7 +95,7 @@ Every action invoked through the MCP gateway records a structured JSON record in
   "session_id": "session-pr-160",
   "action": "git_push",
   "status": "APPROVED",
-  "target": "wjwwood/rosidl_typesupport_fastrtps:wjwwood/enforce_cppcheck_lyrical",
+  "target": "contributor/rosidl_typesupport_fastrtps:maintainer/enforce_cppcheck_lyrical",
   "reason": "Cherry-picked commit 77ab234 to resolve lyrical branch compiler warning",
   "details": {
     "commit_sha": "024696d",
@@ -112,7 +112,7 @@ Agents use this tool during long-running tasks to record periodic status notes. 
 ```markdown
 # Session Timeline: PR #160 (rosidl_typesupport_fastrtps)
 
-- **[22:05:12]** Initialized workspace on branch `wjwwood/enforce_cppcheck_lyrical`.
+- **[22:05:12]** Initialized workspace on branch `maintainer/enforce_cppcheck_lyrical`.
 - **[22:08:43]** **Action (Push)**: Pushed commit `024696d` — *Cherry-picked commit 77ab234 to resolve lyrical compiler warning*.
 - **[22:10:05]** **Action (CI)**: Launched Jenkins CI run `#20143` on `lyrical` desktop.
 - **[22:45:20]** **Status**: Linux, Linux-aarch64, and Linux-rhel finished SUCCESS. Windows job 29019 disconnected due to runner node restart.
@@ -131,7 +131,7 @@ Agents use this tool during long-running tasks to record periodic status notes. 
 * **No Unapproved PR/Issue Creation**: Opening PRs/issues requires explicit interactive maintainer approval.
 
 ### Configurable Maintainer Settings (`policy.yaml`)
-* **Branch Push Rules**: Allowed branch regex patterns (e.g. `^wjwwood/.*$`).
+* **Branch Push Rules**: Allowed branch regex patterns (e.g. `^<username>/.*$` or `^fix/.*$`).
 * **External Fork Protection**: Require maintainer confirmation before pushing to 3rd-party contributor forks.
 * **Repository Scope**: Allowlisted GitHub organizations and repositories.
 * **Jenkins CI Controls**: Maximum concurrent runs per PR, cooldown intervals, and auto-cancellation of superseded builds.
