@@ -1,4 +1,4 @@
-# Architecture & Design Plan: `ros2-maintainer-agent-harness`
+# Architecture & Design Plan: `ros-maintainer-agent-harness`
 
 ## 1. Vision & Purpose
 
@@ -13,10 +13,10 @@ When maintaining ROS 2 repositories with the assistance of an AI coding agent, t
 
 ## 2. Maintainer Workspace Layout & File Locations
 
-All shared configuration, repositories, tools, session workspaces, and audit logs live under a single unified workspace on the host (e.g. `~/ros2_maintainer_ws/`):
+All shared configuration, repositories, tools, session workspaces, and audit logs live under a single unified workspace on the host (e.g. `~/ros_maintainer_ws/`):
 
 ```
-~/ros2_maintainer_ws/
+~/ros_maintainer_ws/
 ├── config/                     # Configuration and maintainer preferences
 │   ├── policy.yaml             # Enforced push/CI policies
 │   └── maintainer_rules.md     # Human-readable maintainer conventions & preferences
@@ -59,7 +59,7 @@ Sharing a single pre-built `venv/` directory across containers or between host a
 
 ### The Solution: Shared `requirements.txt` + Container-Local Environments
 1. **Shared Specification (`tools/requirements.txt`)**:
-   * Shared Python dependencies (such as `PyGithub`, `requests`, `jenkinsapi`) are defined declaratively in `~/ros2_maintainer_ws/tools/requirements.txt`.
+   * Shared Python dependencies (such as `PyGithub`, `requests`, `jenkinsapi`) are defined declaratively in `~/ros_maintainer_ws/tools/requirements.txt`.
 2. **Container-Local Installation**:
    * Each devcontainer creates and manages its own isolated environment (e.g. in `/root/.venv` or system site-packages) upon container initialization (`postCreateCommand: pip install -r /workspace/tools/requirements.txt`).
 3. **Shared Executables (`tools/bin/`)**:
@@ -95,7 +95,7 @@ Every action invoked through the MCP gateway records a structured JSON record in
   "session_id": "session-pr-160",
   "action": "git_push",
   "status": "APPROVED",
-  "target": "wjwwood/rosidl_typesupport_fastrtps:wjwwood/enforce_cppcheck_lyrical",
+  "target": "contributor/rosidl_typesupport_fastrtps:maintainer/enforce_cppcheck_lyrical",
   "reason": "Cherry-picked commit 77ab234 to resolve lyrical branch compiler warning",
   "details": {
     "commit_sha": "024696d",
@@ -112,7 +112,7 @@ Agents use this tool during long-running tasks to record periodic status notes. 
 ```markdown
 # Session Timeline: PR #160 (rosidl_typesupport_fastrtps)
 
-- **[22:05:12]** Initialized workspace on branch `wjwwood/enforce_cppcheck_lyrical`.
+- **[22:05:12]** Initialized workspace on branch `maintainer/enforce_cppcheck_lyrical`.
 - **[22:08:43]** **Action (Push)**: Pushed commit `024696d` — *Cherry-picked commit 77ab234 to resolve lyrical compiler warning*.
 - **[22:10:05]** **Action (CI)**: Launched Jenkins CI run `#20143` on `lyrical` desktop.
 - **[22:45:20]** **Status**: Linux, Linux-aarch64, and Linux-rhel finished SUCCESS. Windows job 29019 disconnected due to runner node restart.
@@ -131,7 +131,7 @@ Agents use this tool during long-running tasks to record periodic status notes. 
 * **No Unapproved PR/Issue Creation**: Opening PRs/issues requires explicit interactive maintainer approval.
 
 ### Configurable Maintainer Settings (`policy.yaml`)
-* **Branch Push Rules**: Allowed branch regex patterns (e.g. `^wjwwood/.*$`).
+* **Branch Push Rules**: Allowed branch regex patterns (e.g. `^<username>/.*$` or `^fix/.*$`).
 * **External Fork Protection**: Require maintainer confirmation before pushing to 3rd-party contributor forks.
 * **Repository Scope**: Allowlisted GitHub organizations and repositories.
 * **Jenkins CI Controls**: Maximum concurrent runs per PR, cooldown intervals, and auto-cancellation of superseded builds.
@@ -144,7 +144,7 @@ This section explains how files are shared between the host and container, and h
 
 ```mermaid
 flowchart TD
-    subgraph HostFS ["Host Workspace (~/ros2_maintainer_ws/)"]
+    subgraph HostFS ["Host Workspace (~/ros_maintainer_ws/)"]
         HostIDE["Maintainer Host Editor / Terminal"]
         SharedClones["shared_repos/<br/>(Primary .git object storage)"]
         SharedTools["tools/<br/>(bin/ and requirements.txt)"]
@@ -221,15 +221,15 @@ The MCP server runs on the maintainer's host machine. FastMCP supports both stan
      ```json
      {
        "mcpServers": {
-         "ros2-maintainer-harness": {
-           "command": "ros2-maintainer-harness",
-           "args": ["serve", "--workspace", "~/ros2_maintainer_ws"]
+         "ros-maintainer-harness": {
+           "command": "ros-maintainer-harness",
+           "args": ["serve", "--workspace", "~/ros_maintainer_ws"]
          }
        }
      }
      ```
 2. **Standing Background Service (`SSE / HTTP` Mode)**:
-   * Run as a local daemon (`ros2-maintainer-harness serve --transport sse --port 8765`), allowing multiple independent containers to connect to `http://host.docker.internal:8765/sse` via local token authentication.
+   * Run as a local daemon (`ros-maintainer-harness serve --transport sse --port 8765`), allowing multiple independent containers to connect to `http://host.docker.internal:8765/sse` via local token authentication.
 
 ---
 
@@ -246,4 +246,4 @@ The MCP server runs on the maintainer's host machine. FastMCP supports both stan
   * Integrate `ros-ci-for-pr` and `ros-find-restarted-ci`.
 * **Phase 3: Devcontainer Templates & Distribution**
   * Create standard `.devcontainer` configuration mounting workspace and tools.
-  * Package as a clean CLI tool (`pip install ros2-maintainer-agent-harness`).
+  * Package as a clean CLI tool (`pip install ros-maintainer-agent-harness`).
