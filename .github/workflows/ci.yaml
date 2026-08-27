@@ -8,13 +8,30 @@ on:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }} - Python ${{ matrix.python-version }})
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13']
+        include:
+          # Linux apt-aligned Python versions (ROS 2 Rolling on Noble / Lyrical on Resolute)
+          - name: Linux (apt / Python 3.12 - Rolling)
+            os: ubuntu-latest
+            python-version: '3.12'
+          - name: Linux (apt / Python 3.13 - Lyrical)
+            os: ubuntu-latest
+            python-version: '3.13'
+
+          # Pixi-aligned Python versions across platforms (conda-forge / pixi default)
+          - name: Linux (pixi / Python 3.11)
+            os: ubuntu-latest
+            python-version: '3.11'
+          - name: macOS (pixi / Python 3.11)
+            os: macos-latest
+            python-version: '3.11'
+          - name: Windows (pixi / Python 3.11)
+            os: windows-latest
+            python-version: '3.11'
 
     steps:
       - name: Checkout repository
