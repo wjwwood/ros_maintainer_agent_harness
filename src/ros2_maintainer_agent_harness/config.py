@@ -16,7 +16,7 @@ import dataclasses
 import fnmatch
 from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 import yaml
 
 DEFAULT_BLOCKED_BRANCH_PATTERNS = [
@@ -27,9 +27,15 @@ DEFAULT_BLOCKED_BRANCH_PATTERNS = [
 
 @dataclasses.dataclass
 class GitPushPolicy:
-    allowed_branch_patterns: List[str] = dataclasses.field(default_factory=lambda: [r'^wjwwood/.*$', r'^wjwwood-patch-.*$'])
-    blocked_branch_patterns: List[str] = dataclasses.field(default_factory=lambda: list(DEFAULT_BLOCKED_BRANCH_PATTERNS))
-    allowed_repositories: List[str] = dataclasses.field(default_factory=lambda: ['ros2/*', 'ros-tooling/*', 'wjwwood/*'])
+    allowed_branch_patterns: List[str] = dataclasses.field(
+        default_factory=lambda: [r'^wjwwood/.*$', r'^wjwwood-patch-.*$']
+    )
+    blocked_branch_patterns: List[str] = dataclasses.field(
+        default_factory=lambda: list(DEFAULT_BLOCKED_BRANCH_PATTERNS)
+    )
+    allowed_repositories: List[str] = dataclasses.field(
+        default_factory=lambda: ['ros2/*', 'ros-tooling/*', 'wjwwood/*']
+    )
     require_approval_for_external_forks: bool = True
     require_force_with_lease: bool = True
 
@@ -94,10 +100,18 @@ def load_policy(config_path: Path) -> HarnessPolicy:
 
     git_push_data = data.get('policies', {}).get('git_push', {})
     git_push_policy = GitPushPolicy(
-        allowed_branch_patterns=git_push_data.get('allowed_branch_patterns', [r'^wjwwood/.*$', r'^wjwwood-patch-.*$']),
-        blocked_branch_patterns=git_push_data.get('blocked_branch_patterns', list(DEFAULT_BLOCKED_BRANCH_PATTERNS)),
-        allowed_repositories=git_push_data.get('allowed_repositories', ['ros2/*', 'ros-tooling/*', 'wjwwood/*']),
-        require_approval_for_external_forks=git_push_data.get('require_approval_for_external_forks', True),
+        allowed_branch_patterns=git_push_data.get(
+            'allowed_branch_patterns', [r'^wjwwood/.*$', r'^wjwwood-patch-.*$']
+        ),
+        blocked_branch_patterns=git_push_data.get(
+            'blocked_branch_patterns', list(DEFAULT_BLOCKED_BRANCH_PATTERNS)
+        ),
+        allowed_repositories=git_push_data.get(
+            'allowed_repositories', ['ros2/*', 'ros-tooling/*', 'wjwwood/*']
+        ),
+        require_approval_for_external_forks=git_push_data.get(
+            'require_approval_for_external_forks', True
+        ),
         require_force_with_lease=git_push_data.get('require_force_with_lease', True),
     )
 

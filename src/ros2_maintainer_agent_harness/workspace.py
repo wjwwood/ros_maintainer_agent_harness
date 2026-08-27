@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from pathlib import Path
-from typing import Optional
 
 from .config import dump_default_policy_yaml, load_policy, HarnessPolicy
 from .rules import dump_default_rules_md
@@ -27,11 +26,13 @@ This directory contains custom executable scripts shared across all active and f
 ## Available Tools
 
 ### `ros-find-restarted-ci`
-- **Purpose**: Discovers rescheduled Jenkins jobs on ci.ros2.org and optionally updates GitHub PR comment markdown in-place.
+- **Purpose**: Discovers rescheduled Jenkins jobs on ci.ros2.org and optionally updates GitHub PR
+  comment markdown in-place.
 - **Usage**: `ros-find-restarted-ci [-u] <PR_OR_COMMENT_URL>`
 
 ## Adding New Tools
-1. Place executable scripts in `tools/bin/` (with standard `#!/usr/bin/env python3` or `#!/usr/bin/env bash` shebang).
+1. Place executable scripts in `tools/bin/` (with standard `#!/usr/bin/env python3` or
+   `#!/usr/bin/env bash` shebang).
 2. Ensure executable permissions (`chmod +x tools/bin/<script_name>`).
 3. Document the tool and its flags in this README.
 """

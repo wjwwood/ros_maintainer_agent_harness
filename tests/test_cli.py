@@ -36,7 +36,10 @@ class TestCLI(unittest.TestCase):
                     self.assertIn('Successfully initialized maintainer workspace', fake_out.getvalue())
 
             # 2. Test rules add & show
-            with patch.object(sys, 'argv', ['ros2-maintainer-harness', '-w', ws_root, 'rules', 'add', 'Testing', 'Run pytest with -v']):
+            add_args = [
+                'ros2-maintainer-harness', '-w', ws_root, 'rules', 'add', 'Testing', 'Run pytest with -v'
+            ]
+            with patch.object(sys, 'argv', add_args):
                 with patch('sys.stdout', new=io.StringIO()) as fake_out:
                     ret = main()
                     self.assertEqual(ret, 0)
@@ -49,7 +52,11 @@ class TestCLI(unittest.TestCase):
                     self.assertIn('Run pytest with -v', fake_out.getvalue())
 
             # 3. Test session create
-            with patch.object(sys, 'argv', ['ros2-maintainer-harness', '-w', ws_root, 'session', 'create', 'session-pr-42', '--topic', 'PR 42 Fix']):
+            create_args = [
+                'ros2-maintainer-harness', '-w', ws_root, 'session', 'create', 'session-pr-42',
+                '--topic', 'PR 42 Fix'
+            ]
+            with patch.object(sys, 'argv', create_args):
                 with patch('sys.stdout', new=io.StringIO()) as fake_out:
                     ret = main()
                     self.assertEqual(ret, 0)
@@ -63,7 +70,10 @@ class TestCLI(unittest.TestCase):
                     self.assertIn('session-pr-42', fake_out.getvalue())
 
             # 5. Test session prune
-            with patch.object(sys, 'argv', ['ros2-maintainer-harness', '-w', ws_root, 'session', 'prune', 'session-pr-42']):
+            prune_args = [
+                'ros2-maintainer-harness', '-w', ws_root, 'session', 'prune', 'session-pr-42'
+            ]
+            with patch.object(sys, 'argv', prune_args):
                 with patch('sys.stdout', new=io.StringIO()) as fake_out:
                     ret = main()
                     self.assertEqual(ret, 0)

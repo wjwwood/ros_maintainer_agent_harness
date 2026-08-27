@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from pathlib import Path
-from typing import Dict, List, Optional
 
 
 def dump_default_rules_md() -> str:
@@ -27,7 +26,8 @@ def dump_default_rules_md() -> str:
 
 ## CI Conventions
 - If a PR only changes tests, run CI with `--only-fixes-test` to save build farm resources.
-- If a job fails with 404 or node disconnection, check the Jenkins queue and restarted jobs with `ros-find-restarted-ci` before re-running.
+- If a job fails with 404 or node disconnection, check the Jenkins queue and restarted jobs
+  with `ros-find-restarted-ci` before re-running.
 
 ## General
 - Always review linter errors before launching Jenkins CI.

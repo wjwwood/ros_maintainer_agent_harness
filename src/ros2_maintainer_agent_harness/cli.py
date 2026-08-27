@@ -16,7 +16,6 @@ import argparse
 import os
 from pathlib import Path
 import sys
-from typing import Optional
 
 from .rules import MaintainerRules
 from .workspace import WorkspaceLayout
@@ -127,7 +126,7 @@ def handle_rules(args: argparse.Namespace) -> int:
         return 0
     elif args.rules_action == 'add':
         if not args.category or not args.rule:
-            print("Error: Must provide category and rule text (e.g. `rules add 'Git' 'Always sign commits'`).", file=sys.stderr)
+            print("Error: Must provide category and rule text.", file=sys.stderr)
             return 1
         rules.record_preference(args.category, args.rule)
         print(f"✅ Added rule to category '{args.category}': {args.rule}")
@@ -151,7 +150,7 @@ def parse_args():
     subparsers = parser.add_subparsers(dest='command')
 
     # init
-    init_parser = subparsers.add_parser('init', help='Initialize workspace layout and default configs')
+    subparsers.add_parser('init', help='Initialize workspace layout and default configs')
 
     # session
     session_parser = subparsers.add_parser('session', help='Manage multi-task session environments')
@@ -163,7 +162,9 @@ def parse_args():
     s_create.add_argument('--topic', type=str, default=None, help='Short topic/PR description')
     s_create.add_argument('--repo', type=str, default=None, help='Path to source repository for worktree')
     s_create.add_argument('--branch', type=str, default=None, help='Branch name for session worktree')
-    s_create.add_argument('--base', type=str, default='HEAD', help='Base branch/commit to branch from (default: HEAD)')
+    s_create.add_argument(
+        '--base', type=str, default='HEAD', help='Base branch/commit to branch from (default: HEAD)'
+    )
 
     # session list
     session_subparsers.add_parser('list', help='List active sessions')
@@ -171,7 +172,9 @@ def parse_args():
     # session prune
     s_prune = session_subparsers.add_parser('prune', help='Prune session worktrees and directory')
     s_prune.add_argument('session_id', type=str, help='Session ID to prune')
-    s_prune.add_argument('-f', '--force', action='store_true', help='Force remove worktree even if untracked changes exist')
+    s_prune.add_argument(
+        '-f', '--force', action='store_true', help='Force remove worktree even if untracked changes exist'
+    )
 
     # rules
     rules_parser = subparsers.add_parser('rules', help='View or update maintainer style & preferences')
