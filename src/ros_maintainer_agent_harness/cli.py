@@ -23,10 +23,10 @@ from .worktree import SessionManager
 
 
 def get_default_workspace_path() -> Path:
-    env_ws = os.environ.get('ROS2_MAINTAINER_WS')
+    env_ws = os.environ.get('ROS_MAINTAINER_WS') or os.environ.get('ROS2_MAINTAINER_WS')
     if env_ws:
         return Path(env_ws).resolve()
-    return (Path.home() / 'ros2_maintainer_ws').resolve()
+    return (Path.home() / 'ros_maintainer_ws').resolve()
 
 
 def handle_init(args: argparse.Namespace) -> int:
@@ -137,14 +137,14 @@ def handle_rules(args: argparse.Namespace) -> int:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        prog='ros2-maintainer-harness',
-        description='ROS 2 Maintainer Agent Harness & Workspace Manager',
+        prog='ros-maintainer-harness',
+        description='ROS Maintainer Agent Harness & Workspace Manager',
     )
     parser.add_argument(
         '-w', '--workspace',
         type=str,
         default=None,
-        help='Maintainer workspace root directory (defaults to $ROS2_MAINTAINER_WS or ~/ros2_maintainer_ws)',
+        help='Maintainer workspace root directory (defaults to $ROS_MAINTAINER_WS or ~/ros_maintainer_ws)',
     )
 
     subparsers = parser.add_subparsers(dest='command')
@@ -191,7 +191,7 @@ def main():
     args = parse_args()
 
     if not args.command:
-        print("Run `ros2-maintainer-harness --help` for usage instructions.")
+        print("Run `ros-maintainer-harness --help` for usage instructions.")
         return 0
 
     if args.command == 'init':
@@ -204,7 +204,7 @@ def main():
         elif args.session_action == 'prune':
             return handle_session_prune(args)
         else:
-            print("Run `ros2-maintainer-harness session --help` for session commands.")
+            print("Run `ros-maintainer-harness session --help` for session commands.")
             return 0
     elif args.command == 'rules':
         return handle_rules(args)

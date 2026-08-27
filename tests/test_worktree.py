@@ -17,8 +17,8 @@ import subprocess
 import tempfile
 import unittest
 
-from ros2_maintainer_agent_harness.workspace import WorkspaceLayout
-from ros2_maintainer_agent_harness.worktree import SessionManager
+from ros_maintainer_agent_harness.workspace import WorkspaceLayout
+from ros_maintainer_agent_harness.worktree import SessionManager
 
 
 class TestSessionManager(unittest.TestCase):

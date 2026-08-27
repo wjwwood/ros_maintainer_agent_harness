@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from ros2_maintainer_agent_harness.cli import main
+from ros_maintainer_agent_harness.cli import main
 
 
 class TestCLI(unittest.TestCase):
@@ -29,7 +29,7 @@ class TestCLI(unittest.TestCase):
             ws_root = str(Path(temp_dir) / 'cli_ws')
 
             # 1. Test init
-            with patch.object(sys, 'argv', ['ros2-maintainer-harness', '-w', ws_root, 'init']):
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', ws_root, 'init']):
                 with patch('sys.stdout', new=io.StringIO()) as fake_out:
                     ret = main()
                     self.assertEqual(ret, 0)
@@ -37,7 +37,7 @@ class TestCLI(unittest.TestCase):
 
             # 2. Test rules add & show
             add_args = [
-                'ros2-maintainer-harness', '-w', ws_root, 'rules', 'add', 'Testing', 'Run pytest with -v'
+                'ros-maintainer-harness', '-w', ws_root, 'rules', 'add', 'Testing', 'Run pytest with -v'
             ]
             with patch.object(sys, 'argv', add_args):
                 with patch('sys.stdout', new=io.StringIO()) as fake_out:
@@ -45,7 +45,7 @@ class TestCLI(unittest.TestCase):
                     self.assertEqual(ret, 0)
                     self.assertIn("Added rule to category 'Testing'", fake_out.getvalue())
 
-            with patch.object(sys, 'argv', ['ros2-maintainer-harness', '-w', ws_root, 'rules', 'show']):
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', ws_root, 'rules', 'show']):
                 with patch('sys.stdout', new=io.StringIO()) as fake_out:
                     ret = main()
                     self.assertEqual(ret, 0)
@@ -53,7 +53,7 @@ class TestCLI(unittest.TestCase):
 
             # 3. Test session create
             create_args = [
-                'ros2-maintainer-harness', '-w', ws_root, 'session', 'create', 'session-pr-42',
+                'ros-maintainer-harness', '-w', ws_root, 'session', 'create', 'session-pr-42',
                 '--topic', 'PR 42 Fix'
             ]
             with patch.object(sys, 'argv', create_args):
@@ -63,7 +63,7 @@ class TestCLI(unittest.TestCase):
                     self.assertIn("Created session 'session-pr-42'", fake_out.getvalue())
 
             # 4. Test session list
-            with patch.object(sys, 'argv', ['ros2-maintainer-harness', '-w', ws_root, 'session', 'list']):
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', ws_root, 'session', 'list']):
                 with patch('sys.stdout', new=io.StringIO()) as fake_out:
                     ret = main()
                     self.assertEqual(ret, 0)
@@ -71,7 +71,7 @@ class TestCLI(unittest.TestCase):
 
             # 5. Test session prune
             prune_args = [
-                'ros2-maintainer-harness', '-w', ws_root, 'session', 'prune', 'session-pr-42'
+                'ros-maintainer-harness', '-w', ws_root, 'session', 'prune', 'session-pr-42'
             ]
             with patch.object(sys, 'argv', prune_args):
                 with patch('sys.stdout', new=io.StringIO()) as fake_out:

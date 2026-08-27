@@ -16,7 +16,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from ros2_maintainer_agent_harness.config import (
+from ros_maintainer_agent_harness.config import (
     dump_default_policy_yaml,
     load_policy,
     HarnessPolicy,

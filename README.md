@@ -1,4 +1,4 @@
-# ros2-maintainer-agent-harness
+# ros-maintainer-agent-harness
 
 A development harness and policy gateway designed for AI coding agents assisting with ROS 2 maintenance and development.
 
@@ -20,7 +20,7 @@ When maintaining ROS 2 repositories with the assistance of an AI coding agent, t
                                │ Model Context Protocol (MCP)
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  HOST POLICY GATEWAY (ros2-maintainer-agent-harness)        │
+│  HOST POLICY GATEWAY (ros-maintainer-agent-harness)        │
 │  - Runs on Maintainer Host (127.0.0.1 / stdio)              │
 │  - Holds Read/Write Token, SSH Signing Key, Jenkins Auth    │
 │  - Evaluates declarative policies (~/.config/.../policy.yml)│
@@ -59,7 +59,7 @@ When maintaining ROS 2 repositories with the assistance of an AI coding agent, t
 The harness manages workspaces using **Linked Git Worktrees** and session overlay directories to support parallel, isolated agent sessions with minimal disk usage:
 
 ```
-~/ros2_maintainer_ws/
+~/ros_maintainer_ws/
 ├── config/                     # Configuration and maintainer preferences
 │   ├── policy.yaml             # Enforced push/CI policies
 │   └── maintainer_rules.md     # Human-readable maintainer conventions & preferences

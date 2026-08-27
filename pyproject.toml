@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ros2-maintainer-agent-harness"
+name = "ros-maintainer-agent-harness"
 version = "0.1.0"
-description = "A development harness for AI agents assisting with ROS 2 maintenance"
+description = "A development harness for AI agents assisting with ROS maintenance"
 readme = "README.md"
 authors = [{ name = "William Woodall", email = "wjwwood@google.com" }]
 license = { text = "Apache-2.0" }
@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ros2-maintainer-harness = "ros2_maintainer_agent_harness.cli:main"
+ros-maintainer-harness = "ros_maintainer_agent_harness.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

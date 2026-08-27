@@ -16,7 +16,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from ros2_maintainer_agent_harness.workspace import WorkspaceLayout
+from ros_maintainer_agent_harness.workspace import WorkspaceLayout
 
 
 class TestWorkspaceLayout(unittest.TestCase):

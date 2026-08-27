@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ROS 2 Maintainer Agent Harness."""
+"""ROS Maintainer Agent Harness."""
 
 __version__ = "0.1.0"

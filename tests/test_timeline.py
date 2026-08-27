@@ -17,7 +17,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from ros2_maintainer_agent_harness.timeline import TimelineLogger
+from ros_maintainer_agent_harness.timeline import TimelineLogger
 
 
 class TestTimelineLogger(unittest.TestCase):
