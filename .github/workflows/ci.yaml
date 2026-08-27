@@ -22,16 +22,16 @@ jobs:
             os: ubuntu-latest
             python-version: '3.13'
 
-          # Pixi-aligned Python versions across platforms (conda-forge / pixi default)
-          - name: Linux (pixi / Python 3.11)
+          # Pixi-aligned Python versions across platforms (RoboStack Jazzy / conda-forge)
+          - name: Linux (pixi / Python 3.12 - Jazzy)
             os: ubuntu-latest
-            python-version: '3.11'
-          - name: macOS (pixi / Python 3.11)
+            python-version: '3.12'
+          - name: macOS (pixi / Python 3.12 - Jazzy)
             os: macos-latest
-            python-version: '3.11'
-          - name: Windows (pixi / Python 3.11)
+            python-version: '3.12'
+          - name: Windows (pixi / Python 3.12 - Jazzy)
             os: windows-latest
-            python-version: '3.11'
+            python-version: '3.12'
 
     steps:
       - name: Checkout repository
