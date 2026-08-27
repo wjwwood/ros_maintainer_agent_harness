@@ -225,9 +225,16 @@ class TestMCPServer(unittest.TestCase):
         res = self._call('create_session', {
             'session_id': 'session-pr-42',
             'topic': 'Memory leak fix',
+            'distro': 'jazzy',
         })
         self.assertEqual(res['session_id'], 'session-pr-42')
+        self.assertEqual(res['distro'], 'jazzy')
+        self.assertIsNotNone(res['devcontainer_path'])
         self.assertTrue((self.workspace.sessions_dir / 'session-pr-42').exists())
+        devcontainer_json = (
+            self.workspace.sessions_dir / 'session-pr-42' / '.devcontainer' / 'devcontainer.json'
+        )
+        self.assertTrue(devcontainer_json.exists())
 
         # List sessions
         sessions = self._call_list('list_sessions', {})

@@ -16,6 +16,11 @@ from pathlib import Path
 
 from .config import dump_default_policy_yaml, load_policy, HarnessPolicy
 from .rules import dump_default_rules_md
+from .tools_templates import (
+    dump_tool_ci_for_pr,
+    dump_tool_find_restarted_ci,
+    dump_tool_session_status,
+)
 
 
 def dump_default_tools_readme() -> str:
@@ -29,6 +34,14 @@ This directory contains custom executable scripts shared across all active and f
 - **Purpose**: Discovers rescheduled Jenkins jobs on ci.ros2.org and optionally updates GitHub PR
   comment markdown in-place.
 - **Usage**: `ros-find-restarted-ci [-u] <PR_OR_COMMENT_URL>`
+
+### `ros-ci-for-pr`
+- **Purpose**: Launch Jenkins CI jobs for PRs with test scoping and distro options.
+- **Usage**: `ros-ci-for-pr [--distro <distro>] [--only-fixes-test] <PR_URL>`
+
+### `ros-session-status`
+- **Purpose**: Log progress updates or milestone notes to session timeline.
+- **Usage**: `ros-session-status [-m <MILESTONE>] "<MESSAGE>"`
 
 ## Adding New Tools
 1. Place executable scripts in `tools/bin/` (with standard `#!/usr/bin/env python3` or
@@ -91,6 +104,20 @@ class WorkspaceLayout:
         if not self.tools_requirements_path.exists():
             with open(self.tools_requirements_path, 'w', encoding='utf-8') as f:
                 f.write(dump_default_requirements_txt())
+
+        # Populate default executables in tools/bin/
+        tool_scripts = {
+            'ros-find-restarted-ci': dump_tool_find_restarted_ci(),
+            'ros-ci-for-pr': dump_tool_ci_for_pr(),
+            'ros-session-status': dump_tool_session_status(),
+        }
+
+        for script_name, content in tool_scripts.items():
+            script_path = self.tools_bin_dir / script_name
+            if not script_path.exists():
+                with open(script_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                script_path.chmod(0o755)
 
     def get_policy(self) -> HarnessPolicy:
         """Load and return the parsed policy."""

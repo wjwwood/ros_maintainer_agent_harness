@@ -54,16 +54,28 @@ class TestCLI(unittest.TestCase):
                     self.assertEqual(ret, 0)
                     self.assertIn('Run pytest with -v', fake_out.getvalue())
 
-            # 3. Test session create
+            # 3. Test session create with distro
             create_args = [
                 'ros-maintainer-harness', '-w', ws_root, 'session', 'create', 'session-pr-42',
-                '--topic', 'PR 42 Fix'
+                '--topic', 'PR 42 Fix', '--distro', 'jazzy'
             ]
             with patch.object(sys, 'argv', create_args):
                 with patch('sys.stdout', new=io.StringIO()) as fake_out:
                     ret = main()
                     self.assertEqual(ret, 0)
-                    self.assertIn("Created session 'session-pr-42'", fake_out.getvalue())
+                    self.assertIn("Created session 'session-pr-42' (distro: jazzy)", fake_out.getvalue())
+                    self.assertIn("Devcontainer:", fake_out.getvalue())
+
+            # 3b. Test session devcontainer generation
+            devcontainer_args = [
+                'ros-maintainer-harness', '-w', ws_root, 'session', 'devcontainer', 'session-pr-42',
+                '--distro', 'humble'
+            ]
+            with patch.object(sys, 'argv', devcontainer_args):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn("Generated .devcontainer configuration", fake_out.getvalue())
 
             # 4. Test session list
             with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', ws_root, 'session', 'list']):

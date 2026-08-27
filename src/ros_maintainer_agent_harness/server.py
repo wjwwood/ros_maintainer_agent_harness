@@ -493,21 +493,30 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
     def create_session(
         session_id: str,
         topic: Optional[str] = None,
+        distro: str = 'rolling',
+        custom_image: Optional[str] = None,
         repo_path: Optional[str] = None,
         branch: Optional[str] = None,
         base_ref: str = 'HEAD',
     ) -> Dict[str, Any]:
         """
-        Create a new session directory layout and optional Git worktree.
+        Create a new session directory layout, .devcontainer config, and optional Git worktree.
 
         Args:
             session_id: Unique session ID (e.g. 'session-pr-160').
             topic: Optional PR/task topic description.
+            distro: Target ROS 2 distribution (e.g. 'rolling', 'jazzy', 'humble').
+            custom_image: Optional custom Docker container image override.
             repo_path: Optional path to Git repository for linking worktree.
             branch: Optional branch name for worktree.
             base_ref: Base ref/commit (default: 'HEAD').
         """
-        info = session_mgr.create_session(session_id, topic=topic)
+        info = session_mgr.create_session(
+            session_id,
+            topic=topic,
+            distro=distro,
+            custom_image=custom_image,
+        )
         worktree_path = None
         if repo_path and branch:
             worktree_path = str(session_mgr.attach_worktree(
@@ -526,6 +535,8 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             'log_dir': str(info.log_dir),
             'scratch_dir': str(info.scratch_dir),
             'timeline_path': str(info.timeline_path),
+            'devcontainer_path': str(info.devcontainer_path) if info.devcontainer_path else None,
+            'distro': info.distro,
             'worktree_path': worktree_path,
         }
 

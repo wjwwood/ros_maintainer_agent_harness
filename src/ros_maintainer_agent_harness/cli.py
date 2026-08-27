@@ -19,6 +19,7 @@ import sys
 
 from .approval import ApprovalManager
 from .audit import format_audit_record, read_audit_records
+from .devcontainer import write_devcontainer_config
 from .rules import MaintainerRules
 from .server import run_server
 from .workspace import WorkspaceLayout
@@ -57,8 +58,15 @@ def handle_session_create(args: argparse.Namespace) -> int:
         layout.initialize()
 
     mgr = SessionManager(layout)
-    session = mgr.create_session(args.session_id, topic=args.topic)
-    print(f"✅ Created session '{args.session_id}' at: {session.session_dir}")
+    session = mgr.create_session(
+        session_id=args.session_id,
+        topic=args.topic,
+        distro=args.distro or 'rolling',
+        custom_image=args.image,
+    )
+    print(f"✅ Created session '{args.session_id}' (distro: {session.distro}) at: {session.session_dir}")
+    if session.devcontainer_path:
+        print(f"  - Devcontainer: {session.devcontainer_path}")
 
     if args.repo and args.branch:
         repo_path = Path(args.repo).resolve()
@@ -74,6 +82,26 @@ def handle_session_create(args: argparse.Namespace) -> int:
         )
         print(f"  - Attached worktree: {wt_path} (branch: {args.branch})")
 
+    return 0
+
+
+def handle_session_devcontainer(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    mgr = SessionManager(layout)
+
+    if not mgr.session_exists(args.session_id):
+        print(f"Error: Session '{args.session_id}' does not exist.", file=sys.stderr)
+        return 1
+
+    session_dir = mgr.get_session_dir(args.session_id)
+    config_file = write_devcontainer_config(
+        session_dir=session_dir,
+        workspace_root=layout.root,
+        distro=args.distro or 'rolling',
+        custom_image=args.image,
+    )
+    print(f"✅ Generated .devcontainer configuration at: {config_file}")
     return 0
 
 
@@ -299,11 +327,21 @@ def parse_args():
     s_create = session_subparsers.add_parser('create', help='Create a new session workspace')
     s_create.add_argument('session_id', type=str, help='Unique session identifier (e.g. session-pr-160)')
     s_create.add_argument('--topic', type=str, default=None, help='Short topic/PR description')
+    s_create.add_argument('--distro', type=str, default='rolling', help='Target ROS distro (default: rolling)')
+    s_create.add_argument('--image', type=str, default=None, help='Custom Docker image override')
     s_create.add_argument('--repo', type=str, default=None, help='Path to source repository for worktree')
     s_create.add_argument('--branch', type=str, default=None, help='Branch name for session worktree')
     s_create.add_argument(
         '--base', type=str, default='HEAD', help='Base branch/commit to branch from (default: HEAD)'
     )
+
+    # session devcontainer
+    s_devcontainer = session_subparsers.add_parser(
+        'devcontainer', help='Generate .devcontainer configuration for session'
+    )
+    s_devcontainer.add_argument('session_id', type=str, help='Session ID')
+    s_devcontainer.add_argument('--distro', type=str, default='rolling', help='Target ROS distro (default: rolling)')
+    s_devcontainer.add_argument('--image', type=str, default=None, help='Custom Docker image override')
 
     # session list
     session_subparsers.add_parser('list', help='List active sessions')
@@ -375,6 +413,8 @@ def main():
     elif args.command == 'session':
         if args.session_action == 'create':
             return handle_session_create(args)
+        elif args.session_action == 'devcontainer':
+            return handle_session_devcontainer(args)
         elif args.session_action == 'list':
             return handle_session_list(args)
         elif args.session_action == 'prune':

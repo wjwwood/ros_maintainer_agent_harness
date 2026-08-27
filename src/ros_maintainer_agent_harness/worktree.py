@@ -18,6 +18,7 @@ import shutil
 import subprocess
 from typing import Dict, List, Optional
 
+from .devcontainer import write_devcontainer_config
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
 
@@ -32,6 +33,8 @@ class SessionInfo:
     log_dir: Path
     scratch_dir: Path
     timeline_path: Path
+    devcontainer_path: Optional[Path] = None
+    distro: str = 'rolling'
     active_branches: Dict[str, str] = dataclasses.field(default_factory=dict)
 
 
@@ -51,9 +54,13 @@ class SessionManager:
         self,
         session_id: str,
         topic: Optional[str] = None,
+        distro: str = 'rolling',
+        custom_image: Optional[str] = None,
+        gateway_url: Optional[str] = None,
     ) -> SessionInfo:
         """
-        Create a new session workspace with src, build, install, log, and scratch directories.
+        Create a new session workspace with src, build, install, log, scratch,
+        and .devcontainer configuration.
         """
         session_dir = self.get_session_dir(session_id)
         src_dir = session_dir / 'src'
@@ -67,6 +74,15 @@ class SessionManager:
         install_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
         scratch_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write .devcontainer/devcontainer.json
+        devcontainer_file = write_devcontainer_config(
+            session_dir=session_dir,
+            workspace_root=self.workspace.root,
+            distro=distro,
+            custom_image=custom_image,
+            gateway_url=gateway_url,
+        )
 
         timeline = TimelineLogger(
             session_id=session_id,
@@ -84,6 +100,8 @@ class SessionManager:
             log_dir=log_dir,
             scratch_dir=scratch_dir,
             timeline_path=session_dir / 'timeline.md',
+            devcontainer_path=devcontainer_file,
+            distro=distro,
         )
 
     def attach_worktree(
