@@ -17,7 +17,10 @@ import os
 from pathlib import Path
 import sys
 
+from .approval import ApprovalManager, ApprovalStatus
+from .audit import format_audit_record, read_audit_records
 from .rules import MaintainerRules
+from .server import run_server
 from .workspace import WorkspaceLayout
 from .worktree import SessionManager
 
@@ -135,6 +138,133 @@ def handle_rules(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_serve(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    if not layout.is_initialized():
+        layout.initialize()
+
+    policy = layout.get_policy()
+    transport = args.transport or policy.server.transport or 'stdio'
+    host = args.host or policy.server.host or '127.0.0.1'
+    port = args.port or policy.server.port or 8765
+
+    print(f"🚀 Starting ROS Maintainer MCP Server Gateway on {host}:{port} (transport: {transport})...")
+    run_server(workspace=layout, transport=transport, host=host, port=port)
+    return 0
+
+
+def handle_policy(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    policy = layout.get_policy()
+
+    if args.policy_action == 'show':
+        if layout.policy_path.exists():
+            with open(layout.policy_path, 'r', encoding='utf-8') as f:
+                print(f.read())
+        else:
+            print("Policy file does not exist. Run `ros-maintainer-harness init` first.")
+        return 0
+    elif args.policy_action == 'check':
+        if not args.branch:
+            print("Error: --branch is required for policy check.", file=sys.stderr)
+            return 1
+        allowed, msg, requires_approval = policy.validate_git_push(
+            branch_name=args.branch,
+            repo_full_name=args.repo,
+            force_with_lease=args.force_with_lease,
+            force=args.force,
+        )
+        if allowed:
+            if requires_approval:
+                print(f"⚠️  POLICY PENDING: {msg}")
+            else:
+                print(f"✅ POLICY ALLOWED: Branch '{args.branch}' is permitted.")
+        else:
+            print(f"❌ POLICY DENIED: {msg}", file=sys.stderr)
+            return 1
+        return 0
+
+    return 0
+
+
+def handle_audit(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+
+    if not layout.audit_log_path.exists():
+        print(f"No audit log records found at: {layout.audit_log_path}")
+        return 0
+
+    records = read_audit_records(
+        audit_log_path=layout.audit_log_path,
+        limit=args.limit,
+        session_id=args.session,
+        action=args.action_type,
+        status=args.status,
+    )
+
+    if not records:
+        print("No matching audit log entries found.")
+        return 0
+
+    print(f"\nAudit Log Records ({len(records)} entries):")
+    print("=" * 90)
+    for rec in records:
+        print(format_audit_record(rec))
+    print("=" * 90)
+    return 0
+
+
+def handle_approval(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    approval_mgr = ApprovalManager(layout.audit_dir / 'approvals.json')
+
+    if args.approval_action == 'list':
+        requests = approval_mgr.list_requests(status=args.status)
+        if not requests:
+            print("No approval requests found.")
+            return 0
+        print(f"\nApproval Requests ({len(requests)}):")
+        print("=" * 80)
+        for r in requests:
+            print(f"🎟️  Ticket: {r.ticket_id} [{r.status}]")
+            print(f"   Action: {r.action} -> {r.target}")
+            print(f"   Reason: {r.reason}")
+            if r.resolved_by:
+                print(f"   Resolved by: {r.resolved_by} (comment: {r.resolution_comment})")
+            print("-" * 80)
+        return 0
+    elif args.approval_action == 'approve':
+        try:
+            req = approval_mgr.approve_request(
+                ticket_id=args.ticket_id,
+                maintainer=args.maintainer or 'maintainer',
+                comment=args.comment,
+            )
+            print(f"✅ Approved ticket '{req.ticket_id}' for action '{req.action}'.")
+            return 0
+        except KeyError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+    elif args.approval_action == 'reject':
+        try:
+            req = approval_mgr.reject_request(
+                ticket_id=args.ticket_id,
+                maintainer=args.maintainer or 'maintainer',
+                comment=args.comment,
+            )
+            print(f"❌ Rejected ticket '{req.ticket_id}' for action '{req.action}'.")
+            return 0
+        except KeyError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         prog='ros-maintainer-harness',
@@ -151,6 +281,15 @@ def parse_args():
 
     # init
     subparsers.add_parser('init', help='Initialize workspace layout and default configs')
+
+    # serve
+    serve_parser = subparsers.add_parser('serve', help='Run the Host MCP Server Gateway')
+    serve_parser.add_argument(
+        '--transport', choices=['stdio', 'sse', 'streamable-http'], default=None,
+        help='MCP transport protocol (stdio, sse, or streamable-http)',
+    )
+    serve_parser.add_argument('--host', type=str, default=None, help='Server host (default: 127.0.0.1)')
+    serve_parser.add_argument('--port', type=int, default=None, help='Server port (default: 8765)')
 
     # session
     session_parser = subparsers.add_parser('session', help='Manage multi-task session environments')
@@ -184,6 +323,41 @@ def parse_args():
     r_add.add_argument('category', type=str, help='Category name (e.g. Git, CI, Testing)')
     r_add.add_argument('rule', type=str, help='Rule text description')
 
+    # policy
+    policy_parser = subparsers.add_parser('policy', help='Inspect or test safety policies')
+    policy_subparsers = policy_parser.add_subparsers(dest='policy_action')
+    policy_subparsers.add_parser('show', help='Show policy.yaml configuration')
+    p_check = policy_subparsers.add_parser('check', help='Check whether a git push or action is allowed')
+    p_check.add_argument('--branch', type=str, required=True, help='Branch name to check')
+    p_check.add_argument('--repo', type=str, default=None, help='Repository full name (e.g. ros2/rclcpp)')
+    p_check.add_argument('--force', action='store_true', help='Check force push')
+    p_check.add_argument('--force-with-lease', action='store_true', help='Check force-with-lease push')
+
+    # audit
+    audit_parser = subparsers.add_parser('audit', help='Inspect audit logs')
+    audit_subparsers = audit_parser.add_subparsers(dest='audit_action')
+    a_show = audit_subparsers.add_parser('show', help='Show recent audit log records')
+    a_show.add_argument('-n', '--limit', type=int, default=20, help='Maximum number of records to show')
+    a_show.add_argument('--session', type=str, default=None, help='Filter by session ID')
+    a_show.add_argument('--action-type', type=str, default=None, help='Filter by action type')
+    a_show.add_argument('--status', type=str, default=None, help='Filter by status (APPROVED, DENIED, etc.)')
+
+    # approval
+    appr_parser = subparsers.add_parser('approval', help='Manage maintainer approval tickets')
+    appr_subparsers = appr_parser.add_subparsers(dest='approval_action')
+    appr_list = appr_subparsers.add_parser('list', help='List approval requests')
+    appr_list.add_argument('--status', choices=['PENDING', 'APPROVED', 'REJECTED'], default=None)
+
+    appr_ok = appr_subparsers.add_parser('approve', help='Approve an approval request')
+    appr_ok.add_argument('ticket_id', type=str, help='Ticket ID to approve')
+    appr_ok.add_argument('--maintainer', type=str, default='maintainer', help='Approver name')
+    appr_ok.add_argument('--comment', type=str, default=None, help='Approval comment')
+
+    appr_no = appr_subparsers.add_parser('reject', help='Reject an approval request')
+    appr_no.add_argument('ticket_id', type=str, help='Ticket ID to reject')
+    appr_no.add_argument('--maintainer', type=str, default='maintainer', help='Rejecter name')
+    appr_no.add_argument('--comment', type=str, default=None, help='Rejection comment')
+
     return parser.parse_args()
 
 
@@ -196,6 +370,8 @@ def main():
 
     if args.command == 'init':
         return handle_init(args)
+    elif args.command == 'serve':
+        return handle_serve(args)
     elif args.command == 'session':
         if args.session_action == 'create':
             return handle_session_create(args)
@@ -208,6 +384,12 @@ def main():
             return 0
     elif args.command == 'rules':
         return handle_rules(args)
+    elif args.command == 'policy':
+        return handle_policy(args)
+    elif args.command == 'audit':
+        return handle_audit(args)
+    elif args.command == 'approval':
+        return handle_approval(args)
 
     return 0
 

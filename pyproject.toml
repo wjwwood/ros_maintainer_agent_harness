@@ -18,6 +18,9 @@ classifiers = [
 requires-python = ">=3.8"
 dependencies = [
     "pyyaml>=5.3",
+    "mcp>=1.0.0",
+    "requests>=2.25.0",
+    "PyGithub>=1.55",
 ]
 
 [project.scripts]

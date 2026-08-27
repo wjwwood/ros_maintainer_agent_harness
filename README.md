@@ -92,16 +92,71 @@ The harness manages workspaces using **Linked Git Worktrees** and session overla
 
 ---
 
-## 🔧 MCP Tools
+---
 
-| Tool Name | Description |
-| :--- | :--- |
-| `log_status` | Records a progress note or milestone to the session `timeline.md`. |
-| `git_push` | Pushes a branch under strict maintainer branch & fork policies. |
-| `ci_trigger` | Launches Jenkins CI on `ci.ros2.org` for specified PRs/branches. |
-| `ci_cancel_jobs` | Cancels superseded or aborted Jenkins jobs. |
-| `ci_update_comment` | Updates the GitHub CI status comment with rescheduled builds. |
-| `pr_create_draft` | Generates a draft PR payload and requests maintainer approval. |
+## 🔧 MCP Tools Exposed by Host Gateway
+
+| Tool Name | Scope | Description |
+| :--- | :--- | :--- |
+| `log_status` | Local / Timeline | Records progress notes or milestone events to `sessions/<id>/timeline.md`. |
+| `git_push` | Remote / Guarded | Pushes local branch to remote repository under strict branch allowlists, base distro protection, and external fork approval guards. |
+| `launch_jenkins_ci` | Remote / CI | Launches Jenkins CI on `ci.ros2.org` with concurrency limits and cooldown enforcement. |
+| `find_restarted_ci` | Remote / CI | Discovers rescheduled/queued Jenkins jobs and optionally updates GitHub PR status comment markdown. |
+| `create_pull_request` | Remote / PR | Creates a GitHub Pull Request with mandatory interactive maintainer approval. |
+| `check_policy` | Policy Pre-flight | Tests whether a branch name, repo, or CI launch complies with maintainer policy before attempting it. |
+| `create_session` | Workspace | Provisions an isolated session workspace with build/install/log overlays and linked Git worktree. |
+| `list_sessions` | Workspace | Lists active sessions and their attached Git worktrees. |
+| `prune_session` | Workspace | Cleans up session directory and linked worktrees with audit logging. |
+| `get_maintainer_rules` | Rules | Returns human-readable maintainer style, CI, and git conventions from `maintainer_rules.md`. |
+| `add_maintainer_rule` | Rules | Appends a new preference rule into `maintainer_rules.md` and records audit entry. |
+| `list_approval_requests`| Approvals | Lists pending or resolved maintainer approval requests. |
+| `respond_approval_request`| Approvals | Approves or rejects a pending maintainer approval ticket. |
+
+---
+
+## 💻 CLI Usage
+
+```bash
+# 1. Initialize Maintainer Workspace
+ros-maintainer-harness init
+
+# 2. Run Host MCP Server Gateway (stdio mode for AI tool integration)
+ros-maintainer-harness serve --transport stdio
+
+# Or run standing background daemon (SSE mode)
+ros-maintainer-harness serve --transport sse --port 8765
+
+# 3. Create and manage session worktrees
+ros-maintainer-harness session create session-pr-160 --topic "Fix memory leak" --repo ~/ros2_maintainer_ws/shared_repos/ros2/rclcpp --branch wjwwood/fix_leak
+ros-maintainer-harness session list
+ros-maintainer-harness session prune session-pr-160
+
+# 4. View and check policies
+ros-maintainer-harness policy show
+ros-maintainer-harness policy check --branch wjwwood/fix_leak --repo ros2/rclcpp
+
+# 5. Inspect audit log and approval tickets
+ros-maintainer-harness audit show -n 20
+ros-maintainer-harness approval list --status PENDING
+ros-maintainer-harness approval approve req-abcd1234 --comment "Looks good to push"
+```
+
+---
+
+## ⚙️ MCP Client Configuration
+
+To connect your AI assistant (e.g. Antigravity, Claude Code, Cursor, Claude Desktop) to the host gateway:
+
+```json
+{
+  "mcpServers": {
+    "ros-maintainer-harness": {
+      "command": "ros-maintainer-harness",
+      "args": ["serve", "--transport", "stdio", "--workspace", "~/ros_maintainer_ws"]
+    }
+  }
+}
+```
 
 ---
 
@@ -115,3 +170,4 @@ For in-depth architectural details, trust boundaries, multi-session Git worktree
 ## 📜 License
 
 This project is licensed under the [Apache License, Version 2.0](LICENSE).
+
