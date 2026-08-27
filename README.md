@@ -105,6 +105,13 @@ The harness manages workspaces using **Linked Git Worktrees** and session overla
 
 ---
 
+## 📚 Documentation
+
+For in-depth architectural details, trust boundaries, multi-session Git worktree management, and policy specifications, see:
+* [Architecture & Design Plan](docs/design.md)
+
+---
+
 ## 📜 License
 
 This project is licensed under the [Apache License, Version 2.0](LICENSE).
