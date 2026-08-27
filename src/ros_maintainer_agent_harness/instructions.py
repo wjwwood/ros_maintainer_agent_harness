@@ -75,4 +75,16 @@ All remote mutations (e.g. `git push`, triggering Jenkins CI, opening PRs) are p
    - Pushing to 3rd-party contributor forks or creating PRs requires maintainer ticket approval.
 4. **Mandatory Audit Reasons**:
    - Every mutating tool call requires an explicit, clear `reason` explaining why the action is performed.
+
+---
+
+## 4. CI Monitoring & Token Efficiency
+
+To conserve tokens and context window:
+- **Do not poll Jenkins in a manual loop**:
+  - Use the host gateway tool `get_ci_status(wait_for_completion=True)` or run `ros-ci-status <job_url> --wait`.
+  - The host server polls Jenkins directly in the background and returns structured test reports when complete.
+- **Concise Error Summaries**:
+  - If a build fails, use `get_ci_summary` to inspect failed test names, error messages,
+    and extracted compiler error excerpts rather than fetching massive raw console logs.
 """

@@ -19,6 +19,7 @@ import sys
 
 from .approval import ApprovalManager
 from .audit import format_audit_record, read_audit_records
+from .ci import CITracker, JenkinsManager
 from .devcontainer import write_devcontainer_config
 from .rules import MaintainerRules
 from .server import run_server
@@ -293,6 +294,115 @@ def handle_approval(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_ci(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    ci_tracker = CITracker(layout.ci_runs_path)
+    policy = layout.get_policy()
+    jenkins_mgr = JenkinsManager(ci_server=policy.jenkins_ci.ci_server, tracker=ci_tracker)
+
+    if args.ci_action == 'list':
+        runs = ci_tracker.list_runs(session_id=args.session, pr_url=args.pr, status=args.status, limit=args.limit)
+        if not runs:
+            print("No CI runs found.")
+            return 0
+        print(f"{'STATUS':<12} {'BUILD #':<10} {'PR':<30} {'SESSION':<20} {'JOB URL'}")
+        print("-" * 100)
+        for r in runs:
+            print(f"{r.status:<12} {r.build_num:<10} {r.pr_url:<30} {r.session_id:<20} {r.job_url}")
+        return 0
+
+    elif args.ci_action == 'status':
+        run = ci_tracker.get_run(args.target)
+        target_url = run.job_url if run else args.target
+
+        if args.wait:
+            print(f"Polling CI build at '{target_url}' (timeout: {args.timeout}s)...")
+            res = jenkins_mgr.poll_job_until_complete(
+                target_url,
+                timeout_seconds=float(args.timeout),
+                poll_interval_seconds=float(args.interval),
+            )
+            if run and res.get('success'):
+                ci_tracker.update_run(
+                    job_url=target_url,
+                    status=res.get('status'),
+                    duration_seconds=res.get('duration_seconds'),
+                    test_summary=res.get('test_summary'),
+                    failure_reason=res.get('failure_reason'),
+                    log_excerpt=res.get('log_excerpt'),
+                    artifacts=res.get('artifacts', []),
+                )
+        else:
+            res = jenkins_mgr.fetch_build_status(target_url)
+
+        if not res.get('success'):
+            print(f"Error: {res.get('error', 'Failed to fetch build status')}", file=sys.stderr)
+            return 1
+
+        print(f"Build Status: {res.get('status')}")
+        if res.get('duration_seconds'):
+            print(f"Duration:     {res['duration_seconds']:.1f}s")
+        if res.get('full_display_name'):
+            print(f"Display Name: {res['full_display_name']}")
+        print(f"Job URL:      {target_url}")
+
+        test_summary = res.get('test_summary') or jenkins_mgr.fetch_test_report(target_url)
+        if test_summary.get('success'):
+            tot = test_summary.get('total', 0)
+            pas = test_summary.get('passed', 0)
+            fai = test_summary.get('failed', 0)
+            skp = test_summary.get('skipped', 0)
+            print(f"Tests:        Total: {tot}, Passed: {pas}, Failed: {fai}, Skipped: {skp}")
+            failures = test_summary.get('failures', [])
+            if failures:
+                print("\nFailed Tests:")
+                for f in failures[:10]:
+                    print(f"  ❌ {f.get('class_name')}.{f.get('name')}")
+                    if f.get('error_details'):
+                        print(f"     Details: {f['error_details'][:150]}")
+        return 0
+
+    elif args.ci_action == 'summary':
+        run = ci_tracker.get_run(args.target)
+        target_url = run.job_url if run else args.target
+
+        build_info = jenkins_mgr.fetch_build_status(target_url)
+        test_report = jenkins_mgr.fetch_test_report(target_url)
+        status = build_info.get('status', 'UNKNOWN')
+
+        print(f"=== CI Summary for {target_url} ===")
+        print(f"Status: {status}")
+        if build_info.get('duration_seconds'):
+            print(f"Duration: {build_info['duration_seconds']:.1f}s")
+        if test_report.get('success'):
+            pas = test_report.get('passed', 0)
+            tot = test_report.get('total', 0)
+            fai = test_report.get('failed', 0)
+            print(f"Tests: Passed: {pas} / Total: {tot} (Failed: {fai})")
+            for f in test_report.get('failures', [])[:10]:
+                print(f"  ❌ {f.get('name')}: {f.get('error_details', '')[:100]}")
+
+        if status in ('FAILURE', 'UNSTABLE'):
+            excerpt = jenkins_mgr.fetch_console_excerpt(target_url, max_lines=args.max_lines)
+            print("\n--- Console Log Excerpt ---")
+            print(excerpt)
+        return 0
+
+    elif args.ci_action == 'cancel':
+        run = ci_tracker.get_run(args.target)
+        target_url = run.job_url if run else args.target
+        res = jenkins_mgr.cancel_job(target_url)
+        if res.get('success'):
+            print(f"✅ Successfully cancelled CI build at '{target_url}'.")
+            return 0
+        else:
+            print(f"Error cancelling CI build: {res.get('error')}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         prog='ros-maintainer-harness',
@@ -399,6 +509,30 @@ def parse_args():
     appr_no.add_argument('--maintainer', type=str, default='maintainer', help='Rejecter name')
     appr_no.add_argument('--comment', type=str, default=None, help='Rejection comment')
 
+    # ci
+    ci_parser = subparsers.add_parser('ci', help='Query and monitor Jenkins CI runs')
+    ci_subparsers = ci_parser.add_subparsers(dest='ci_action')
+
+    ci_list = ci_subparsers.add_parser('list', help='List tracked CI runs')
+    ci_list.add_argument('--session', type=str, default=None, help='Filter by session ID')
+    ci_list.add_argument('--pr', type=str, default=None, help='Filter by PR URL or shorthand')
+    ci_list.add_argument('--status', type=str, default=None, help='Filter by status (RUNNING, SUCCESS, etc.)')
+    ci_list.add_argument('-n', '--limit', type=int, default=20, help='Max records to display')
+
+    ci_status = ci_subparsers.add_parser('status', help='Get build status for a CI job or PR')
+    ci_status.add_argument('target', type=str, help='Jenkins job URL, build number, or PR shorthand')
+    ci_status.add_argument('--wait', action='store_true', help='Block and poll until build finishes')
+    ci_status.add_argument('--timeout', type=int, default=120, help='Polling timeout in seconds (default: 120)')
+    ci_status.add_argument('--interval', type=float, default=5.0, help='Polling interval in seconds (default: 5.0)')
+
+    ci_summary = ci_subparsers.add_parser('summary', help='Get concise failure diagnosis and log excerpt')
+    ci_summary.add_argument('target', type=str, help='Jenkins job URL, build number, or PR shorthand')
+    ci_summary.add_argument('--max-lines', type=int, default=50, help='Max lines of error log excerpt')
+
+    ci_cancel = ci_subparsers.add_parser('cancel', help='Abort a running Jenkins CI job')
+    ci_cancel.add_argument('target', type=str, help='Jenkins job URL or build number to cancel')
+    ci_cancel.add_argument('--reason', type=str, required=True, help='Reason for aborting the build')
+
     return parser.parse_args()
 
 
@@ -441,6 +575,8 @@ def main():
         return handle_audit(args)
     elif args.command == 'approval':
         return handle_approval(args)
+    elif args.command == 'ci':
+        return handle_ci(args)
 
     return 0
 
