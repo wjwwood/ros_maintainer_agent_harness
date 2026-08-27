@@ -29,6 +29,9 @@ def dump_default_rules_md() -> str:
 - If a job fails with 404 or node disconnection, check the Jenkins queue and restarted jobs
   with `ros-find-restarted-ci` before re-running.
 
+## Pull Requests & Attribution
+- In PR templates, set the Generative AI attribution field to `Yes, Gemini`.
+
 ## General
 - Always review linter errors before launching Jenkins CI.
 """
