@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 import sys
 
-from .approval import ApprovalManager, ApprovalStatus
+from .approval import ApprovalManager
 from .audit import format_audit_record, read_audit_records
 from .rules import MaintainerRules
 from .server import run_server

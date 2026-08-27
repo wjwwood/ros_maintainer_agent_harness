@@ -15,7 +15,6 @@
 import unittest
 
 from ros_maintainer_agent_harness.config import (
-    DEFAULT_BLOCKED_BRANCH_PATTERNS,
     GitPushPolicy,
     HarnessPolicy,
     JenkinsCIPolicy,

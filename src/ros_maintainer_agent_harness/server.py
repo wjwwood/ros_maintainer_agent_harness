@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -34,9 +33,8 @@ except ImportError:
                     return fn
                 return decorator
 
-from .approval import ApprovalManager, ApprovalStatus
-from .ci import CITracker, JenkinsManager, parse_pr_url
-from .config import HarnessPolicy
+from .approval import ApprovalManager
+from .ci import CITracker, JenkinsManager
 from .git_ops import (
     execute_git_push,
     extract_repo_full_name,

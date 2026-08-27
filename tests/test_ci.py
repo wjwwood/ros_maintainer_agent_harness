@@ -54,6 +54,7 @@ class TestCI(unittest.TestCase):
                 job_url='https://ci.ros2.org/job/ci_launcher/123/',
                 status='RUNNING',
             )
+            self.assertEqual(rec.status, 'RUNNING')
             self.assertEqual(tracker.get_active_runs_count('ros2/rclcpp#160'), 1)
             since = tracker.get_seconds_since_last_run('ros2/rclcpp#160')
             self.assertIsNotNone(since)
