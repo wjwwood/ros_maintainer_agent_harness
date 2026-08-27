@@ -75,7 +75,7 @@ class TestMCPServer(unittest.TestCase):
         self.assertIn('Completed local colcon build', res)
         timeline_file = self.workspace.sessions_dir / 'session-1' / 'timeline.md'
         self.assertTrue(timeline_file.exists())
-        content = timeline_file.read_text()
+        content = timeline_file.read_text(encoding='utf-8')
         self.assertIn('Build Succeeded', content)
         self.assertIn('Completed local colcon build', content)
 
