@@ -59,20 +59,18 @@ class MaintainerRules:
         """
         content = self.load_content() if self.rules_path.exists() else dump_default_rules_md()
         rule_bullet = f"- {rule.strip()}"
-
         section_header = f"## {category.strip()}"
 
-        if section_header in content:
-            # Insert bullet right after section header
-            lines = content.splitlines()
-            new_lines = []
-            inserted = False
-            for line in lines:
-                new_lines.append(line)
-                if not inserted and line.strip().lower() == section_header.lower():
-                    new_lines.append(rule_bullet)
-                    inserted = True
-            updated_content = "\n".join(new_lines) + "\n"
+        lines = content.splitlines()
+        header_idx = -1
+        for idx, line in enumerate(lines):
+            if line.strip().lower() == section_header.lower():
+                header_idx = idx
+                break
+
+        if header_idx != -1:
+            lines.insert(header_idx + 1, rule_bullet)
+            updated_content = "\n".join(lines) + "\n"
         else:
             # Append new section at bottom
             updated_content = content.rstrip() + f"\n\n{section_header}\n{rule_bullet}\n"

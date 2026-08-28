@@ -27,7 +27,7 @@ DEFAULT_BLOCKED_BRANCH_PATTERNS = [
 DEFAULT_ALLOWED_BRANCH_PATTERNS = [
     r'^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$',
     r'^fix/[a-zA-Z0-9_-]+$',
-    r'^patch-\d+$',
+    r'^patch-[0-9]+$',
 ]
 
 DEFAULT_ALLOWED_REPOSITORIES = [
@@ -177,7 +177,13 @@ class HarnessPolicy:
             )
 
         # 5. Check repository allowlist
-        if repo_full_name:
+        if self.git_push.allowed_repositories:
+            if not repo_full_name or not repo_full_name.strip():
+                return (
+                    False,
+                    "Repository allowlist is enforced but target repository name is unknown or unspecified.",
+                    True,
+                )
             if not self.is_repository_allowed(repo_full_name):
                 # Also allow user's own fork if configured
                 if not (self.github_username and repo_full_name.startswith(f"{self.github_username}/")):
@@ -312,7 +318,7 @@ policies:
     allowed_branch_patterns:
       - '^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$'
       - '^fix/[a-zA-Z0-9_-]+$'
-      - '^patch-\\\\d+$'
+      - '^patch-[0-9]+$'
     blocked_branch_patterns:
       - '^(main|master|rolling|jazzy|iron|humble|galactic|foxy|kilted|lyrical|noetic)$'
     allowed_repositories:

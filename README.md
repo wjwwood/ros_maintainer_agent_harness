@@ -114,10 +114,12 @@ The harness manages workspaces using **Linked Git Worktrees** and session overla
 
 ---
 
+---
+
 ## 💻 CLI Usage
 
 ```bash
-# 1. Initialize Maintainer Workspace
+# 1. Initialize Maintainer Workspace and Tool Catalog
 ros-maintainer-harness init
 
 # 2. Run Host MCP Server Gateway (stdio mode for AI tool integration)
@@ -126,8 +128,14 @@ ros-maintainer-harness serve --transport stdio
 # Or run standing background daemon (SSE mode)
 ros-maintainer-harness serve --transport sse --port 8765
 
-# 3. Create and manage session worktrees
-ros-maintainer-harness session create session-pr-160 --topic "Fix memory leak" --repo ~/ros2_maintainer_ws/shared_repos/ros2/rclcpp --branch wjwwood/fix_leak
+# 3. Create and manage session worktrees with Devcontainer Sandboxes
+ros-maintainer-harness session create session-pr-160 --distro jazzy --topic "Fix memory leak" \
+  --repo ~/ros_maintainer_ws/shared_repos/ros2/rclcpp --branch wjwwood/fix_leak
+
+# Generate or update .devcontainer/devcontainer.json for a session
+ros-maintainer-harness session devcontainer session-pr-160 --distro rolling
+
+# Inspect active sessions and linked worktrees
 ros-maintainer-harness session list
 ros-maintainer-harness session prune session-pr-160
 
@@ -140,6 +148,19 @@ ros-maintainer-harness audit show -n 20
 ros-maintainer-harness approval list --status PENDING
 ros-maintainer-harness approval approve req-abcd1234 --comment "Looks good to push"
 ```
+
+---
+
+## 📦 Container Tools & Environment
+
+Every session includes an automated `.devcontainer/devcontainer.json` environment configured for containerized execution:
+* **Workspace Bind Mounts**: Session `src/`, `build/`, `install/`, `log/`, `scratch/`, and `timeline.md` mounted at `/workspace`.
+* **Shared Tool Catalog**: Host `tools/bin/` mounted at `/workspace/tools/bin` and prepended to container `$PATH`:
+  - `ros-find-restarted-ci [-u] <PR_OR_COMMENT_URL>`: Inspects Jenkins build farm for rescheduled jobs and updates PR comments.
+  - `ros-ci-for-pr [--distro <distro>] [--only-fixes-test] <PR_URL>`: Submits CI launch jobs.
+  - `ros-session-status [-m <milestone>] "<message>"`: Logs narrative notes and milestones to `timeline.md`.
+* **Read-Only Maintainer Preferences**: `config/maintainer_rules.md` mounted read-only at `/workspace/MAINTAINER_RULES.md`.
+* **Host Gateway Integration**: Configured via `ROS_MAINTAINER_GATEWAY_URL` and `host.docker.internal` network routing.
 
 ---
 

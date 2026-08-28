@@ -14,12 +14,27 @@
 
 import dataclasses
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from typing import Dict, List, Optional
 
+from .devcontainer import write_devcontainer_config
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
+
+SESSION_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+SUBFOLDER_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_.-]+$')
+
+
+def validate_session_id(session_id: str) -> str:
+    """Validate that session_id contains only alphanumeric, hyphen, and underscore characters."""
+    if not session_id or not SESSION_ID_PATTERN.match(session_id):
+        raise ValueError(
+            f"Invalid session_id '{session_id}': "
+            "must consist only of alphanumeric characters, hyphens, and underscores."
+        )
+    return session_id
 
 
 @dataclasses.dataclass
@@ -32,6 +47,8 @@ class SessionInfo:
     log_dir: Path
     scratch_dir: Path
     timeline_path: Path
+    devcontainer_path: Optional[Path] = None
+    distro: str = 'rolling'
     active_branches: Dict[str, str] = dataclasses.field(default_factory=dict)
 
 
@@ -42,7 +59,11 @@ class SessionManager:
         self.workspace = workspace
 
     def get_session_dir(self, session_id: str) -> Path:
-        return self.workspace.sessions_dir / session_id
+        valid_id = validate_session_id(session_id)
+        target = (self.workspace.sessions_dir / valid_id).resolve()
+        if not target.is_relative_to(self.workspace.sessions_dir.resolve()):
+            raise ValueError(f"Path traversal detected in session_id '{session_id}'")
+        return target
 
     def session_exists(self, session_id: str) -> bool:
         return self.get_session_dir(session_id).exists()
@@ -51,9 +72,13 @@ class SessionManager:
         self,
         session_id: str,
         topic: Optional[str] = None,
+        distro: str = 'rolling',
+        custom_image: Optional[str] = None,
+        gateway_url: Optional[str] = None,
     ) -> SessionInfo:
         """
-        Create a new session workspace with src, build, install, log, and scratch directories.
+        Create a new session workspace with src, build, install, log, scratch,
+        and .devcontainer configuration.
         """
         session_dir = self.get_session_dir(session_id)
         src_dir = session_dir / 'src'
@@ -67,6 +92,15 @@ class SessionManager:
         install_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
         scratch_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write .devcontainer/devcontainer.json
+        devcontainer_file = write_devcontainer_config(
+            session_dir=session_dir,
+            workspace_root=self.workspace.root,
+            distro=distro,
+            custom_image=custom_image,
+            gateway_url=gateway_url,
+        )
 
         timeline = TimelineLogger(
             session_id=session_id,
@@ -84,6 +118,8 @@ class SessionManager:
             log_dir=log_dir,
             scratch_dir=scratch_dir,
             timeline_path=session_dir / 'timeline.md',
+            devcontainer_path=devcontainer_file,
+            distro=distro,
         )
 
     def attach_worktree(
@@ -101,8 +137,16 @@ class SessionManager:
             self.create_session(session_id)
 
         session_dir = self.get_session_dir(session_id)
-        repo_name = target_subfolder or repo_dir.name
-        worktree_target = session_dir / 'src' / repo_name
+        if target_subfolder:
+            if not SUBFOLDER_NAME_PATTERN.match(target_subfolder) or '..' in target_subfolder:
+                raise ValueError(f"Invalid target_subfolder '{target_subfolder}'")
+            repo_name = target_subfolder
+        else:
+            repo_name = repo_dir.name
+
+        worktree_target = (session_dir / 'src' / repo_name).resolve()
+        if not worktree_target.is_relative_to((session_dir / 'src').resolve()):
+            raise ValueError(f"Path traversal detected in target_subfolder '{target_subfolder}'")
 
         if worktree_target.exists():
             return worktree_target
@@ -117,10 +161,10 @@ class SessionManager:
 
         if branch_check.returncode == 0:
             # Branch exists; checkout existing branch in worktree
-            cmd = ['git', 'worktree', 'add', str(worktree_target), branch_name]
+            cmd = ['git', 'worktree', 'add', '--', str(worktree_target), branch_name]
         else:
             # Create new branch based on base_ref
-            cmd = ['git', 'worktree', 'add', '-b', branch_name, str(worktree_target), base_ref]
+            cmd = ['git', 'worktree', 'add', '-b', branch_name, '--', str(worktree_target), base_ref]
 
         res = subprocess.run(cmd, cwd=str(repo_dir), capture_output=True, text=True)
         if res.returncode != 0:

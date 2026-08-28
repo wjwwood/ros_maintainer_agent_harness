@@ -45,7 +45,7 @@ class TestPolicyValidation(unittest.TestCase):
         ]
         for branch in base_branches:
             self.assertFalse(self.policy.is_branch_push_allowed(branch))
-            allowed, msg, _ = self.policy.validate_git_push(branch_name=branch)
+            allowed, msg, _ = self.policy.validate_git_push(branch_name=branch, repo_full_name='ros2/rclcpp')
             self.assertFalse(allowed)
             self.assertIn("forbidden by safety policy", msg)
 
@@ -74,9 +74,17 @@ class TestPolicyValidation(unittest.TestCase):
         ]
         for branch in invalid_branches:
             self.assertFalse(self.policy.is_branch_push_allowed(branch))
-            allowed, msg, _ = self.policy.validate_git_push(branch_name=branch)
+            allowed, msg, _ = self.policy.validate_git_push(branch_name=branch, repo_full_name='ros2/rclcpp')
             self.assertFalse(allowed)
             self.assertIn("does not match allowed branch naming patterns", msg)
+
+    def test_unspecified_repo_rejected_when_allowlist_enforced(self):
+        allowed, msg, req_appr = self.policy.validate_git_push(
+            branch_name='wjwwood/fix_topic', repo_full_name=None
+        )
+        self.assertFalse(allowed)
+        self.assertTrue(req_appr)
+        self.assertIn("Repository allowlist is enforced", msg)
 
     def test_repository_allowlist(self):
         allowed_repos = ['ros2/rclcpp', 'ros2/rmw', 'ros-tooling/ros-github-scripts']

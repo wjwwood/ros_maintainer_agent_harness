@@ -87,6 +87,22 @@ class TestSessionManager(unittest.TestCase):
             self.assertFalse(session.session_dir.exists())
             self.assertEqual(len(mgr.list_sessions()), 0)
 
+    def test_session_id_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            layout = WorkspaceLayout(Path(temp_dir) / 'ws')
+            layout.initialize()
+            mgr = SessionManager(layout)
+
+            # Test invalid characters and path traversal attempts
+            with self.assertRaises(ValueError):
+                mgr.create_session('../invalid_traversal')
+            with self.assertRaises(ValueError):
+                mgr.create_session('session with spaces')
+            with self.assertRaises(ValueError):
+                mgr.create_session('session/subfolder')
+            with self.assertRaises(ValueError):
+                mgr.create_session('')
+
 
 if __name__ == '__main__':
     unittest.main()
