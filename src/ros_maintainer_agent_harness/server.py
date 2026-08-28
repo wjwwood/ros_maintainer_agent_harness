@@ -42,6 +42,7 @@ from .git_ops import (
 )
 from .mcp_config import get_agent_launch_info, write_session_mcp_configs
 from .rules import MaintainerRules
+from .scaffolder import scaffold_session_from_pr as do_scaffold_from_pr
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
 from .worktree import SessionManager
@@ -896,6 +897,42 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
         )
         launch_data['success'] = True
         return launch_data
+
+    # 20. scaffold_session_from_pr
+    @server.tool()
+    def scaffold_session_from_pr(
+        pr_ref: str,
+        session_id: Optional[str] = None,
+        distro: Optional[str] = None,
+        clone_if_missing: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Automatically scaffold a complete session directly from a GitHub Pull Request URL or shorthand:
+        - Fetches PR metadata (branch, diff, author, description).
+        - Clones/fetches PR branch into shared repositories.
+        - Creates isolated session workspace and linked worktree.
+        - Generates devcontainer and editor/agent MCP configs.
+        - Pre-populates timeline.md and writes TASK.md prompt.
+
+        Args:
+            pr_ref: PR URL or shorthand (e.g. 'https://github.com/ros2/rclcpp/pull/160' or 'ros2/rclcpp#160').
+            session_id: Optional custom session ID override (default: 'pr-<repo>-<number>').
+            distro: Optional ROS distro override (default: auto-detected from PR base branch).
+            clone_if_missing: Automatically clone base repository if not present in shared_repos.
+        """
+        try:
+            result = do_scaffold_from_pr(
+                workspace=workspace,
+                pr_ref=pr_ref,
+                session_id=session_id,
+                distro=distro,
+                clone_if_missing=clone_if_missing,
+            )
+            data = result.to_dict()
+            data['success'] = True
+            return data
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
 
     return server
 

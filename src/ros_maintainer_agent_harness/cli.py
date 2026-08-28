@@ -24,6 +24,7 @@ from .ci import CITracker, JenkinsManager
 from .devcontainer import write_devcontainer_config
 from .mcp_config import get_agent_launch_info, write_session_mcp_configs
 from .rules import MaintainerRules
+from .scaffolder import scaffold_session_from_pr
 from .server import run_server
 from .workspace import WorkspaceLayout
 from .worktree import SessionManager
@@ -223,6 +224,44 @@ def handle_session_mcp_config(args: argparse.Namespace) -> int:
     print(f"✅ Generated MCP client configuration files in session '{args.session_id}':")
     for fmt, p in written.items():
         print(f"  - {fmt:<8} -> {p}")
+    return 0
+
+
+def handle_session_from_pr(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+
+    print(f"🔍 Harvesting Pull Request metadata for '{args.pr_ref}'...")
+    try:
+        res = scaffold_session_from_pr(
+            workspace=layout,
+            pr_ref=args.pr_ref,
+            session_id=args.session_id,
+            distro=args.distro,
+        )
+    except Exception as e:
+        print(f"Error scaffolding session from PR: {e}", file=sys.stderr)
+        return 1
+
+    print(f"✅ Successfully scaffolded session '{res.session_id}':")
+    print(f"  - PR:         {res.pr_metadata.title} ({res.pr_metadata.url})")
+    print(f"  - Target:     {res.distro} (base: {res.pr_metadata.base_ref})")
+    print(f"  - Directory:  {res.session_dir}")
+    print(f"  - Worktree:   {res.worktree_path}")
+    print(f"  - Task File:  {res.task_file}")
+    print(f"  - Timeline:   {res.timeline_path}")
+
+    if args.launch:
+        launch_args = argparse.Namespace(
+            workspace=str(layout.root),
+            session_id=res.session_id,
+            agent=args.launch,
+            transport=None,
+            dry_run=False,
+            print_env=False,
+        )
+        return handle_session_launch(launch_args)
+
     return 0
 
 
@@ -570,6 +609,18 @@ def parse_args():
     s_mcp.add_argument('--host', type=str, default='127.0.0.1', help='Host for network transport')
     s_mcp.add_argument('--port', type=int, default=8765, help='Port for network transport')
 
+    # session from-pr
+    s_from_pr = session_subparsers.add_parser(
+        'from-pr', help='Automatically scaffold a session directly from a GitHub Pull Request'
+    )
+    s_from_pr.add_argument('pr_ref', type=str, help='PR URL or shorthand (e.g. ros2/rclcpp#160)')
+    s_from_pr.add_argument('--session-id', type=str, default=None, help='Custom session ID override')
+    s_from_pr.add_argument('--distro', type=str, default=None, help='Target ROS distro override')
+    s_from_pr.add_argument(
+        '--launch', choices=['claude', 'cursor', 'code', 'vscode', 'shell'], default=None,
+        help='Automatically launch agent or IDE after scaffolding',
+    )
+
     # rules
     rules_parser = subparsers.add_parser('rules', help='View or update maintainer style & preferences')
     rules_subparsers = rules_parser.add_subparsers(dest='rules_action')
@@ -672,6 +723,8 @@ def main():
             return handle_session_launch(args)
         elif args.session_action == 'mcp-config':
             return handle_session_mcp_config(args)
+        elif args.session_action == 'from-pr':
+            return handle_session_from_pr(args)
         else:
             print("Run `ros-maintainer-harness session --help` for session commands.")
             return 0
