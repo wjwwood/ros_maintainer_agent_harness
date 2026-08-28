@@ -34,7 +34,7 @@ except ImportError:
                 return decorator
 
 from .approval import ApprovalManager
-from .ci import CITracker, JenkinsManager
+from .ci import CIMonitorService, CITracker, JenkinsManager
 from .git_ops import (
     execute_git_push,
     extract_repo_full_name,
@@ -55,6 +55,8 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
     approval_mgr = ApprovalManager(workspace.audit_dir / 'approvals.json')
     ci_tracker = CITracker(workspace.audit_dir / 'ci_runs.json')
     session_mgr = SessionManager(workspace)
+    policy = workspace.get_policy()
+    jenkins_mgr = JenkinsManager(ci_server=policy.jenkins_ci.ci_server, tracker=ci_tracker)
 
     # 1. log_status
     @server.tool()
@@ -664,6 +666,170 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
 
         return req.to_dict()
 
+    # 14. get_ci_status
+    @server.tool()
+    def get_ci_status(
+        job_url_or_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        pr_url: Optional[str] = None,
+        wait_for_completion: bool = False,
+        timeout_seconds: int = 60,
+        poll_interval_seconds: float = 5.0,
+    ) -> Dict[str, Any]:
+        """
+        Query the current status of a Jenkins CI run or wait for completion on the host.
+
+        Enables agents to monitor CI progress and retrieve failure summaries with minimal token overhead.
+
+        Args:
+            job_url_or_id: Jenkins job URL, build number, or PR shorthand (e.g. 'ros2/rclcpp#160').
+            session_id: Session ID to query latest CI run for (if job_url_or_id not specified).
+            pr_url: PR URL to query latest CI run for.
+            wait_for_completion: If True, blocks on the host until build completes or timeout occurs.
+            timeout_seconds: Maximum time to wait in seconds (default: 60).
+            poll_interval_seconds: Polling frequency in seconds (default: 5.0).
+        """
+        run = None
+        if job_url_or_id:
+            run = ci_tracker.get_run(job_url_or_id)
+        elif session_id:
+            run = ci_tracker.get_latest_run_for_session(session_id)
+        elif pr_url:
+            runs = ci_tracker.list_runs(pr_url=pr_url, limit=1)
+            if runs:
+                run = runs[0]
+
+        target_url = run.job_url if run else job_url_or_id
+        if not target_url:
+            return {
+                'success': False,
+                'status': 'NOT_FOUND',
+                'error': 'No CI run found matching the provided parameters.',
+            }
+
+        if wait_for_completion:
+            status_res = jenkins_mgr.poll_job_until_complete(
+                target_url,
+                timeout_seconds=float(timeout_seconds),
+                poll_interval_seconds=float(poll_interval_seconds),
+            )
+            if run and status_res.get('success'):
+                ci_tracker.update_run(
+                    job_url=target_url,
+                    status=status_res.get('status'),
+                    duration_seconds=status_res.get('duration_seconds'),
+                    test_summary=status_res.get('test_summary'),
+                    failure_reason=status_res.get('failure_reason'),
+                    log_excerpt=status_res.get('log_excerpt'),
+                    artifacts=status_res.get('artifacts', []),
+                )
+            return status_res
+
+        status_res = jenkins_mgr.fetch_build_status(target_url)
+        if run:
+            status_res['tracked_record'] = run.to_dict()
+            if status_res.get('success'):
+                ci_tracker.update_run_status(target_url, status_res.get('status', run.status))
+        return status_res
+
+    # 15. list_ci_runs
+    @server.tool()
+    def list_ci_runs(
+        session_id: Optional[str] = None,
+        pr_url: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        List historical and active Jenkins CI runs recorded by the gateway.
+
+        Args:
+            session_id: Filter by session ID.
+            pr_url: Filter by PR URL or shorthand.
+            status: Filter by status ('PENDING', 'RUNNING', 'SUCCESS', 'UNSTABLE', 'FAILURE', 'CANCELLED').
+            limit: Maximum records to return.
+        """
+        runs = ci_tracker.list_runs(session_id=session_id, pr_url=pr_url, status=status, limit=limit)
+        return [r.to_dict() for r in runs]
+
+    # 16. get_ci_summary
+    @server.tool()
+    def get_ci_summary(
+        job_url_or_id: str,
+        max_log_lines: int = 50,
+    ) -> Dict[str, Any]:
+        """
+        Retrieve a token-efficient failure summary and log excerpt for a Jenkins CI run.
+
+        Args:
+            job_url_or_id: Jenkins job URL or build number or PR shorthand.
+            max_log_lines: Maximum number of relevant error log lines to include.
+        """
+        run = ci_tracker.get_run(job_url_or_id)
+        target_url = run.job_url if run else job_url_or_id
+
+        build_info = jenkins_mgr.fetch_build_status(target_url)
+        test_report = jenkins_mgr.fetch_test_report(target_url)
+        status = build_info.get('status', 'UNKNOWN')
+
+        log_excerpt = None
+        if status in ('FAILURE', 'UNSTABLE', 'ABORTED'):
+            log_excerpt = jenkins_mgr.fetch_console_excerpt(target_url, max_lines=max_log_lines)
+
+        failures = test_report.get('failures', []) if test_report.get('success') else []
+
+        return {
+            'success': True,
+            'job_url': target_url,
+            'status': status,
+            'duration_seconds': build_info.get('duration_seconds'),
+            'total_tests': test_report.get('total', 0),
+            'passed_tests': test_report.get('passed', 0),
+            'failed_tests': test_report.get('failed', 0),
+            'skipped_tests': test_report.get('skipped', 0),
+            'failures': failures[:20],
+            'log_excerpt': log_excerpt,
+            'artifacts': build_info.get('artifacts', []),
+        }
+
+    # 17. cancel_ci_run
+    @server.tool()
+    def cancel_ci_run(
+        job_url_or_id: str,
+        reason: str,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Abort / cancel a running Jenkins CI job.
+
+        Args:
+            job_url_or_id: Jenkins job URL or build number or PR shorthand.
+            reason: Mandatory explanation for why the CI job is being cancelled.
+            session_id: Optional session identifier for timeline logging.
+        """
+        if not reason or not reason.strip():
+            return {
+                'success': False,
+                'status': 'REJECTED',
+                'error': 'Mandatory parameter `reason` must not be empty.',
+            }
+
+        run = ci_tracker.get_run(job_url_or_id)
+        target_url = run.job_url if run else job_url_or_id
+        sess_id = session_id or (run.session_id if run else None)
+
+        res = jenkins_mgr.cancel_job(target_url)
+        if res.get('success') and sess_id:
+            timeline = TimelineLogger(sess_id, workspace.sessions_dir / sess_id, workspace.audit_log_path)
+            timeline.log_action(
+                action='cancel_ci_run',
+                target=target_url,
+                reason=reason,
+                status='CANCELLED',
+                details={'job_url': target_url},
+            )
+        return res
+
     return server
 
 
@@ -672,12 +838,31 @@ def run_server(
     transport: str = 'stdio',
     host: str = '127.0.0.1',
     port: int = 8765,
+    enable_ci_monitor: bool = True,
 ) -> None:
-    """Run the Host MCP Server Gateway."""
+    """Run the Host MCP Server Gateway with background CI monitoring."""
     server = create_mcp_server(workspace)
-    if transport == 'stdio':
-        server.run(transport='stdio')
-    elif transport in ('sse', 'streamable-http'):
-        server.run(transport=transport, host=host, port=port)
-    else:
-        raise ValueError(f"Unsupported transport: '{transport}'. Choose 'stdio', 'sse', or 'streamable-http'.")
+    monitor_service = None
+    if enable_ci_monitor:
+        ci_tracker = CITracker(workspace.audit_dir / 'ci_runs.json')
+        policy = workspace.get_policy()
+        jenkins_mgr = JenkinsManager(ci_server=policy.jenkins_ci.ci_server, tracker=ci_tracker)
+        monitor_service = CIMonitorService(
+            tracker=ci_tracker,
+            jenkins_mgr=jenkins_mgr,
+            sessions_dir=workspace.sessions_dir,
+            audit_log_path=workspace.audit_log_path,
+            poll_interval_seconds=10.0,
+        )
+        monitor_service.start()
+
+    try:
+        if transport == 'stdio':
+            server.run(transport='stdio')
+        elif transport in ('sse', 'streamable-http'):
+            server.run(transport=transport, host=host, port=port)
+        else:
+            raise ValueError(f"Unsupported transport: '{transport}'. Choose 'stdio', 'sse', or 'streamable-http'.")
+    finally:
+        if monitor_service:
+            monitor_service.stop()

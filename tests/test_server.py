@@ -261,6 +261,40 @@ class TestMCPServer(unittest.TestCase):
         get_res = self._call('get_maintainer_rules', {})
         self.assertIn('console_direct+', get_res)
 
+    def test_ci_monitoring_tools(self):
+        # 1. Launch a CI job
+        launch_res = self._call('launch_jenkins_ci', {
+            'session_id': 'session-ci-test',
+            'pr_url': 'ros2/rclcpp#200',
+            'target_distro': 'rolling',
+            'reason': 'Test CI monitor tools',
+            'dry_run': False,
+        })
+        self.assertTrue(launch_res['success'])
+        job_url = launch_res['job_url']
+
+        # 2. List CI runs
+        runs = self._call_list('list_ci_runs', {'session_id': 'session-ci-test'})
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]['pr_url'], 'ros2/rclcpp#200')
+
+        # 3. Get CI status
+        status_res = self._call('get_ci_status', {'job_url_or_id': job_url})
+        self.assertIn('status', status_res)
+
+        # 4. Get CI summary
+        summary_res = self._call('get_ci_summary', {'job_url_or_id': job_url})
+        self.assertTrue(summary_res['success'])
+        self.assertIn('total_tests', summary_res)
+
+        # 5. Cancel CI run
+        cancel_res = self._call('cancel_ci_run', {
+            'job_url_or_id': job_url,
+            'reason': 'Aborting redundant test run',
+            'session_id': 'session-ci-test',
+        })
+        self.assertIn('success', cancel_res)
+
 
 if __name__ == '__main__':
     unittest.main()

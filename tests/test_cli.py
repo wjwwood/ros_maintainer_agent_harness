@@ -20,6 +20,7 @@ import unittest
 from unittest.mock import patch
 
 from ros_maintainer_agent_harness.approval import ApprovalManager
+from ros_maintainer_agent_harness.ci import JenkinsManager
 from ros_maintainer_agent_harness.cli import main
 from ros_maintainer_agent_harness.timeline import TimelineLogger
 from ros_maintainer_agent_harness.workspace import WorkspaceLayout
@@ -189,6 +190,60 @@ class TestCLI(unittest.TestCase):
 
             # Verify ticket is approved
             self.assertTrue(approval_mgr.is_approved(req.ticket_id))
+
+    def test_cli_ci_subcommands(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = Path(temp_dir) / 'cli_ws'
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+
+            from ros_maintainer_agent_harness.ci import CITracker
+            tracker = CITracker(layout.ci_runs_path)
+            tracker.record_run(
+                pr_url='ros2/rclcpp#160',
+                session_id='session-1',
+                job_name='ci_launcher',
+                build_num=555,
+                job_url='https://ci.ros2.org/job/ci_launcher/555/',
+                status='RUNNING',
+            )
+
+            # 1. ci list
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', str(ws_root), 'ci', 'list']):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn('555', fake_out.getvalue())
+                    self.assertIn('ros2/rclcpp#160', fake_out.getvalue())
+
+            # 2. ci status (mocking fetch_build_status)
+            mock_status = {'success': True, 'status': 'RUNNING', 'duration_seconds': 30.0}
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', str(ws_root), 'ci', 'status', '555']):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    with patch.object(JenkinsManager, 'fetch_build_status', return_value=mock_status):
+                        ret = main()
+                        self.assertEqual(ret, 0)
+                        self.assertIn('Build Status: RUNNING', fake_out.getvalue())
+
+            # 3. ci summary (mocking fetch_test_report)
+            mock_failed_build = {'success': True, 'status': 'FAILURE', 'duration_seconds': 60.0}
+            mock_report = {
+                'success': True,
+                'total': 50,
+                'passed': 49,
+                'failed': 1,
+                'skipped': 0,
+                'failures': [{'name': 'test_deadlock', 'error_details': 'Timeout'}],
+            }
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', str(ws_root), 'ci', 'summary', '555']):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    with patch.object(JenkinsManager, 'fetch_build_status', return_value=mock_failed_build):
+                        with patch.object(JenkinsManager, 'fetch_test_report', return_value=mock_report):
+                            with patch.object(JenkinsManager, 'fetch_console_excerpt', return_value='FAILED: dead'):
+                                ret = main()
+                                self.assertEqual(ret, 0)
+                                self.assertIn('CI Summary', fake_out.getvalue())
+                                self.assertIn('test_deadlock', fake_out.getvalue())
 
 
 if __name__ == '__main__':

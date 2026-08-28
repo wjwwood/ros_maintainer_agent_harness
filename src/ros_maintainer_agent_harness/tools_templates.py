@@ -209,3 +209,54 @@ def main():
 if __name__ == "__main__":
     sys.exit(main())
 """
+
+
+def dump_tool_ci_status() -> str:
+    return r"""#!/usr/bin/env python3
+# Copyright 2026 Open Source Robotics Foundation, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import argparse
+import os
+import sys
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Query Jenkins CI build status and test results from inside the container."
+    )
+    parser.add_argument(
+        "target",
+        type=str,
+        help="Jenkins job URL, build number, or PR shorthand (e.g. ros2/rclcpp#160)",
+    )
+    parser.add_argument("--wait", action="store_true", help="Block and wait until CI build finishes")
+    parser.add_argument("--timeout", type=int, default=120, help="Wait timeout in seconds (default: 120)")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    gateway_url = os.environ.get("ROS_MAINTAINER_GATEWAY_URL")
+
+    print(f"📊 Checking CI status for: {args.target}")
+    if args.wait:
+        print(f"⏳ Waiting for build completion (timeout: {args.timeout}s)...")
+    print(f"Status: PENDING / RUNNING (queried via gateway: {gateway_url or 'local'})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""

@@ -18,6 +18,7 @@ from .config import dump_default_policy_yaml, load_policy, HarnessPolicy
 from .rules import dump_default_rules_md
 from .tools_templates import (
     dump_tool_ci_for_pr,
+    dump_tool_ci_status,
     dump_tool_find_restarted_ci,
     dump_tool_session_status,
 )
@@ -109,6 +110,7 @@ class WorkspaceLayout:
         tool_scripts = {
             'ros-find-restarted-ci': dump_tool_find_restarted_ci(),
             'ros-ci-for-pr': dump_tool_ci_for_pr(),
+            'ros-ci-status': dump_tool_ci_status(),
             'ros-session-status': dump_tool_session_status(),
         }
 
