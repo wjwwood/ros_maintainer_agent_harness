@@ -40,6 +40,7 @@ from .git_ops import (
     extract_repo_full_name,
     get_repo_remote_url,
 )
+from .mcp_config import get_agent_launch_info, write_session_mcp_configs
 from .rules import MaintainerRules
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
@@ -829,6 +830,72 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
                 details={'job_url': target_url},
             )
         return res
+
+    # 18. generate_mcp_config
+    @server.tool()
+    def generate_mcp_config(
+        session_id: str,
+        transport: str = 'stdio',
+        host: str = '127.0.0.1',
+        port: int = 8765,
+    ) -> Dict[str, Any]:
+        """
+        Generate and write MCP client configuration files (.mcp.json, .cursor/mcp.json, .vscode/mcp.json)
+        for a session directory so AI agents and editors can connect to the Host MCP Gateway.
+
+        Args:
+            session_id: Session identifier.
+            transport: Transport protocol ('stdio', 'sse', or 'streamable-http').
+            host: Host IP for network transports.
+            port: Port for network transports.
+        """
+        if not session_mgr.session_exists(session_id):
+            return {'success': False, 'error': f"Session '{session_id}' not found."}
+
+        session_dir = session_mgr.get_session_dir(session_id)
+        written = write_session_mcp_configs(
+            session_dir=session_dir,
+            workspace_path=workspace.root,
+            transport=transport,
+            host=host,
+            port=port,
+        )
+        return {
+            'success': True,
+            'session_id': session_id,
+            'transport': transport,
+            'written_configs': {k: str(v) for k, v in written.items()},
+        }
+
+    # 19. get_session_launch_info
+    @server.tool()
+    def get_session_launch_info(
+        session_id: str,
+        agent: str = 'claude',
+    ) -> Dict[str, Any]:
+        """
+        Retrieve launch environment variables and CLI execution command for an AI agent in a session.
+
+        Args:
+            session_id: Session identifier.
+            agent: Agent or editor name ('claude', 'cursor', 'code', 'shell').
+        """
+        if not session_mgr.session_exists(session_id):
+            return {'success': False, 'error': f"Session '{session_id}' not found."}
+
+        session_dir = session_mgr.get_session_dir(session_id)
+        info = session_mgr.get_session_info(session_id)
+        distro = info.distro if info else 'rolling'
+
+        launch_data = get_agent_launch_info(
+            session_id=session_id,
+            session_dir=session_dir,
+            workspace_path=workspace.root,
+            distro=distro,
+            agent=agent,
+        )
+        launch_data['success'] = True
+        return launch_data
 
     return server
 

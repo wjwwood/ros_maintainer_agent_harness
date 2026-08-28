@@ -15,12 +15,14 @@
 import argparse
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 from .approval import ApprovalManager
 from .audit import format_audit_record, read_audit_records
 from .ci import CITracker, JenkinsManager
 from .devcontainer import write_devcontainer_config
+from .mcp_config import get_agent_launch_info, write_session_mcp_configs
 from .rules import MaintainerRules
 from .server import run_server
 from .workspace import WorkspaceLayout
@@ -146,6 +148,82 @@ def handle_session_prune(args: argparse.Namespace) -> int:
     else:
         print(f"Failed to prune session '{args.session_id}'.", file=sys.stderr)
         return 1
+
+
+def handle_session_launch(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    mgr = SessionManager(layout)
+
+    if not mgr.session_exists(args.session_id):
+        print(f"Error: Session '{args.session_id}' does not exist.", file=sys.stderr)
+        return 1
+
+    session_dir = mgr.get_session_dir(args.session_id)
+    info = mgr.get_session_info(args.session_id)
+    distro = info.distro if info else 'rolling'
+
+    # Ensure MCP configs exist
+    write_session_mcp_configs(
+        session_dir=session_dir,
+        workspace_path=layout.root,
+        transport=args.transport or 'stdio',
+    )
+
+    agent_name = args.agent or 'claude'
+    launch_info = get_agent_launch_info(
+        session_id=args.session_id,
+        session_dir=session_dir,
+        workspace_path=layout.root,
+        distro=distro,
+        agent=agent_name,
+    )
+
+    if args.dry_run or args.print_env:
+        print(f"🚀 Launch configuration for session '{args.session_id}':")
+        print(f"  - Agent:     {launch_info['agent']}")
+        print(f"  - Directory: {launch_info['session_dir']}")
+        print(f"  - Command:   {' '.join(launch_info['command'])}")
+        print("  - Environment:")
+        for k, v in launch_info['environment'].items():
+            print(f"      {k}={v}")
+        return 0
+
+    print(f"🚀 Launching agent '{agent_name}' in session '{args.session_id}'...")
+    env = os.environ.copy()
+    env.update(launch_info['environment'])
+
+    try:
+        res = subprocess.run(launch_info['command'], cwd=str(session_dir), env=env)
+        return res.returncode
+    except FileNotFoundError:
+        print(f"Error: Executable for agent '{agent_name}' not found on PATH.", file=sys.stderr)
+        print("Run with --dry-run to inspect the command line and environment variables.", file=sys.stderr)
+        return 1
+
+
+def handle_session_mcp_config(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    mgr = SessionManager(layout)
+
+    if not mgr.session_exists(args.session_id):
+        print(f"Error: Session '{args.session_id}' does not exist.", file=sys.stderr)
+        return 1
+
+    session_dir = mgr.get_session_dir(args.session_id)
+    written = write_session_mcp_configs(
+        session_dir=session_dir,
+        workspace_path=layout.root,
+        transport=args.transport or 'stdio',
+        host=args.host or '127.0.0.1',
+        port=args.port or 8765,
+    )
+
+    print(f"✅ Generated MCP client configuration files in session '{args.session_id}':")
+    for fmt, p in written.items():
+        print(f"  - {fmt:<8} -> {p}")
+    return 0
 
 
 def handle_rules(args: argparse.Namespace) -> int:
@@ -466,6 +544,32 @@ def parse_args():
         '-f', '--force', action='store_true', help='Force remove worktree even if untracked changes exist'
     )
 
+    # session launch
+    s_launch = session_subparsers.add_parser('launch', help='Launch AI coding agent or IDE in session')
+    s_launch.add_argument('session_id', type=str, help='Session ID')
+    s_launch.add_argument(
+        '--agent', choices=['claude', 'cursor', 'code', 'vscode', 'shell'], default='claude',
+        help='Agent or editor to launch (default: claude)',
+    )
+    s_launch.add_argument(
+        '--transport', choices=['stdio', 'sse', 'streamable-http'], default=None,
+        help='MCP transport protocol for client configs',
+    )
+    s_launch.add_argument(
+        '--dry-run', action='store_true', help='Print command and environment variables without executing',
+    )
+    s_launch.add_argument('--print-env', action='store_true', help='Print launch environment variables')
+
+    # session mcp-config
+    s_mcp = session_subparsers.add_parser('mcp-config', help='Generate MCP client configuration files in session')
+    s_mcp.add_argument('session_id', type=str, help='Session ID')
+    s_mcp.add_argument(
+        '--transport', choices=['stdio', 'sse', 'streamable-http'], default='stdio',
+        help='MCP transport protocol (default: stdio)',
+    )
+    s_mcp.add_argument('--host', type=str, default='127.0.0.1', help='Host for network transport')
+    s_mcp.add_argument('--port', type=int, default=8765, help='Port for network transport')
+
     # rules
     rules_parser = subparsers.add_parser('rules', help='View or update maintainer style & preferences')
     rules_subparsers = rules_parser.add_subparsers(dest='rules_action')
@@ -564,6 +668,10 @@ def main():
             return handle_session_list(args)
         elif args.session_action == 'prune':
             return handle_session_prune(args)
+        elif args.session_action == 'launch':
+            return handle_session_launch(args)
+        elif args.session_action == 'mcp-config':
+            return handle_session_mcp_config(args)
         else:
             print("Run `ros-maintainer-harness session --help` for session commands.")
             return 0
