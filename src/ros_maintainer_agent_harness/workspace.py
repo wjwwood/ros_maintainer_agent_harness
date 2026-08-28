@@ -62,6 +62,8 @@ class WorkspaceLayout:
         self.sessions_dir = self.root / 'sessions'
         self.audit_dir = self.root / 'audit'
         self.audit_log_path = self.audit_dir / 'audit.jsonl'
+        self.approvals_path = self.audit_dir / 'approvals.json'
+        self.ci_runs_path = self.audit_dir / 'ci_runs.json'
 
     def is_initialized(self) -> bool:
         return self.policy_path.exists() and self.config_dir.exists()

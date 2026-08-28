@@ -19,7 +19,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from ros_maintainer_agent_harness.approval import ApprovalManager
 from ros_maintainer_agent_harness.cli import main
+from ros_maintainer_agent_harness.timeline import TimelineLogger
+from ros_maintainer_agent_harness.workspace import WorkspaceLayout
 
 
 class TestCLI(unittest.TestCase):
@@ -78,6 +81,102 @@ class TestCLI(unittest.TestCase):
                     ret = main()
                     self.assertEqual(ret, 0)
                     self.assertIn("Successfully pruned session 'session-pr-42'", fake_out.getvalue())
+
+    def test_cli_policy_subcommands(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = str(Path(temp_dir) / 'cli_ws')
+
+            # Initialize
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', ws_root, 'init']):
+                with patch('sys.stdout', new=io.StringIO()):
+                    main()
+
+            # Policy show
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', ws_root, 'policy', 'show']):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn('allowed_branch_patterns', fake_out.getvalue())
+
+            # Policy check allowed
+            check_args = [
+                'ros-maintainer-harness', '-w', ws_root, 'policy', 'check',
+                '--branch', 'wjwwood/fix_feature', '--repo', 'ros2/rclcpp'
+            ]
+            with patch.object(sys, 'argv', check_args):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn('POLICY ALLOWED', fake_out.getvalue())
+
+            # Policy check blocked (rolling)
+            check_blocked_args = [
+                'ros-maintainer-harness', '-w', ws_root, 'policy', 'check',
+                '--branch', 'rolling', '--repo', 'ros2/rclcpp'
+            ]
+            with patch.object(sys, 'argv', check_blocked_args):
+                with patch('sys.stderr', new=io.StringIO()) as fake_err:
+                    ret = main()
+                    self.assertEqual(ret, 1)
+                    self.assertIn('POLICY DENIED', fake_err.getvalue())
+
+    def test_cli_audit_subcommand(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = Path(temp_dir) / 'cli_ws'
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+
+            # Create an audit log record
+            timeline = TimelineLogger('session-1', ws_root / 'sessions' / 'session-1', layout.audit_log_path)
+            timeline.log_action(
+                action='git_push',
+                target='ros2/rclcpp:fix_branch',
+                reason='Pushing fix for PR 160',
+                status='APPROVED',
+            )
+
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', str(ws_root), 'audit', 'show']):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn('git_push', fake_out.getvalue())
+                    self.assertIn('Pushing fix for PR 160', fake_out.getvalue())
+
+    def test_cli_approval_subcommands(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = Path(temp_dir) / 'cli_ws'
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+
+            approval_mgr = ApprovalManager(layout.approvals_path)
+            req = approval_mgr.create_request(
+                session_id='session-pr-99',
+                action='create_pull_request',
+                target='ros2/rclcpp',
+                reason='Test PR approval flow',
+            )
+
+            # 1. approval list
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', str(ws_root), 'approval', 'list']):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn(req.ticket_id, fake_out.getvalue())
+                    self.assertIn('Test PR approval flow', fake_out.getvalue())
+
+            # 2. approval approve
+            appr_args = [
+                'ros-maintainer-harness', '-w', str(ws_root), 'approval', 'approve', req.ticket_id,
+                '--maintainer', 'wjwwood', '--comment', 'Approved for merge'
+            ]
+            with patch.object(sys, 'argv', appr_args):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn('Approved ticket', fake_out.getvalue())
+
+            # Verify ticket is approved
+            self.assertTrue(approval_mgr.is_approved(req.ticket_id))
 
 
 if __name__ == '__main__':
