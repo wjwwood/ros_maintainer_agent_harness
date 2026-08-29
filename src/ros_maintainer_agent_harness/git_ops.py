@@ -55,7 +55,7 @@ def extract_repo_full_name(remote_url: Optional[str]) -> Optional[str]:
     if not remote_url:
         return None
 
-    cleaned = remote_url.strip()
+    cleaned = remote_url.strip().replace('\\', '/')
     # Strip URL fragments and query parameters
     cleaned = cleaned.split('#')[0].split('?')[0].rstrip('/')
     if cleaned.endswith('.git'):

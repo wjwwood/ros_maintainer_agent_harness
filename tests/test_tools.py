@@ -62,6 +62,8 @@ class TestTools(unittest.TestCase):
 
             status_script = layout.tools_bin_dir / 'ros-session-status'
 
+            utf8_env = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+
             # Run status message
             res = subprocess.run(
                 [
@@ -73,6 +75,8 @@ class TestTools(unittest.TestCase):
                 ],
                 capture_output=True,
                 text=True,
+                env=utf8_env,
+                encoding='utf-8',
             )
             self.assertEqual(res.returncode, 0)
 
@@ -89,6 +93,8 @@ class TestTools(unittest.TestCase):
                 ],
                 capture_output=True,
                 text=True,
+                env=utf8_env,
+                encoding='utf-8',
             )
             self.assertEqual(res.returncode, 0)
 
