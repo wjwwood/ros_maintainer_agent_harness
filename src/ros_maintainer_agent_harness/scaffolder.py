@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 from pathlib import Path
 import subprocess
 from typing import Optional
@@ -126,11 +127,18 @@ def ensure_shared_repo(
     workspace.shared_repos_dir.mkdir(parents=True, exist_ok=True)
     clone_url = f"https://github.com/{meta.owner}/{meta.repo}.git"
 
+    git_env = {
+        **os.environ,
+        'GIT_TERMINAL_PROMPT': '0',
+        'GIT_SSH_COMMAND': 'ssh -o BatchMode=yes',
+    }
+
     res = subprocess.run(
-        ['git', 'clone', '--', clone_url, str(repo_dir)],
+        ['git', '-c', 'url.git@github.com:.insteadof=', 'clone', '--', clone_url, str(repo_dir)],
         capture_output=True,
         text=True,
         timeout=120,
+        env=git_env,
     )
     if res.returncode != 0:
         raise RuntimeError(f"Failed to clone repository from {clone_url}: {res.stderr}")
@@ -143,14 +151,23 @@ def fetch_pr_ref_in_repo(repo_dir: Path, meta: PRMetadata) -> str:
     Fetch PR commit/branch into the shared repository. Returns local branch name.
     """
     local_branch = f"pr-{meta.number}"
+    git_env = {
+        **os.environ,
+        'GIT_TERMINAL_PROMPT': '0',
+        'GIT_SSH_COMMAND': 'ssh -o BatchMode=yes',
+    }
 
     # Try fetching GitHub PR head ref: pull/{number}/head:pr-{number}
     fetch_res = subprocess.run(
-        ['git', 'fetch', 'origin', f"pull/{meta.number}/head:{local_branch}", '--force'],
+        [
+            'git', '-c', 'url.git@github.com:.insteadof=', 'fetch',
+            'origin', f"pull/{meta.number}/head:{local_branch}", '--force'
+        ],
         cwd=str(repo_dir),
         capture_output=True,
         text=True,
         timeout=60,
+        env=git_env,
     )
 
     if fetch_res.returncode == 0:
@@ -159,11 +176,15 @@ def fetch_pr_ref_in_repo(repo_dir: Path, meta: PRMetadata) -> str:
     # If pull ref fails (e.g. mocked git repos or private forks), attempt fetching head_repo_url / head_ref
     if meta.head_repo_url:
         fork_res = subprocess.run(
-            ['git', 'fetch', meta.head_repo_url, f"{meta.head_ref}:{local_branch}", '--force'],
+            [
+                'git', '-c', 'url.git@github.com:.insteadof=', 'fetch',
+                meta.head_repo_url, f"{meta.head_ref}:{local_branch}", '--force'
+            ],
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
             timeout=60,
+            env=git_env,
         )
         if fork_res.returncode == 0:
             return local_branch
@@ -174,6 +195,7 @@ def fetch_pr_ref_in_repo(repo_dir: Path, meta: PRMetadata) -> str:
         cwd=str(repo_dir),
         capture_output=True,
         text=True,
+        env=git_env,
     )
     if check_res.returncode == 0:
         return local_branch
@@ -184,6 +206,7 @@ def fetch_pr_ref_in_repo(repo_dir: Path, meta: PRMetadata) -> str:
         cwd=str(repo_dir),
         capture_output=True,
         text=True,
+        env=git_env,
     )
     return local_branch
 

@@ -38,7 +38,7 @@ class TestScaffolder(unittest.TestCase):
             base_ref='jazzy',
             head_ref='fix-timer-race',
             head_repo_owner='contributor',
-            head_repo_url='https://github.com/contributor/rclcpp.git',
+            head_repo_url='',
             is_fork=True,
             url='https://github.com/ros2/rclcpp/pull/160',
             detected_distro='jazzy',
