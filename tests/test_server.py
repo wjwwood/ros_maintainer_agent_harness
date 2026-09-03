@@ -18,6 +18,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from ros_maintainer_agent_harness.audit import read_audit_records
 from ros_maintainer_agent_harness.server import create_mcp_server
@@ -320,6 +321,33 @@ class TestMCPServer(unittest.TestCase):
         self.assertEqual(launch_res['agent'], 'claude')
         self.assertEqual(launch_res['distro'], 'jazzy')
         self.assertIn('ROS_MAINTAINER_SESSION_ID', launch_res['environment'])
+
+    @patch('ros_maintainer_agent_harness.server.do_scaffold_from_pr')
+    def test_scaffold_session_from_pr_tool(self, mock_scaffold):
+        from ros_maintainer_agent_harness.pr_harvester import PRMetadata
+        from ros_maintainer_agent_harness.scaffolder import ScaffoldResult
+        dummy_meta = PRMetadata(
+            owner='ros2', repo='rclcpp', number=160, title='Fix timer', body='',
+            base_ref='rolling', head_ref='fix', head_repo_owner='ros2',
+            head_repo_url='', is_fork=False, url='https://github.com/ros2/rclcpp/pull/160',
+            detected_distro='rolling', changed_files=['timer.cpp'],
+        )
+        mock_scaffold.return_value = ScaffoldResult(
+            session_id='pr-rclcpp-160',
+            session_dir=Path('/tmp/sessions/pr-rclcpp-160'),
+            pr_metadata=dummy_meta,
+            worktree_path=Path('/tmp/sessions/pr-rclcpp-160/src/rclcpp'),
+            distro='rolling',
+            task_file=Path('/tmp/sessions/pr-rclcpp-160/TASK.md'),
+            timeline_path=Path('/tmp/sessions/pr-rclcpp-160/timeline.md'),
+        )
+
+        res = self._call('scaffold_session_from_pr', {
+            'pr_ref': 'ros2/rclcpp#160',
+        })
+        self.assertTrue(res['success'])
+        self.assertEqual(res['session_id'], 'pr-rclcpp-160')
+        self.assertEqual(res['distro'], 'rolling')
 
 
 if __name__ == '__main__':

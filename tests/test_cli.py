@@ -100,6 +100,32 @@ class TestCLI(unittest.TestCase):
                     self.assertEqual(ret, 0)
                     self.assertIn("Generated MCP client configuration files", fake_out.getvalue())
 
+            # 4c. Test session from-pr (mocked scaffold)
+            with patch('ros_maintainer_agent_harness.cli.scaffold_session_from_pr') as mock_scaffold:
+                from ros_maintainer_agent_harness.pr_harvester import PRMetadata
+                from ros_maintainer_agent_harness.scaffolder import ScaffoldResult
+                dummy_meta = PRMetadata(
+                    owner='ros2', repo='rclcpp', number=160, title='Fix timer', body='',
+                    base_ref='rolling', head_ref='fix', head_repo_owner='ros2',
+                    head_repo_url='', is_fork=False, url='https://github.com/ros2/rclcpp/pull/160',
+                    detected_distro='rolling', changed_files=['timer.cpp'],
+                )
+                mock_scaffold.return_value = ScaffoldResult(
+                    session_id='pr-rclcpp-160',
+                    session_dir=Path(ws_root) / 'sessions' / 'pr-rclcpp-160',
+                    pr_metadata=dummy_meta,
+                    worktree_path=Path(ws_root) / 'sessions' / 'pr-rclcpp-160' / 'src' / 'rclcpp',
+                    distro='rolling',
+                    task_file=Path(ws_root) / 'sessions' / 'pr-rclcpp-160' / 'TASK.md',
+                    timeline_path=Path(ws_root) / 'sessions' / 'pr-rclcpp-160' / 'timeline.md',
+                )
+                from_pr_args = ['ros-maintainer-harness', '-w', ws_root, 'session', 'from-pr', 'ros2/rclcpp#160']
+                with patch.object(sys, 'argv', from_pr_args):
+                    with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                        ret = main()
+                        self.assertEqual(ret, 0)
+                        self.assertIn("Successfully scaffolded session 'pr-rclcpp-160'", fake_out.getvalue())
+
             # 5. Test session list
             with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', ws_root, 'session', 'list']):
                 with patch('sys.stdout', new=io.StringIO()) as fake_out:
