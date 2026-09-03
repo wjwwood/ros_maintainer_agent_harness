@@ -220,6 +220,19 @@ ros-maintainer-harness serve --transport sse --port 8765
 
 When sessions are created with `session create` or `session from-pr`, these client configs are generated automatically inside each session directory.
 
+## Documentation
+
+- **[End-to-End Walkthrough](docs/walkthrough.md)**: Complete step-by-step example of triaging and fixing a ROS 2 PR.
+- **[AI Agent Integration Guides](docs/agents/index.md)**: Setup tutorials for specific agents:
+  - [Claude Code](docs/agents/claude_code.md)
+  - [Cursor](docs/agents/cursor.md)
+  - [VS Code & Extensions](docs/agents/vscode.md)
+  - [Interactive Shell](docs/agents/shell.md)
+- **[Policy & Security Model](docs/policy_and_security.md)**: Trust boundaries, `policy.yaml` configuration, and maintainer approvals.
+- **[Container Runtimes & Sandboxing](docs/containers.md)**: Docker/Podman setup, devcontainers, DinD/DooD, and worktree layouts.
+- **[Shared Tools Catalog](docs/tools.md)**: Built-in utilities, design rationale, and guide for adding custom tools.
+- **[Architecture & Design Plan](docs/design.md)**: Original design specification and system architecture.
+
 ## License
 
 This project is licensed under the [Apache License, Version 2.0](LICENSE).
