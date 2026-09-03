@@ -50,7 +50,9 @@ Prerequisites:
 - Python 3.10+
 - Git
 - [GitHub CLI (`gh`)](https://cli.github.com/) authenticated with appropriate scopes
-- An OCI container runtime such as Docker or Podman to run the sandboxed devcontainer sessions. When the harness runs directly on the host, Docker-in-Docker (DinD) is not required since the agent builds and tests directly within the session container without nesting. If you run the harness itself inside a container (e.g. in GitHub Codespaces or a containerized CI environment), you will need Docker-outside-of-Docker (mounting `/var/run/docker.sock`) or DinD enabled to launch session containers.
+- An OCI container runtime (Docker or Podman) to run devcontainer sessions
+  - Running on the host does not require Docker-in-Docker (DinD).
+  - If running the harness itself inside a container (e.g., GitHub Codespaces), use Docker-outside-of-Docker (mount `/var/run/docker.sock`) or enable DinD.
 
 ### Typical Workflow
 
