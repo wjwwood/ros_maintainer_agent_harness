@@ -1,194 +1,223 @@
 # ros-maintainer-agent-harness
 
-A development harness and policy gateway designed for AI coding agents assisting with ROS 2 maintenance and development.
+A development harness and policy gateway for AI coding agents assisting with ROS 2 maintenance and development.
 
----
+## Overview
 
-## 📖 Overview
+When using AI coding agents to help maintain ROS 2 repositories, you want the agent to have enough autonomy to inspect code, build packages, run tests, and diagnose failures without giving it unrestricted access to your credentials or remote repositories.
 
-When maintaining ROS 2 repositories with the assistance of an AI coding agent, the goal is to enable the agent to work autonomously on local tasks (compiling code, executing test suites, fixing bugs, refactoring, and diagnosing CI failures) while providing practical guardrails to help avoid accidental or unvetted remote side-effects.
+Giving an autonomous agent direct access to your personal SSH keys, GitHub write tokens, or Jenkins credentials risks accidental pushes to protected branches (like `ros2/rclcpp:rolling`), unvetted comments, or running runaway CI jobs.
 
-### Core Architecture
+This harness separates the environment into two distinct halves:
+
+1. **An isolated container sandbox** (a standard ROS 2 devcontainer) where the agent can build and test code locally. It only has read-only access to GitHub.
+2. **A host-side policy gateway** (an MCP server) running on your local machine. It holds your write credentials, evaluates push and CI requests against configurable policies, logs an audit trail, and handles heavy operations like Jenkins polling.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  CONTAINER SANDBOX (e.g. ROS 2 Devcontainer)                │
-│  - AI Coding Agent (Antigravity, Claude Code, Cursor, etc.) │
-│  - Full local autonomy: colcon build, pytest, local git     │
-│  - Read-Only GitHub token (clone, fetch, read issues/PRs)   │
+│ CONTAINER SANDBOX (ROS 2 Devcontainer)                      │
+│ - AI Agent (Claude Code, Cursor, Codex, etc.)               │
+│ - Full local build/test autonomy: colcon build, pytest, git │
+│ - Read-only GitHub access (clone, fetch, read issues/PRs)   │
+│ - Shared helper tools mounted at /workspace/tools/bin       │
 └──────────────────────────────┬──────────────────────────────┘
                                │ Model Context Protocol (MCP)
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  HOST POLICY GATEWAY (ros-maintainer-agent-harness)        │
-│  - Runs on Maintainer Host (127.0.0.1 / stdio)              │
-│  - Holds Read/Write Token, SSH Signing Key, Jenkins Auth    │
-│  - Evaluates declarative policies (~/.config/.../policy.yml)│
-│  - Records structured action audit log (audit.jsonl)        │
-│  - Maintains human-readable session timeline (timeline.md)  │
+│ HOST POLICY GATEWAY (ros-maintainer-harness serve)          │
+│ - Runs on maintainer host (stdio or HTTP/SSE)               │
+│ - Holds write credentials: SSH signing keys, GitHub, Jenkins│
+│ - Enforces safety policies (policy.yaml)                    │
+│ - Background CI monitor & JUnit failure summarizer          │
+│ - Structured audit log (audit.jsonl) & session timeline     │
 └───────────────┬─────────────────────────────┬───────────────┘
                 │ Guarded API                 │ Guarded CI
                 ▼                             ▼
         GitHub Repositories             ci.ros2.org
 ```
 
-1. **Containerized Execution Sandbox**: The agent runs entirely inside a container (such as a standard ROS 2 devcontainer), isolated from the maintainer's host system credentials and SSH keys.
-2. **Read-Only Container Access**: The container is provided only a read-only GitHub token, allowing it to fetch code, pull branches, and read discussions, but preventing it from directly pushing code or creating comments.
-3. **Host-Side Policy Gateway (MCP Server)**: A lightweight service running on the maintainer's host machine exposes a controlled set of tools via the Model Context Protocol (MCP). This service holds the maintainer's write credentials and enforces rules regarding what actions the agent can perform, when it can perform them, and what requires explicit maintainer approval.
+## Quick Start
 
----
+### Installation
 
-## 🛡️ Policy & Guardrail Model
+Install the package in editable mode:
 
-### Built-in Invariants
-* **No Conversational Comments**: The harness provides no general comment posting tool, preventing accidental impersonation.
-* **No Auto-Merging**: Merging pull requests is strictly reserved for maintainers.
-* **No Direct Base Branch Pushes**: Pushes to `main`, `master`, `rolling`, `jazzy`, etc. are blocked at the gateway level.
-* **No Unapproved PR/Issue Creation**: Opening PRs or issues requires explicit maintainer review and approval.
+```bash
+pip install -e .
+```
 
-### Configurable Maintainer Policies (`policy.yaml`)
-* **Branch Push Allowlist**: Regex patterns for allowable feature branches (e.g. `^<username>/.*$` or `^fix/.*$`).
-* **External Fork Protection**: Require explicit maintainer confirmation before pushing to 3rd-party contributor forks.
-* **Repository Scope**: Allowlisted GitHub organizations and repositories (`ros2/*`, `ros-tooling/*`).
-* **Jenkins CI Controls**: Maximum concurrent runs per PR, cooldown intervals, and auto-cancellation of superseded builds.
+Prerequisites:
+- Python 3.10+
+- Git
+- [GitHub CLI (`gh`)](https://cli.github.com/) authenticated with appropriate scopes
+- Docker (if using devcontainers for containerized agent isolation)
 
----
+### Typical Workflow
 
-## 📁 Workspace Layout
+#### 1. Initialize the workspace
 
-The harness manages workspaces using **Linked Git Worktrees** and session overlay directories to support parallel, isolated agent sessions with minimal disk usage:
+Initialize the maintainer directory structure and default configuration:
+
+```bash
+ros-maintainer-harness init
+```
+
+By default this uses `~/ros_maintainer_ws`, but you can override it with `--workspace` or by setting `$ROS_MAINTAINER_WS`.
+
+#### 2. Scaffold a session from a PR
+
+You can set up an entire isolated investigation environment directly from a PR URL or shorthand:
+
+```bash
+ros-maintainer-harness session from-pr ros2/rclcpp#160
+```
+
+This single command:
+- Fetches PR metadata (title, author, base/head branches, changed files).
+- Auto-detects the target ROS 2 distribution from the base branch (e.g., `jazzy` or `rolling`).
+- Clones the target repository into `shared_repos/` if not already present.
+- Creates a new linked git worktree in `sessions/pr-rclcpp-160/src/rclcpp`.
+- Generates `.devcontainer/devcontainer.json` configured for that ROS distribution.
+- Writes editor/agent MCP configs (`mcp.json`, `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`).
+- Pre-populates `timeline.md` and generates a structured `TASK.md` goal prompt for the agent.
+
+#### 3. Launch an agent in the session
+
+Launch your preferred coding agent inside the session directory with the appropriate environment variables pre-configured:
+
+```bash
+ros-maintainer-harness session launch pr-rclcpp-160 --agent claude
+```
+
+Supported agents/editors include `claude`, `cursor`, `code`/`vscode`, or an interactive container `shell`. You can also pass `--dry-run` to inspect the command line and environment without launching.
+
+#### 4. Monitor CI without burning agent tokens
+
+Instead of having an LLM repeatedly poll Jenkins and consume context tokens reading multi-megabyte build logs, the harness can poll on the host and return structured failure summaries:
+
+```bash
+# Wait for a running build to finish
+ros-maintainer-harness ci status ros2/rclcpp#160 --wait
+
+# Get a compact summary of failed tests and compiler errors
+ros-maintainer-harness ci summary ros2/rclcpp#160
+```
+
+#### 5. Review audit logs and maintainer approvals
+
+All actions that interact with remote systems are logged to `audit/audit.jsonl`:
+
+```bash
+ros-maintainer-harness audit show -n 20
+```
+
+If an agent attempts an action that requires maintainer confirmation (such as pushing to an external contributor's fork or creating a PR), the gateway creates an approval ticket:
+
+```bash
+# List pending requests
+ros-maintainer-harness approval list --status PENDING
+
+# Approve or reject a ticket
+ros-maintainer-harness approval approve req-abcd1234 --comment "Reviewed diff, approved to push"
+ros-maintainer-harness approval reject req-abcd1234 --comment "Needs cleaner commit message"
+```
+
+## Policy & Guardrails
+
+The host gateway enforces safety constraints defined in `config/policy.yaml`:
+
+### Invariants
+- **No direct base branch pushes**: Pushes to `main`, `master`, `rolling`, `jazzy`, `iron`, `humble`, etc. are blocked at the gateway level.
+- **No unapproved PR creation**: Opening pull requests requires explicit maintainer review and approval.
+- **No conversational commenting**: The harness does not provide tools for posting conversational comments on issues or PRs, preventing impersonation.
+- **No automated merges**: Merging pull requests is strictly reserved for the maintainer.
+
+### Configurable Policies (`policy.yaml`)
+- **Branch naming rules**: Enforce branch naming conventions using regex patterns (e.g., `^<username>/.*$` or `^fix/.*$`).
+- **Repository allowlist**: Restrict operations to specific organizations or repositories (e.g., `ros2/*`, `ros-tooling/*`).
+- **External fork protection**: Require explicit maintainer approval before pushing commits to forks owned by third-party contributors.
+- **CI rate limiting**: Limit concurrent Jenkins runs per PR and enforce cooldown intervals between rebuilds.
+
+Test whether an action complies with policy:
+
+```bash
+ros-maintainer-harness policy check --branch wjwwood/fix_timer --repo ros2/rclcpp
+```
+
+## Workspace Structure
+
+The workspace uses linked Git worktrees and session overlay directories so multiple tasks can run in parallel without cloning separate copies of large repositories:
 
 ```
 ~/ros_maintainer_ws/
 ├── config/                     # Configuration and maintainer preferences
-│   ├── policy.yaml             # Enforced push/CI policies
-│   └── maintainer_rules.md     # Human-readable maintainer conventions & preferences
+│   ├── policy.yaml             # Enforced push and CI policies
+│   └── maintainer_rules.md     # Maintainer conventions & preferences (mounted read-only)
 │
-├── tools/                      # Shared helper scripts & utilities (available across ALL sessions)
-│   ├── bin/                    # Executable scripts (mounted into $PATH for all containers)
-│   ├── README.md               # Tool catalog describing what each script does and how to use it
-│   └── requirements.txt        # Shared Python dependencies for tools
+├── tools/                      # Shared helper scripts mounted into all containers
+│   ├── bin/                    # Executables added to $PATH in containers
+│   │   ├── ros-find-restarted-ci
+│   │   ├── ros-ci-for-pr
+│   │   ├── ros-ci-status
+│   │   └── ros-session-status
+│   └── requirements.txt        # Shared Python dependencies
 │
-├── shared_repos/               # Central primary Git clones (central .git object database)
-│   ├── ros2/                   # e.g. rclcpp.git, rmw_implementation.git
-│   └── ros-tooling/            # e.g. ros-github-scripts.git
+├── shared_repos/               # Bare or primary Git clones (shared object storage)
+│   ├── ros2/
+│   │   └── rclcpp.git
+│   └── ros-tooling/
 │
-├── sessions/                   # Isolated active task workspaces (one per conversation/PR)
-│   ├── session-pr-160/         # Conversation 1
+├── sessions/                   # Task workspaces (one per PR or issue)
+│   ├── pr-rclcpp-160/
 │   │   ├── src/                # Linked git worktrees pointing to shared_repos/
-│   │   ├── build/              # Dedicated colcon build directory (bind-mounted to host)
-│   │   ├── install/            # Dedicated colcon install directory (bind-mounted to host)
-│   │   ├── log/                # Dedicated test and build logs (bind-mounted to host)
-│   │   ├── scratch/            # Temporary session-specific scripts and notes
-│   │   └── timeline.md         # Chronological session narrative & status updates
+│   │   ├── build/              # Dedicated build directory
+│   │   ├── install/            # Dedicated install directory
+│   │   ├── log/                # Build and test logs
+│   │   ├── scratch/            # One-off scripts and debug files
+│   │   ├── timeline.md         # Chronological session log & milestones
+│   │   ├── TASK.md             # Goal prompt and task context
+│   │   └── .devcontainer/      # Devcontainer definition for target distro
 │   │
-│   └── session-pr-99/          # Conversation 2
-│       ├── ...
-│       └── timeline.md
+│   └── pr-rmw-42/
 │
-└── audit/                      # Central gateway action logs
-    └── audit.jsonl             # Structured machine-readable audit trail of all remote actions
+└── audit/                      # Audit logs & approvals
+    ├── audit.jsonl             # Machine-readable log of all remote actions
+    ├── approvals.json          # Maintainer approval ticket database
+    └── ci_runs.json            # Tracked CI jobs and status cache
 ```
 
----
+## MCP Gateway Tools
 
----
+When running `ros-maintainer-harness serve`, the host gateway exposes tools to connected AI coding agents over the Model Context Protocol:
 
-## 🔧 MCP Tools Exposed by Host Gateway
+- **Git & GitHub**: `git_push` (guarded by policy), `create_pull_request` (requires approval ticket).
+- **CI Management**: `launch_jenkins_ci`, `get_ci_status` (supports host-side blocking wait), `get_ci_summary` (parses JUnit failures & compiler errors), `list_ci_runs`, `cancel_ci_run`, `find_restarted_ci`.
+- **Session & Scaffolding**: `scaffold_session_from_pr`, `create_session`, `list_sessions`, `prune_session`, `generate_mcp_config`, `get_session_launch_info`.
+- **Maintainer Preferences & Audit**: `log_status` (records milestones in `timeline.md`), `get_maintainer_rules`, `add_maintainer_rule`, `check_policy`, `list_approval_requests`, `respond_approval_request`.
 
-| Tool Name | Scope | Description |
-| :--- | :--- | :--- |
-| `log_status` | Local / Timeline | Records progress notes or milestone events to `sessions/<id>/timeline.md`. |
-| `git_push` | Remote / Guarded | Pushes local branch to remote repository under strict branch allowlists, base distro protection, and external fork approval guards. |
-| `launch_jenkins_ci` | Remote / CI | Launches Jenkins CI on `ci.ros2.org` with concurrency limits and cooldown enforcement. |
-| `find_restarted_ci` | Remote / CI | Discovers rescheduled/queued Jenkins jobs and optionally updates GitHub PR status comment markdown. |
-| `create_pull_request` | Remote / PR | Creates a GitHub Pull Request with mandatory interactive maintainer approval. |
-| `check_policy` | Policy Pre-flight | Tests whether a branch name, repo, or CI launch complies with maintainer policy before attempting it. |
-| `create_session` | Workspace | Provisions an isolated session workspace with build/install/log overlays and linked Git worktree. |
-| `list_sessions` | Workspace | Lists active sessions and their attached Git worktrees. |
-| `prune_session` | Workspace | Cleans up session directory and linked worktrees with audit logging. |
-| `get_maintainer_rules` | Rules | Returns human-readable maintainer style, CI, and git conventions from `maintainer_rules.md`. |
-| `add_maintainer_rule` | Rules | Appends a new preference rule into `maintainer_rules.md` and records audit entry. |
-| `list_approval_requests`| Approvals | Lists pending or resolved maintainer approval requests. |
-| `respond_approval_request`| Approvals | Approves or rejects a pending maintainer approval ticket. |
+### Editor & Client Configuration
 
----
-
----
-
-## 💻 CLI Usage
-
-```bash
-# 1. Initialize Maintainer Workspace and Tool Catalog
-ros-maintainer-harness init
-
-# 2. Run Host MCP Server Gateway (stdio mode for AI tool integration)
-ros-maintainer-harness serve --transport stdio
-
-# Or run standing background daemon (SSE mode)
-ros-maintainer-harness serve --transport sse --port 8765
-
-# 3. Create and manage session worktrees with Devcontainer Sandboxes
-ros-maintainer-harness session create session-pr-160 --distro jazzy --topic "Fix memory leak" \
-  --repo ~/ros_maintainer_ws/shared_repos/ros2/rclcpp --branch wjwwood/fix_leak
-
-# Generate or update .devcontainer/devcontainer.json for a session
-ros-maintainer-harness session devcontainer session-pr-160 --distro rolling
-
-# Inspect active sessions and linked worktrees
-ros-maintainer-harness session list
-ros-maintainer-harness session prune session-pr-160
-
-# 4. View and check policies
-ros-maintainer-harness policy show
-ros-maintainer-harness policy check --branch wjwwood/fix_leak --repo ros2/rclcpp
-
-# 5. Inspect audit log and approval tickets
-ros-maintainer-harness audit show -n 20
-ros-maintainer-harness approval list --status PENDING
-ros-maintainer-harness approval approve req-abcd1234 --comment "Looks good to push"
-```
-
----
-
-## 📦 Container Tools & Environment
-
-Every session includes an automated `.devcontainer/devcontainer.json` environment configured for containerized execution:
-* **Workspace Bind Mounts**: Session `src/`, `build/`, `install/`, `log/`, `scratch/`, and `timeline.md` mounted at `/workspace`.
-* **Shared Tool Catalog**: Host `tools/bin/` mounted at `/workspace/tools/bin` and prepended to container `$PATH`:
-  - `ros-find-restarted-ci [-u] <PR_OR_COMMENT_URL>`: Inspects Jenkins build farm for rescheduled jobs and updates PR comments.
-  - `ros-ci-for-pr [--distro <distro>] [--only-fixes-test] <PR_URL>`: Submits CI launch jobs.
-  - `ros-session-status [-m <milestone>] "<message>"`: Logs narrative notes and milestones to `timeline.md`.
-* **Read-Only Maintainer Preferences**: `config/maintainer_rules.md` mounted read-only at `/workspace/MAINTAINER_RULES.md`.
-* **Host Gateway Integration**: Configured via `ROS_MAINTAINER_GATEWAY_URL` and `host.docker.internal` network routing.
-
----
-
-## ⚙️ MCP Client Configuration
-
-To connect your AI assistant (e.g. Antigravity, Claude Code, Cursor, Claude Desktop) to the host gateway:
+You can connect any MCP-compatible client directly to the gateway. For local stdio:
 
 ```json
 {
   "mcpServers": {
     "ros-maintainer-harness": {
       "command": "ros-maintainer-harness",
-      "args": ["serve", "--transport", "stdio", "--workspace", "~/ros_maintainer_ws"]
+      "args": ["serve", "--transport", "stdio", "--workspace", "/path/to/ros_maintainer_ws"]
     }
   }
 }
 ```
 
----
+Or run the gateway as a background daemon over SSE / HTTP:
 
-## 📚 Documentation
+```bash
+ros-maintainer-harness serve --transport sse --port 8765
+```
 
-For in-depth architectural details, trust boundaries, multi-session Git worktree management, and policy specifications, see:
-* [Architecture & Design Plan](docs/design.md)
+When sessions are created with `session create` or `session from-pr`, these client configs are generated automatically inside each session directory.
 
----
-
-## 📜 License
+## License
 
 This project is licensed under the [Apache License, Version 2.0](LICENSE).
-
