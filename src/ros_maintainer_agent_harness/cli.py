@@ -34,7 +34,17 @@ def get_default_workspace_path() -> Path:
     env_ws = os.environ.get('ROS_MAINTAINER_WS') or os.environ.get('ROS2_MAINTAINER_WS')
     if env_ws:
         return Path(env_ws).resolve()
-    return (Path.home() / 'ros_maintainer_ws').resolve()
+
+    # Search upward from cwd for an initialized workspace
+    cwd = Path.cwd().resolve()
+    curr = cwd
+    while True:
+        if (curr / 'config' / 'policy.yaml').exists() and (curr / 'tools').exists():
+            return curr
+        if curr.parent == curr:
+            break
+        curr = curr.parent
+    return cwd
 
 
 def handle_init(args: argparse.Namespace) -> int:
@@ -529,7 +539,10 @@ def parse_args():
         '-w', '--workspace',
         type=str,
         default=None,
-        help='Maintainer workspace root directory (defaults to $ROS_MAINTAINER_WS or ~/ros_maintainer_ws)',
+        help=(
+            'Maintainer workspace root directory '
+            '(defaults to $ROS_MAINTAINER_WS, enclosing workspace, or current directory)'
+        ),
     )
 
     subparsers = parser.add_subparsers(dest='command')
