@@ -20,6 +20,7 @@ import subprocess
 from typing import Dict, List, Optional
 
 from .devcontainer import write_devcontainer_config
+from .mcp_config import write_session_mcp_configs
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
 
@@ -100,6 +101,12 @@ class SessionManager:
             distro=distro,
             custom_image=custom_image,
             gateway_url=gateway_url,
+        )
+
+        # Write editor/agent MCP configs (mcp.json, .cursor/mcp.json, .vscode/mcp.json, .mcp.json)
+        write_session_mcp_configs(
+            session_dir=session_dir,
+            workspace_path=self.workspace.root,
         )
 
         timeline = TimelineLogger(
@@ -220,6 +227,57 @@ class SessionManager:
             ))
 
         return sessions
+
+    def get_session_info(self, session_id: str) -> Optional[SessionInfo]:
+        """Retrieve SessionInfo for a specific session."""
+        if not self.session_exists(session_id):
+            return None
+
+        s_dir = self.get_session_dir(session_id)
+        src_dir = s_dir / 'src'
+        build_dir = s_dir / 'build'
+        install_dir = s_dir / 'install'
+        log_dir = s_dir / 'log'
+        scratch_dir = s_dir / 'scratch'
+        timeline_path = s_dir / 'timeline.md'
+        devcontainer_path = s_dir / '.devcontainer' / 'devcontainer.json'
+
+        active_branches = {}
+        if src_dir.exists():
+            for sub in src_dir.iterdir():
+                if sub.is_dir() and (sub / '.git').exists():
+                    res = subprocess.run(
+                        ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                        cwd=str(sub),
+                        capture_output=True,
+                        text=True,
+                    )
+                    if res.returncode == 0:
+                        active_branches[sub.name] = res.stdout.strip()
+
+        distro = None
+        if devcontainer_path.exists():
+            try:
+                import json
+                with open(devcontainer_path, 'r', encoding='utf-8') as f:
+                    dc = json.load(f)
+                    distro = dc.get('containerEnv', {}).get('ROS_DISTRO')
+            except Exception:
+                pass
+
+        return SessionInfo(
+            session_id=session_id,
+            session_dir=s_dir,
+            src_dir=src_dir,
+            build_dir=build_dir,
+            install_dir=install_dir,
+            log_dir=log_dir,
+            scratch_dir=scratch_dir,
+            timeline_path=timeline_path,
+            devcontainer_path=devcontainer_path if devcontainer_path.exists() else None,
+            distro=distro,
+            active_branches=active_branches,
+        )
 
     def prune_session(self, session_id: str, force: bool = False) -> bool:
         """

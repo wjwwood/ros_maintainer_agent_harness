@@ -295,6 +295,32 @@ class TestMCPServer(unittest.TestCase):
         })
         self.assertIn('success', cancel_res)
 
+    def test_mcp_config_and_launch_tools(self):
+        # 1. Create a session
+        self._call('create_session', {
+            'session_id': 'session-agent-1',
+            'topic': 'Agent launcher test',
+            'distro': 'jazzy',
+        })
+
+        # 2. Test generate_mcp_config tool
+        mcp_res = self._call('generate_mcp_config', {
+            'session_id': 'session-agent-1',
+            'transport': 'stdio',
+        })
+        self.assertTrue(mcp_res['success'])
+        self.assertIn('written_configs', mcp_res)
+
+        # 3. Test get_session_launch_info tool
+        launch_res = self._call('get_session_launch_info', {
+            'session_id': 'session-agent-1',
+            'agent': 'claude',
+        })
+        self.assertTrue(launch_res['success'])
+        self.assertEqual(launch_res['agent'], 'claude')
+        self.assertEqual(launch_res['distro'], 'jazzy')
+        self.assertIn('ROS_MAINTAINER_SESSION_ID', launch_res['environment'])
+
 
 if __name__ == '__main__':
     unittest.main()

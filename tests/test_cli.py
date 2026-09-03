@@ -78,14 +78,36 @@ class TestCLI(unittest.TestCase):
                     self.assertEqual(ret, 0)
                     self.assertIn("Generated .devcontainer configuration", fake_out.getvalue())
 
-            # 4. Test session list
+            # 4. Test session launch --dry-run
+            launch_args = [
+                'ros-maintainer-harness', '-w', ws_root, 'session', 'launch', 'session-pr-42',
+                '--agent', 'claude', '--dry-run'
+            ]
+            with patch.object(sys, 'argv', launch_args):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn("Launch configuration for session 'session-pr-42'", fake_out.getvalue())
+                    self.assertIn("claude --cwd", fake_out.getvalue())
+
+            # 4b. Test session mcp-config
+            mcp_args = [
+                'ros-maintainer-harness', '-w', ws_root, 'session', 'mcp-config', 'session-pr-42'
+            ]
+            with patch.object(sys, 'argv', mcp_args):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn("Generated MCP client configuration files", fake_out.getvalue())
+
+            # 5. Test session list
             with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', ws_root, 'session', 'list']):
                 with patch('sys.stdout', new=io.StringIO()) as fake_out:
                     ret = main()
                     self.assertEqual(ret, 0)
                     self.assertIn('session-pr-42', fake_out.getvalue())
 
-            # 5. Test session prune
+            # 6. Test session prune
             prune_args = [
                 'ros-maintainer-harness', '-w', ws_root, 'session', 'prune', 'session-pr-42'
             ]

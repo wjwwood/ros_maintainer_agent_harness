@@ -55,7 +55,7 @@ class TestDevcontainer(unittest.TestCase):
             self.assertIn('ROS 2 Maintainer Sandbox (session-pr-160)', config['name'])
             self.assertEqual(config['image'], DEFAULT_DISTRO_IMAGES['jazzy'])
             self.assertEqual(config['workspaceFolder'], '/workspace')
-            self.assertIn(str(session_dir), config['workspaceMount'])
+            self.assertIn(str(session_dir.resolve()), config['workspaceMount'])
             self.assertEqual(config['containerEnv']['ROS_DISTRO'], 'jazzy')
             self.assertEqual(config['containerEnv']['ROS_MAINTAINER_SESSION_ID'], 'session-pr-160')
             self.assertIn('--add-host=host.docker.internal:host-gateway', config['runArgs'])
