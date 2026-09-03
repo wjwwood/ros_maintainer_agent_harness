@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 from ros_maintainer_agent_harness.approval import ApprovalManager
 from ros_maintainer_agent_harness.ci import JenkinsManager
-from ros_maintainer_agent_harness.cli import main
+from ros_maintainer_agent_harness.cli import get_default_workspace_path, main
 from ros_maintainer_agent_harness.timeline import TimelineLogger
 from ros_maintainer_agent_harness.workspace import WorkspaceLayout
 
@@ -292,6 +292,31 @@ class TestCLI(unittest.TestCase):
                                 self.assertEqual(ret, 0)
                                 self.assertIn('CI Summary', fake_out.getvalue())
                                 self.assertIn('test_deadlock', fake_out.getvalue())
+
+    def test_get_default_workspace_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir).resolve()
+            ws_dir = temp_path / 'my_workspace'
+            layout = WorkspaceLayout(ws_dir)
+            layout.initialize()
+
+            # 1. Environment variable takes precedence
+            with patch.dict('os.environ', {'ROS_MAINTAINER_WS': str(ws_dir)}):
+                self.assertEqual(get_default_workspace_path(), ws_dir)
+
+            # 2. When env var is unset and inside workspace tree, searches upward
+            nested_dir = ws_dir / 'sessions' / 'session-pr-1' / 'src' / 'pkg'
+            nested_dir.mkdir(parents=True, exist_ok=True)
+            with patch.dict('os.environ', {}, clear=True):
+                with patch('pathlib.Path.cwd', return_value=nested_dir):
+                    self.assertEqual(get_default_workspace_path(), ws_dir)
+
+            # 3. When outside workspace, defaults to cwd
+            outside_dir = temp_path / 'outside'
+            outside_dir.mkdir()
+            with patch.dict('os.environ', {}, clear=True):
+                with patch('pathlib.Path.cwd', return_value=outside_dir):
+                    self.assertEqual(get_default_workspace_path(), outside_dir)
 
 
 if __name__ == '__main__':
