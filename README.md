@@ -1,12 +1,12 @@
 # ros-maintainer-agent-harness
 
-A development harness and policy gateway for AI coding agents assisting with ROS 2 maintenance and development.
+A development harness (sandboxed workspaces and tooling) and policy-enforcing MCP server for AI coding agents working on ROS 2.
 
 ## Overview
 
 When using AI coding agents to help maintain ROS 2 repositories, you want the agent to have enough autonomy to inspect code, build packages, run tests, and diagnose failures without giving it unrestricted access to your credentials or remote repositories.
 
-Giving an autonomous agent direct access to your personal SSH keys, GitHub write tokens, or Jenkins credentials risks accidental pushes to protected branches (like `ros2/rclcpp:rolling`), unvetted comments, or running runaway CI jobs.
+Giving an autonomous agent direct access to your personal SSH keys, GitHub write tokens, or Jenkins credentials risks unwanted pushes, unvetted comments, or triggering runaway CI jobs.
 
 This harness separates the environment into two distinct halves:
 
@@ -50,7 +50,7 @@ Prerequisites:
 - Python 3.10+
 - Git
 - [GitHub CLI (`gh`)](https://cli.github.com/) authenticated with appropriate scopes
-- Docker (if using devcontainers for containerized agent isolation)
+- An OCI container runtime like Docker or Podman (if using devcontainers for containerized agent isolation). Docker-in-Docker (DinD) is not required since the agent builds and tests directly within the container environment.
 
 ### Typical Workflow
 
@@ -62,9 +62,9 @@ Initialize the maintainer directory structure and default configuration:
 ros-maintainer-harness init
 ```
 
-By default this uses `~/ros_maintainer_ws`, but you can override it with `--workspace` or by setting `$ROS_MAINTAINER_WS`.
+By default this initializes the current directory (`.`), but you can specify a path with `--workspace` or set `$ROS_MAINTAINER_WS`.
 
-#### 2. Scaffold a session from a PR
+#### 2. Create a session from a PR
 
 You can set up an entire isolated investigation environment directly from a PR URL or shorthand:
 
@@ -192,7 +192,7 @@ When running `ros-maintainer-harness serve`, the host gateway exposes tools to c
 
 - **Git & GitHub**: `git_push` (guarded by policy), `create_pull_request` (requires approval ticket).
 - **CI Management**: `launch_jenkins_ci`, `get_ci_status` (supports host-side blocking wait), `get_ci_summary` (parses JUnit failures & compiler errors), `list_ci_runs`, `cancel_ci_run`, `find_restarted_ci`.
-- **Session & Scaffolding**: `scaffold_session_from_pr`, `create_session`, `list_sessions`, `prune_session`, `generate_mcp_config`, `get_session_launch_info`.
+- **Sessions & Workspaces**: `scaffold_session_from_pr`, `create_session`, `list_sessions`, `prune_session`, `generate_mcp_config`, `get_session_launch_info`.
 - **Maintainer Preferences & Audit**: `log_status` (records milestones in `timeline.md`), `get_maintainer_rules`, `add_maintainer_rule`, `check_policy`, `list_approval_requests`, `respond_approval_request`.
 
 ### Editor & Client Configuration
