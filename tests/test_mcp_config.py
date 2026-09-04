@@ -87,11 +87,13 @@ class TestMCPConfig(unittest.TestCase):
             self.assertIn('claude', written)
             self.assertIn('cursor', written)
             self.assertIn('vscode', written)
+            self.assertIn('gemini', written)
 
             self.assertTrue((session_dir / 'mcp.json').exists())
             self.assertTrue((session_dir / '.mcp.json').exists())
             self.assertTrue((session_dir / '.cursor' / 'mcp.json').exists())
             self.assertTrue((session_dir / '.vscode' / 'mcp.json').exists())
+            self.assertTrue((session_dir / '.gemini' / 'mcp_config.json').exists())
 
             # Verify JSON validity
             data = json.loads((session_dir / 'mcp.json').read_text(encoding='utf-8'))
@@ -125,6 +127,28 @@ class TestMCPConfig(unittest.TestCase):
         )
         self.assertEqual(cursor_info['agent'], 'cursor')
         self.assertEqual(cursor_info['command'], ['cursor', str(session_dir.resolve())])
+
+        # Gemini launch info
+        gemini_info = get_agent_launch_info(
+            session_id='session-pr-100',
+            session_dir=session_dir,
+            workspace_path=ws_path,
+            distro='rolling',
+            agent='gemini',
+        )
+        self.assertEqual(gemini_info['agent'], 'gemini')
+        self.assertEqual(gemini_info['command'], ['gemini', str(session_dir.resolve())])
+
+        # Antigravity launch info
+        ag_info = get_agent_launch_info(
+            session_id='session-pr-100',
+            session_dir=session_dir,
+            workspace_path=ws_path,
+            distro='rolling',
+            agent='antigravity',
+        )
+        self.assertEqual(ag_info['agent'], 'antigravity')
+        self.assertEqual(ag_info['command'], ['antigravity', str(session_dir.resolve())])
 
         # Shell launch info
         shell_info = get_agent_launch_info(

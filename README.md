@@ -13,6 +13,8 @@ This harness separates the environment into two distinct halves:
 1. **An isolated container sandbox** (a standard ROS 2 devcontainer) where the agent can build and test code locally. It only has read-only access to GitHub.
 2. **A host-side policy gateway** (an MCP server) running on your local machine. It holds your write credentials, evaluates push and CI requests against configurable policies, logs an audit trail, and handles heavy operations like Jenkins polling.
 
+A core principle of this setup is **local-first verification**: the agent performs as much compilation, linting, and regression testing as possible inside the local container sandbox before triggering remote Jenkins CI, minimizing strain on shared community build farm infrastructure (`ci.ros2.org`).
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ CONTAINER SANDBOX (ROS 2 Devcontainer)                      │
@@ -219,6 +221,21 @@ ros-maintainer-harness serve --transport sse --port 8765
 ```
 
 When sessions are created with `session create` or `session from-pr`, these client configs are generated automatically inside each session directory.
+
+## Documentation
+
+- **[End-to-End Walkthrough](docs/walkthrough.md)**: Complete step-by-step example of triaging and fixing a ROS 2 PR.
+- **[AI Agent Integration Guides](docs/agents/index.md)**: Setup tutorials for specific agents:
+  - [Antigravity / Gemini](docs/agents/antigravity.md)
+  - [Claude Code](docs/agents/claude_code.md)
+  - [Cursor](docs/agents/cursor.md)
+  - [VS Code & Extensions](docs/agents/vscode.md)
+  - [Interactive Shell](docs/agents/shell.md)
+- **[Policy & Security Model](docs/policy_and_security.md)**: Trust boundaries, `policy.yaml` configuration, and maintainer approvals.
+- **[GitHub Token Setup & Best Practices](docs/github_tokens.md)**: Two-token architecture, creating read-only tokens for the agent, and rate-limit management.
+- **[Container Runtimes & Sandboxing](docs/containers.md)**: Docker/Podman setup, devcontainers, DinD/DooD, and worktree layouts.
+- **[Shared Tools Catalog](docs/tools.md)**: Built-in utilities, design rationale, and guide for adding custom tools.
+- **[Architecture & Design Plan](docs/design.md)**: Original design specification and system architecture.
 
 ## License
 
