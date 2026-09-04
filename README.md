@@ -226,6 +226,7 @@ When sessions are created with `session create` or `session from-pr`, these clie
 
 - **[End-to-End Walkthrough](docs/walkthrough.md)**: Complete step-by-step example of triaging and fixing a ROS 2 PR.
 - **[AI Agent Integration Guides](docs/agents/index.md)**: Setup tutorials for specific agents:
+  - [Antigravity / Gemini](docs/agents/antigravity.md)
   - [Claude Code](docs/agents/claude_code.md)
   - [Cursor](docs/agents/cursor.md)
   - [VS Code & Extensions](docs/agents/vscode.md)

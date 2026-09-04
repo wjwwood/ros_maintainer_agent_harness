@@ -600,7 +600,7 @@ def parse_args():
     s_launch = session_subparsers.add_parser('launch', help='Launch AI coding agent or IDE in session')
     s_launch.add_argument('session_id', type=str, help='Session ID')
     s_launch.add_argument(
-        '--agent', choices=['claude', 'cursor', 'code', 'vscode', 'shell'], default='claude',
+        '--agent', choices=['claude', 'cursor', 'code', 'vscode', 'gemini', 'antigravity', 'shell'], default='claude',
         help='Agent or editor to launch (default: claude)',
     )
     s_launch.add_argument(

@@ -125,7 +125,7 @@ If you do not provide a token to the container:
 - However, GitHub limits unauthenticated REST API requests to **60 requests per hour per IP address**.
 - If the agent runs multiple API queries or inspects several PRs, it may hit rate-limiting errors (`403 API rate limit exceeded`).
 
-Supplying a read-only fine-grained token increases this limit to **5,000 requests per hour** while keeping write operations blocked.
+Supplying a read-only fine-grained token increases this limit to **5,000 requests per hour** (see the [GitHub REST API rate limits documentation](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#primary-rate-limit-for-authenticated-users)) while keeping write operations blocked.
 
 ---
 

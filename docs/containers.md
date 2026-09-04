@@ -56,7 +56,7 @@ Any container runtime can be used provided it meets the following criteria:
 3. **Host-Gateway Routing**: Supports resolving the host machine (e.g. `--add-host=host.docker.internal:host-gateway`) so the container can connect to the Host MCP Gateway.
 
 > [!WARNING]
-> Tools designed for seamless desktop integration—such as **Distrobox** or **Toolbox**—are **not suitable** for this harness. By design, those tools mount your entire host `$HOME` directory into the container and share host IPC, user IDs, and environment variables, which completely defeats the isolation purpose of the sandbox.
+> Tools designed for seamless desktop integration (such as **Distrobox** or **Toolbox**) are **not suitable** for this harness. By design, those tools mount your entire host `$HOME` directory into the container and share host IPC, user IDs, and environment variables, which completely defeats the isolation purpose of the sandbox.
 
 ---
 
@@ -68,7 +68,7 @@ When the harness runs directly on your local machine, **Docker-in-Docker (DinD) 
 ### When Running the Harness Itself in a Container
 If you are running the harness inside a containerized environment (such as GitHub Codespaces, a remote cloudtop container, or containerized CI):
 
-1. **Docker-outside-of-Docker (DooD) — Recommended**:
+1. **Docker-outside-of-Docker (DooD) (Recommended)**:
    Mount the host's Docker socket into the harness container:
    ```bash
    -v /var/run/docker.sock:/var/run/docker.sock

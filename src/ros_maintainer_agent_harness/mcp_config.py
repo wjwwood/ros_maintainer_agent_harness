@@ -52,6 +52,7 @@ def generate_mcp_server_entry(
         url = f"http://{host}:{port}/sse" if transport == 'sse' else f"http://{host}:{port}/mcp"
         return {
             'url': url,
+            'serverUrl': url,
             'type': transport,
         }
     else:
@@ -92,9 +93,9 @@ def write_session_mcp_configs(
     Write MCP client config files for various editors and agents inside a session directory.
 
     Supported formats: 'generic' (mcp.json), 'claude' (.mcp.json), 'cursor' (.cursor/mcp.json),
-    'vscode' (.vscode/mcp.json).
+    'vscode' (.vscode/mcp.json), 'gemini' (.gemini/mcp_config.json).
     """
-    selected_formats = formats or ['generic', 'claude', 'cursor', 'vscode']
+    selected_formats = formats or ['generic', 'claude', 'cursor', 'vscode', 'gemini']
     config_data = generate_mcp_config_dict(
         workspace_path=workspace_path,
         transport=transport,
@@ -129,6 +130,13 @@ def write_session_mcp_configs(
         p.write_text(config_json, encoding='utf-8')
         written_files['vscode'] = p
 
+    if 'gemini' in selected_formats or 'antigravity' in selected_formats:
+        gemini_dir = session_dir / '.gemini'
+        gemini_dir.mkdir(parents=True, exist_ok=True)
+        p = gemini_dir / 'mcp_config.json'
+        p.write_text(config_json, encoding='utf-8')
+        written_files['gemini'] = p
+
     return written_files
 
 
@@ -158,6 +166,12 @@ def get_agent_launch_info(
     elif agent == 'code' or agent == 'vscode':
         cmd = ['code', str(session_dir.resolve())]
         description = f"Open VS Code in session '{session_id}'"
+    elif agent == 'gemini':
+        cmd = ['gemini', str(session_dir.resolve())]
+        description = f"Launch Gemini agent in session '{session_id}'"
+    elif agent == 'antigravity':
+        cmd = ['antigravity', str(session_dir.resolve())]
+        description = f"Open Antigravity in session '{session_id}'"
     elif agent == 'shell':
         cmd = ['bash']
         description = f"Interactive shell in session '{session_id}' workspace"

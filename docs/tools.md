@@ -22,15 +22,15 @@ The harness decouples script definitions from the Python runtime:
 
 Rather than acting as general-purpose wrappers, the built-in scripts address specific pain points in ROS 2 maintainer workflows:
 
-### ros-session-status — Structured Narrative & Milestones
+### ros-session-status: Structured Narrative & Milestones
 - **The Problem**: AI agents tend to write unstructured or verbose notes, making it hard for a human maintainer to skim the current state of a task after several hours.
 - **How it Works**: Appends timestamped status updates or milestone badges (🏆 Milestone: ...) to sessions/<id>/timeline.md. Maintainers can open timeline.md in an editor or preview panel to instantly see what the agent has attempted, what failed, and what passed.
 
-### ros-find-restarted-ci — Discovering Rescheduled Jenkins Builds
+### ros-find-restarted-ci: Discovering Rescheduled Jenkins Builds
 - **The Problem**: On ROS 2 repositories, automated pre-release PR testing runs on `build.ros2.org` (reporting via GitHub Commit Statuses/Checks). In addition, maintainers run on-demand multi-platform test matrix jobs on `ci.ros2.org` (often triggered via `ros-ci-for-pr`), which track build results by posting markdown status tables and badges into PR comments. When multiple jobs are re-triggered, tracking down which Jenkins build corresponds to the latest commit across long comment threads is error-prone.
 - **How it Works**: Inspects `ci.ros2.org` for active, queued, or rescheduled jobs associated with a PR, parses their parameters, and updates the GitHub PR status comment with the latest build links in-place.
 
-### ros-ci-for-pr & ros-ci-status — Sandboxed CI Interaction
+### ros-ci-for-pr & ros-ci-status: Sandboxed CI Interaction
 - **The Problem**: The container sandbox has no Jenkins API tokens or credentials, preventing the agent from triggering builds directly via curl.
 - **How it Works**: These scripts check for the ROS_MAINTAINER_GATEWAY_URL environment variable. When present, they submit CI requests and query build status through the Host MCP Gateway, allowing the agent to launch and check CI while keeping credentials secure on the host.
 

@@ -113,7 +113,7 @@ Agents use this tool during long-running tasks to record periodic status notes. 
 # Session Timeline: PR #160 (rosidl_typesupport_fastrtps)
 
 - **[22:05:12]** Initialized workspace on branch `maintainer/enforce_cppcheck_lyrical`.
-- **[22:08:43]** **Action (Push)**: Pushed commit `024696d` — *Cherry-picked commit 77ab234 to resolve lyrical compiler warning*.
+- **[22:08:43]** **Action (Push)**: Pushed commit `024696d` (*Cherry-picked commit 77ab234 to resolve lyrical compiler warning*).
 - **[22:10:05]** **Action (CI)**: Launched Jenkins CI run `#20143` on `lyrical` desktop.
 - **[22:45:20]** **Status**: Linux, Linux-aarch64, and Linux-rhel finished SUCCESS. Windows job 29019 disconnected due to runner node restart.
 - **[22:48:10]** **Action (CI Comment)**: Discovered rescheduled Windows build `29041` (queued at position #1); updated GitHub PR comment in-place.
@@ -125,7 +125,7 @@ Agents use this tool during long-running tasks to record periodic status notes. 
 ## 5. Policy Structure: Invariants vs. Configurable Settings
 
 ### Built-in Invariants
-* **No Conversational Comments**: The harness provides no general comment posting tool—preventing accidental impersonation.
+* **No Conversational Comments**: The harness provides no general comment posting tool, preventing accidental impersonation.
 * **No Auto-Merging**: Merging pull requests is strictly reserved for maintainers.
 * **No Direct Base Branch Pushes**: Pushes to `main`, `master`, `rolling`, `jazzy`, etc. are blocked at the gateway level.
 * **No Unapproved PR/Issue Creation**: Opening PRs/issues requires explicit interactive maintainer approval.
@@ -178,7 +178,7 @@ flowchart TD
 
 ### Detailed Workflow Mechanics
 1. **Full Workspace Visibility on Host**:
-   * Every file created by the agent—including source code (`src/`), build targets (`build/`), generated headers and libraries (`install/`), compilation/test logs (`log/`), and status timelines (`timeline.md`)—is bind-mounted directly to the host session folder.
+   * Every file created by the agent (including source code, build targets, generated headers and libraries, compilation/test logs, and status timelines) is bind-mounted directly to the host session folder.
    * Maintainers can inspect compiler outputs, debug test failures, or make manual edits in their native host editor without entering the container.
 2. **Git Worktree Storage Sharing**:
    * To prevent duplicate downloads and heavy disk usage from multiple copies of the ROS 2 repository tree, `shared_repos/` holds central git clones.

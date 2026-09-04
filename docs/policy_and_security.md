@@ -32,7 +32,7 @@ The core objective of the harness is to allow an autonomous AI coding agent to e
 This architecture is intended to raise the bar against accidental misuse and minimize credential exposure. It provides defense-in-depth, but no guarantees of absolute safety against intentional evasion or container escape vulnerabilities.
 
 - **Limiting Credential Exposure**: Host SSH private keys and write tokens are kept on the host machine and are not mounted into the container. An agent operating inside the container has no direct access to host authentication material.
-- **Accident Prevention**: The agent cannot run `git push origin main` or trigger runaway Jenkins rebuilds via simple shell commands, as the container lacks network credentials to do so. All remote operations must pass through the Host Gateway.
+- **Accident Prevention**: The agent cannot run `git push origin main` or trigger runaway Jenkins rebuilds via simple shell commands, as the container lacks write credentials to do so. Read-only remote operations like `git fetch` or `git clone` can work directly (via public access or a scoped read-only token), but all mutating or write-like remote operations (such as pushing branches, triggering CI, or opening pull requests) must pass through the Host Gateway.
 
 ---
 
@@ -98,7 +98,7 @@ ros-maintainer-harness policy check --branch wjwwood/my-feature --repo ros2/rclc
 
 ## 4. Maintainer Approval Workflow
 
-For sensitive operations—such as pushing to an external contributor's fork or creating a PR—the gateway creates an approval ticket rather than immediately executing the request.
+For sensitive operations (such as pushing to an external contributor's fork or creating a PR), the gateway creates an approval ticket rather than immediately executing the request.
 
 1. **Ticket Creation**: The gateway writes a pending ticket to `audit/approvals.json` and returns `PENDING_APPROVAL` with a unique request ID (e.g. `req-1234abcd`).
 2. **Reviewing Tickets**:
@@ -148,9 +148,9 @@ This file is automatically mounted into every session container as `/workspace/M
 
 Common rules to include:
 - **Local-First Verification**: Maximize local testing (building and executing affected unit and integration tests inside the container sandbox) before triggering remote Jenkins CI. Shared build farm infrastructure (`ci.ros2.org`) has limited capacity; running broken builds on CI wastes community resources.
-- **AI Attribution**: Ensuring all AI assistance, models, and harnesses used are explicitly acknowledged in PR descriptions and commit metadata, along with confirmation that human maintainer review has taken place.
+- **AI Attribution**: Ensuring all AI assistance, models, and harnesses used are explicitly acknowledged in PR descriptions and commit metadata.
 - **DCO Sign-off**: Requiring `Signed-off-by:` on all commits.
-- **Diff Secret & Credential Scanning**: Directing the agent to inspect incoming PR diffs on first review for accidentally committed secrets, credentials, API tokens, or modified CI workflows.
+- **Diff Secret & Credential Scanning**: Directing the agent to inspect incoming PR diffs on first review for accidentally committed secrets, credentials, API tokens, or modified CI workflows, with the intent to notify the maintainer if anything suspicious is found.
 - **Testing Requirements**: Requiring all bugfixes and new features to include regression unit tests.
 - **Code Style**: Pointers to linters (`ament_flake8`, `ament_uncrustify`, `ament_cpplint`) and C++ standards.
 
