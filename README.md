@@ -1,4 +1,4 @@
-# ros-maintainer-agent-harness
+# ros_maintainer_agent_harness
 
 A development harness (sandboxed workspaces and tooling) and policy-enforcing MCP server for AI coding agents working on ROS 2.
 
