@@ -33,6 +33,7 @@ This architecture is intended to raise the bar against accidental misuse and min
 
 - **Limiting Credential Exposure**: Host SSH private keys and write tokens are kept on the host machine and are not mounted into the container. An agent operating inside the container has no direct access to host authentication material.
 - **Accident Prevention**: The agent cannot run `git push origin main` or trigger runaway Jenkins rebuilds via simple shell commands, as the container lacks write credentials to do so. Read-only remote operations like `git fetch` or `git clone` can work directly (via public access or a scoped read-only token), but all mutating or write-like remote operations (such as pushing branches, triggering CI, or opening pull requests) must pass through the Host Gateway.
+- **Untrusted PR Code Execution**: Pull requests from external contributors contain untrusted code. If a PR modifies build scripts (`CMakeLists.txt`, `setup.py`) or test cases, running `colcon build` or `colcon test` executes that code locally inside the container sandbox. While the sandbox lacks host write credentials, untrusted code could attempt to exfiltrate container tokens over the network or abuse local compute. For this reason, inspecting the PR diff must always occur *before* building or running tests, and any suspicious modifications must be reported to the maintainer immediately.
 
 ---
 
@@ -150,7 +151,11 @@ Common rules to include:
 - **Local-First Verification**: Maximize local testing (building and executing affected unit and integration tests inside the container sandbox) before triggering remote Jenkins CI. Shared build farm infrastructure (`ci.ros2.org`) has limited capacity; running broken builds on CI wastes community resources.
 - **AI Attribution**: Ensuring all AI assistance, models, and harnesses used are explicitly acknowledged in PR descriptions and commit metadata.
 - **DCO Sign-off**: Requiring `Signed-off-by:` on all commits.
-- **Diff Secret & Credential Scanning**: Directing the agent to inspect incoming PR diffs on first review for accidentally committed secrets, credentials, API tokens, or modified CI workflows, with the intent to notify the maintainer if anything suspicious is found.
+- **Pre-Build Diff Inspection & Security Scanning**: On initial review of any incoming PR or untrusted branch, the agent must inspect the diff *before* building changed code or running any tests. The inspection must verify:
+  - No accidentally committed secrets, credentials, or API tokens.
+  - No modified CI workflows (such as `.github/workflows/`) that could tamper with automation or attempt to dump repository/runner secrets.
+  - No suspicious modifications to build scripts (`CMakeLists.txt`, `setup.py`, package manifests) or test code that could execute arbitrary commands, establish unauthorized network connections, or attempt to exfiltrate secrets during local `colcon build` or `colcon test` runs.
+  If any suspicious or unexpected changes are found, the agent must halt immediately and notify the maintainer before executing any builds or tests.
 - **Testing Requirements**: Requiring all bugfixes and new features to include regression unit tests.
 - **Code Style**: Pointers to linters (`ament_flake8`, `ament_uncrustify`, `ament_cpplint`) and C++ standards.
 

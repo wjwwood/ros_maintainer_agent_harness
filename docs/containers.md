@@ -12,7 +12,7 @@ By sandboxing each session in a container:
 1. The agent gets root inside the container to install packages or build code, without affecting host system libraries.
 2. The container environment has no direct access to host credentials (host credential directories like `~/.ssh` and `~/.git-credentials` are not mounted into the container).
 3. Build artifacts (`build/`, `install/`, `log/`) are isolated per session, so multiple PR investigations can run in parallel without cross-contamination.
-4. Maintainers and agents can inspect incoming PR diffs on first review for suspicious files or accidentally committed secrets before running builds.
+4. Maintainers and agents can inspect incoming PR diffs on first review for suspicious files, modified workflows, or untrusted build/test code before running any builds or tests.
 
 ---
 

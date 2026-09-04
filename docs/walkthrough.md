@@ -40,7 +40,7 @@ Claude starts in `sessions/pr-rclcpp-160/` with the MCP server active and enviro
 Give Claude its initial prompt:
 
 ```text
-Please read TASK.md and MAINTAINER_RULES.md. Inspect the changes in src/rclcpp, build the package with colcon, and run the test suite to reproduce the reported issue.
+Please read TASK.md and MAINTAINER_RULES.md. First inspect the diff in src/rclcpp against origin/rolling for any suspicious modifications to build scripts, test code, or CI workflows, and check for committed credentials. Once verified safe, build the package with colcon and run the test suite to reproduce the reported issue.
 ```
 
 ---
@@ -49,23 +49,25 @@ Please read TASK.md and MAINTAINER_RULES.md. Inspect the changes in src/rclcpp, 
 
 Inside the container sandbox, the agent works autonomously:
 
-1. **Builds the package**:
+1. **Inspects the diff before building**:
+   Checks `git diff origin/rolling` to understand the PR changes and ensure there are no suspicious build script alterations (`CMakeLists.txt`, `package.xml`), unexpected network calls in test code, or committed secrets before running local builds.
+2. **Builds the package**:
    ```bash
    colcon build --symlink-install --packages-select rclcpp
    ```
-2. **Runs the test suite**:
+3. **Runs the test suite**:
    ```bash
    colcon test --packages-select rclcpp --pytest-args -k test_timer
    colcon test-result --verbose
    ```
-3. **Logs progress**:
+4. **Logs progress**:
    The agent records status notes to `timeline.md` (e.g. using the `log_status` tool or `ros-session-status` script):
    ```
    - **[14:22:10]** **Status**: Reproduced deadlock in test_timer_callback_after_shutdown
    ```
-4. **Applies the fix**:
+5. **Applies the fix**:
    The agent edits the source files in `src/rclcpp/` and reruns tests until they pass.
-5. **Commits locally**:
+6. **Commits locally**:
    The agent commits the change to the local `pr-160` branch, ensuring maintainer DCO sign-off conventions are respected:
    ```bash
    git commit -s -m "Fix deadlock in timer callback during executor shutdown"

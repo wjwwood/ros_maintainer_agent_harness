@@ -103,6 +103,7 @@ class TestScaffolder(unittest.TestCase):
             self.assertTrue((res.session_dir / '.mcp.json').exists())
             self.assertTrue((res.session_dir / '.cursor' / 'mcp.json').exists())
             self.assertTrue((res.session_dir / '.vscode' / 'mcp.json').exists())
+            self.assertTrue((res.session_dir / '.gemini' / 'mcp_config.json').exists())
 
             # Check timeline.md and TASK.md
             self.assertTrue(res.timeline_path.exists())

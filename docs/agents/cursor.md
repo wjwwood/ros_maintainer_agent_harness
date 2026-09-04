@@ -51,7 +51,7 @@ In Cursor, verify that the tools are active:
 2. Ensure Composer is set to **Agent** mode (not Normal mode), so it has permission to run terminal commands and call MCP tools.
 3. Provide your prompt:
    ```text
-   Review @TASK.md and @MAINTAINER_RULES.md. Inspect the diff in @src/ and run colcon test to verify the current state. Record your progress to @timeline.md using the log_status tool.
+   Review @TASK.md and @MAINTAINER_RULES.md. Inspect the diff in @src/ for any suspicious build or test modifications before building. Once verified safe, run colcon test to establish a baseline and record progress to @timeline.md using log_status.
    ```
 
 ## Running Inside the Devcontainer

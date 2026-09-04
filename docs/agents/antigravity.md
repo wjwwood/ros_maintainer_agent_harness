@@ -60,7 +60,7 @@ In Antigravity, verify that the server is active under **Settings > MCP Servers*
 Direct the agent to inspect the synthesized task instructions and maintainer rules:
 
 ```text
-Please read TASK.md and MAINTAINER_RULES.md. Review the PR changes in src/, run local tests with colcon test to establish a baseline, and record your findings to timeline.md using the log_status tool.
+Please read TASK.md and MAINTAINER_RULES.md. Inspect the PR diff in src/ for any suspicious modifications or committed credentials before building. Once verified safe, build and run local tests with colcon to establish a baseline, and record findings to timeline.md using log_status.
 ```
 
 ## Running Inside Containers or Remote Environments

@@ -81,9 +81,9 @@ def generate_task_prompt(meta: PRMetadata, distro: str) -> str:
 ---
 
 ## Agent Objectives & Guidelines
-1. **Workspace Inspection**:
-   - Inspect the checked-out PR branch in `src/{meta.repo}`.
-   - Review the diff against `origin/{meta.base_ref}`.
+1. **Workspace Inspection & Security Review**:
+   - Inspect the checked-out PR branch in `src/{meta.repo}` and review the diff against `origin/{meta.base_ref}`.
+   - **Important**: Inspect the diff *before* building or running tests. Check for accidentally committed secrets, modified CI workflows, or suspicious changes in build scripts and test code (e.g. unexpected network calls or command execution). If anything suspicious is found, halt and notify the maintainer.
 
 2. **Build & Local Testing**:
    - Build packages with colcon:

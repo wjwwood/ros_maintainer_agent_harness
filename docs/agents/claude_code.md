@@ -30,7 +30,7 @@ This launches Claude with:
 When Claude Code starts, give it an initial prompt pointing to the session instructions:
 
 ```text
-Please read TASK.md and MAINTAINER_RULES.md. Review the PR changes in src/, check if there are test failures, and log your initial findings to timeline.md.
+Please read TASK.md and MAINTAINER_RULES.md. Inspect the PR diff in src/ for any suspicious changes or credentials before building. Once verified safe, build with colcon, check test results, and log your findings to timeline.md.
 ```
 
 Because `TASK.md` was generated during session creation, it already contains the PR title, author, description, changed files list, and verification objectives.
