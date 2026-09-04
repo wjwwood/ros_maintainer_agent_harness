@@ -27,9 +27,12 @@ The core objective of the harness is to allow an autonomous AI coding agent to e
 └────────────────────────────────────────────────────────┘
 ```
 
-### Why Containment Matters
-- **Credential Theft / Leakage**: If an agent is tricked by a malicious pull request or repository (e.g., via prompt injection in an issue description or source code), it cannot exfiltrate host SSH keys or write tokens because they are not mounted into the container.
-- **Accidental Side Effects**: The agent cannot run `git push origin main` or trigger endless Jenkins rebuilds because the container has no network credentials to do so. All remote requests must pass through the Host Gateway.
+### Containment & Threat Model Posture
+
+This architecture is intended to raise the bar against accidental misuse and minimize credential exposure. It provides defense-in-depth, but no guarantees of absolute safety against intentional evasion or container escape vulnerabilities.
+
+- **Limiting Credential Exposure**: Host SSH private keys and write tokens are kept on the host machine and are not mounted into the container. An agent operating inside the container has no direct access to host authentication material.
+- **Accident Prevention**: The agent cannot run `git push origin main` or trigger runaway Jenkins rebuilds via simple shell commands, as the container lacks network credentials to do so. All remote operations must pass through the Host Gateway.
 
 ---
 
@@ -46,7 +49,9 @@ Certain rules are non-configurable invariants enforced directly in code:
 
 ## 3. Configurable Policies (`config/policy.yaml`)
 
-Policies can be tuned per workspace in `config/policy.yaml`:
+Policies are currently configured workspace-wide in `config/policy.yaml`. 
+
+*(Note: In the current implementation, policies apply across all sessions in a workspace. A planned future enhancement is **per-session policy scoping**, which will allow constraining a specific session to only push to its target PR branch, preventing a session working on PR A from accidentally modifying branches for PR B).*
 
 ```yaml
 version: 1
@@ -142,7 +147,19 @@ In addition to programmatic policies, maintainers can document guidelines, conve
 This file is automatically mounted into every session container as `/workspace/MAINTAINER_RULES.md` (read-only) and can be queried by agents via the `get_maintainer_rules` MCP tool.
 
 Common rules to include:
+- **Local-First Verification**: Maximize local testing (building and executing affected unit and integration tests inside the container sandbox) before triggering remote Jenkins CI. Shared build farm infrastructure (`ci.ros2.org`) has limited capacity; running broken builds on CI wastes community resources.
+- **AI Attribution**: Ensuring all AI assistance, models, and harnesses used are explicitly acknowledged in PR descriptions and commit metadata, along with confirmation that human maintainer review has taken place.
 - **DCO Sign-off**: Requiring `Signed-off-by:` on all commits.
-- **AI Attribution**: Stating whether AI assistance should be acknowledged in PR descriptions.
-- **Testing Requirements**: Requiring all new features to include unit tests.
-- **Code Style**: Pointers to linters, uncrustify configs, and C++ standards.
+- **Diff Secret & Credential Scanning**: Directing the agent to inspect incoming PR diffs on first review for accidentally committed secrets, credentials, API tokens, or modified CI workflows.
+- **Testing Requirements**: Requiring all bugfixes and new features to include regression unit tests.
+- **Code Style**: Pointers to linters (`ament_flake8`, `ament_uncrustify`, `ament_cpplint`) and C++ standards.
+
+---
+
+## 7. GitHub Token Strategy (Host vs. Container)
+
+A critical part of maintaining containment is isolating GitHub credentials:
+- **The Host Gateway Token**: Holds write permissions (to push approved branches and create PRs). It stays strictly on the host.
+- **The Container Token**: If provided to the agent, it should be a **strictly read-only, fine-grained Personal Access Token (PAT)** scoped only to the relevant repositories. Never pass your personal write token or `gh` CLI credentials into the container.
+
+For detailed instructions on generating and configuring scoped tokens, see [GitHub Token Setup & Best Practices](github_tokens.md).

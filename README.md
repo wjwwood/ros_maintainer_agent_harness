@@ -13,6 +13,8 @@ This harness separates the environment into two distinct halves:
 1. **An isolated container sandbox** (a standard ROS 2 devcontainer) where the agent can build and test code locally. It only has read-only access to GitHub.
 2. **A host-side policy gateway** (an MCP server) running on your local machine. It holds your write credentials, evaluates push and CI requests against configurable policies, logs an audit trail, and handles heavy operations like Jenkins polling.
 
+A core principle of this setup is **local-first verification**: the agent performs as much compilation, linting, and regression testing as possible inside the local container sandbox before triggering remote Jenkins CI, minimizing strain on shared community build farm infrastructure (`ci.ros2.org`).
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ CONTAINER SANDBOX (ROS 2 Devcontainer)                      │
@@ -229,6 +231,7 @@ When sessions are created with `session create` or `session from-pr`, these clie
   - [VS Code & Extensions](docs/agents/vscode.md)
   - [Interactive Shell](docs/agents/shell.md)
 - **[Policy & Security Model](docs/policy_and_security.md)**: Trust boundaries, `policy.yaml` configuration, and maintainer approvals.
+- **[GitHub Token Setup & Best Practices](docs/github_tokens.md)**: Two-token architecture, creating read-only tokens for the agent, and rate-limit management.
 - **[Container Runtimes & Sandboxing](docs/containers.md)**: Docker/Podman setup, devcontainers, DinD/DooD, and worktree layouts.
 - **[Shared Tools Catalog](docs/tools.md)**: Built-in utilities, design rationale, and guide for adding custom tools.
 - **[Architecture & Design Plan](docs/design.md)**: Original design specification and system architecture.

@@ -118,22 +118,28 @@ When the agent is ready to push its branch to remote:
    }
    ```
 2. **Policy Evaluation**:
-   - The gateway checks if the branch matches allowed patterns (e.g., `^wjwwood/.*$`).
-   - If pushing to the maintainer's own fork/branch, the push proceeds automatically.
-   - If pushing directly to a 3rd-party contributor's fork, the policy requires explicit maintainer approval. The tool returns:
+   - The gateway evaluates the push against `config/policy.yaml`:
+     - The target branch must match `allowed_branch_patterns` (e.g., `^wjwwood/.*$`).
+     - The target repository must match `allowed_repositories` (e.g., `ros2/*`).
+     - Direct pushes to base branches (`main`, `rolling`, `jazzy`, etc.) are blocked.
+   - If the push satisfies all policy rules and targets the maintainer's own fork or branch, the push proceeds without requiring an approval ticket.
+   - If the push targets an external third-party contributor's fork (and `require_fork_approval: true`), the gateway creates a pending approval ticket and returns:
      ```json
      {
        "status": "PENDING_APPROVAL",
        "request_id": "req-9a8b7c6d",
-       "message": "Push to external fork requires maintainer approval."
+       "message": "Push to external fork requires maintainer approval. Request ID: req-9a8b7c6d"
      }
      ```
 3. **Maintainer Approval**:
-   You inspect the diff in the session worktree, then approve the ticket:
+   The agent reports the ticket ID in the chat session and pauses. You inspect the diff in the session worktree, then approve the ticket on the host:
    ```bash
    ros-maintainer-harness approval approve req-9a8b7c6d --comment "Verified locally and on CI"
    ```
-4. The agent retries `git_push`, which succeeds now that the approval ticket is granted.
+4. **Resuming the Push**:
+   Once you notify the agent that the request has been approved, the agent retries `git_push`. The gateway finds the active approved ticket in `audit/approvals.json` and executes the push.
+
+   *(Note: Currently, the agent relies on user confirmation in chat to know when an approval ticket is granted. A potential future enhancement is an event-driven notification or a blocking `wait_for_approval` tool so the agent can resume automatically).*
 
 ---
 

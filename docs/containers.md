@@ -6,15 +6,13 @@ This document describes how the harness isolates agent sessions using container 
 
 ## 1. Why Container Sandboxes?
 
-Running an AI coding agent directly on your host machine has serious risks:
-- Agents may run arbitrary shell commands, install system-level packages, or modify environment configurations.
-- Host credentials (such as SSH private keys in `~/.ssh` or API tokens in `~/.git-credentials`) could be accessed or accidentally leaked.
-- Compiling complex ROS 2 packages requires extensive system dependencies (`ros-jazzy-desktop`, compiler toolchains, etc.) that can conflict with host libraries.
+Running an autonomous coding agent directly on your host machine introduces practical risks of unintended actions (such as accidental file modifications, running untrusted build scripts, or altering host configurations). While containerization does not eliminate all security risks, it helps isolate the agent's filesystem and dependencies, reducing the chance of accidental interference with the host.
 
 By sandboxing each session in a container:
-1. The agent gets root inside the container to install packages or build code, without affecting the host.
-2. The agent has no access to host credentials.
+1. The agent gets root inside the container to install packages or build code, without affecting host system libraries.
+2. The container environment has no direct access to host credentials (host credential directories like `~/.ssh` and `~/.git-credentials` are not mounted into the container).
 3. Build artifacts (`build/`, `install/`, `log/`) are isolated per session, so multiple PR investigations can run in parallel without cross-contamination.
+4. Maintainers and agents can inspect incoming PR diffs on first review for suspicious files or accidentally committed secrets before running builds.
 
 ---
 
@@ -50,6 +48,15 @@ Docker is the standard container runtime. The devcontainer configurations genera
 You can also use Podman as your OCI container engine:
 - Ensure the Podman socket is active (`systemctl --user start podman.socket`).
 - When using rootless Podman, user namespace mapping ensures files created in the bind-mounted workspace remain owned by your host user.
+
+### Other Runtimes & Criteria for Suitability
+Any container runtime can be used provided it meets the following criteria:
+1. **OCI Image Support**: Can pull and run standard Debian/Ubuntu-based ROS 2 images.
+2. **Discrete Bind Mounts**: Allows mounting only the specific session workspace directory (`sessions/<id>/`) and shared tools (`tools/`), rather than broad host paths.
+3. **Host-Gateway Routing**: Supports resolving the host machine (e.g. `--add-host=host.docker.internal:host-gateway`) so the container can connect to the Host MCP Gateway.
+
+> [!WARNING]
+> Tools designed for seamless desktop integration—such as **Distrobox** or **Toolbox**—are **not suitable** for this harness. By design, those tools mount your entire host `$HOME` directory into the container and share host IPC, user IDs, and environment variables, which completely defeats the isolation purpose of the sandbox.
 
 ---
 

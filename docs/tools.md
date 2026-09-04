@@ -27,8 +27,8 @@ Rather than acting as general-purpose wrappers, the built-in scripts address spe
 - **How it Works**: Appends timestamped status updates or milestone badges (🏆 Milestone: ...) to sessions/<id>/timeline.md. Maintainers can open timeline.md in an editor or preview panel to instantly see what the agent has attempted, what failed, and what passed.
 
 ### ros-find-restarted-ci — Discovering Rescheduled Jenkins Builds
-- **The Problem**: On ROS 2 repositories, Jenkins CI builds on ci.ros2.org are frequently triggered or rescheduled by maintainers through comment phrases (@ros-pull-request-builder retest this please). Tracking down which build corresponds to the latest commit across long GitHub comment threads is error-prone.
-- **How it Works**: Inspects the Jenkins build farm for queued or running jobs associated with a PR, parses their parameters, and optionally updates the GitHub PR status comment with active build links in-place.
+- **The Problem**: On ROS 2 repositories, automated pre-release PR testing runs on `build.ros2.org` (reporting via GitHub Commit Statuses/Checks). In addition, maintainers run on-demand multi-platform test matrix jobs on `ci.ros2.org` (often triggered via `ros-ci-for-pr`), which track build results by posting markdown status tables and badges into PR comments. When multiple jobs are re-triggered, tracking down which Jenkins build corresponds to the latest commit across long comment threads is error-prone.
+- **How it Works**: Inspects `ci.ros2.org` for active, queued, or rescheduled jobs associated with a PR, parses their parameters, and updates the GitHub PR status comment with the latest build links in-place.
 
 ### ros-ci-for-pr & ros-ci-status — Sandboxed CI Interaction
 - **The Problem**: The container sandbox has no Jenkins API tokens or credentials, preventing the agent from triggering builds directly via curl.
