@@ -182,7 +182,7 @@ def fetch_pr_metadata_via_api(owner: str, repo: str, number: int) -> PRMetadata:
     """Fetch PR details using GitHub REST API."""
     api_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}"
     req = urllib.request.Request(api_url)
-    req.add_header('User-Agent', 'ros-maintainer-agent-harness')
+    req.add_header('User-Agent', 'ros_maintainer_agent_harness')
     req.add_header('Accept', 'application/vnd.github.v3+json')
 
     token = get_github_token()
@@ -209,7 +209,7 @@ def fetch_pr_metadata_via_api(owner: str, repo: str, number: int) -> PRMetadata:
     try:
         files_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}/files"
         f_req = urllib.request.Request(files_url)
-        f_req.add_header('User-Agent', 'ros-maintainer-agent-harness')
+        f_req.add_header('User-Agent', 'ros_maintainer_agent_harness')
         if token:
             f_req.add_header('Authorization', f"Bearer {token}")
         with urllib.request.urlopen(f_req, timeout=10) as f_resp:

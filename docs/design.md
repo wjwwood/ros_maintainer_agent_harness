@@ -1,4 +1,4 @@
-# Architecture & Design Plan: `ros-maintainer-agent-harness`
+# Architecture & Design Plan: `ros_maintainer_agent_harness`
 
 ## 1. Vision & Purpose
 
@@ -246,4 +246,4 @@ The MCP server runs on the maintainer's host machine. FastMCP supports both stan
   * Integrate `ros-ci-for-pr` and `ros-find-restarted-ci`.
 * **Phase 3: Devcontainer Templates & Distribution**
   * Create standard `.devcontainer` configuration mounting workspace and tools.
-  * Package as a clean CLI tool (`pip install ros-maintainer-agent-harness`).
+  * Package as a clean CLI tool (`pip install ros_maintainer_agent_harness`).
