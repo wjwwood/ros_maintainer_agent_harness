@@ -47,14 +47,14 @@ You can start an Antigravity or Gemini conversation in either of two ways:
 
 ### Option B: Open the Maintainer Workspace Root as a "Maintainer Hub" (Recommended)
 
-1. Open `~/ros_maintenance_ws` (or this repository) as your workspace in Antigravity/Jetski.
+1. Open `~/ros_maintenance_ws` (or this repository) as your workspace in Antigravity.
 2. Antigravity automatically discovers `AGENTS.md` at the workspace root.
 3. Use a single long-lived **Maintainer Hub** conversation to coordinate your work across multiple PRs:
    - **Check Status Across All Tasks**:
      ```text
      What is the status of things we're still working on?
      ```
-     Calls `get_workspace_status` (or `ros-maintainer-harness status`) to display all active sessions, clickable `[<session_id>](conversation://<id>)` links, latest milestones, container state, CI runs, and pending approvals.
+     Calls `get_workspace_status` (or `ros-maintainer-harness status`) to display all active sessions, clickable `[<session_id>](conversation://<id>)` and `[<session_id>](file://<session_dir>)` links, latest milestones, container state, CI runs, and pending approvals.
    - **Triage What to Work on Next**:
      ```text
      What should I work on next?
@@ -64,12 +64,12 @@ You can start an Antigravity or Gemini conversation in either of two ways:
      ```text
      I want to work on ros2/rclcpp#160
      ```
-     Calls `start_session_conversation(pr_ref="ros2/rclcpp#160")`, which scaffolds `sessions/pr-rclcpp-160/`, launches a dedicated top-level conversation via `agentapi new-conversation` (or spawns a background subagent via `invoke_subagent`), links the `conversation_id` in `session.json`, and returns a clickable `conversation://<id>` link in the Hub chat.
+     Calls `start_session_conversation(pr_ref="ros2/rclcpp#160")`, which scaffolds `sessions/pr-rclcpp-160/`, pre-starts the session container (`ros-harness-pr-rclcpp-160`), launches a dedicated top-level conversation via `agentapi new-conversation` (or spawns a background subagent via `invoke_subagent`), links the `conversation_id` in `session.json`, and returns clickable `conversation://<id>` and `file://<session_dir>` links in the Hub chat.
 
-## How Containerized Execution Works for Host Agents & Subagents
+## How Containerized Execution Works (`PreToolUse` Hooks)
 
-When Antigravity or its spawned subagents (`invoke_subagent`) run on the host OS, their standard shell tool executes on the host. To ensure untrusted PR code is never compiled or executed on the host machine:
-- Every session has a dedicated container (`ros-harness-<session_id>`) managed by `session up`, `session exec`, and `session down` (or the MCP tools `start_session_container`, `exec_in_session`, and `stop_session_container`).
-- The container bind-mounts both the session directory (`/workspace`) and `shared_repos/` at its host path so linked Git worktrees resolve seamlessly inside the container.
-- All `colcon build` and `colcon test` commands run inside `ros-harness-<session_id>` with `/opt/ros/$ROS_DISTRO/setup.bash` automatically sourced.
-
+When Antigravity, Gemini CLI, or Claude Code runs on the host OS, its standard shell tool (`run_command` or `Bash`) normally executes on the host. To ensure untrusted PR code is never compiled or executed on the host machine and that the agent never accidentally uses host credentials:
+- Running `ros-maintainer-harness init` and `ros-maintainer-harness mcp-install` installs `PreToolUse` hooks in `.agents/hooks.json`, `_agents/hooks.json`, `.claude/settings.json`, and `~/.gemini/config/hooks.json`.
+- Whenever an agent runs a command with `Cwd` inside `~/ros_maintenance_ws/sessions/<session_id>` (or inside a conversation linked to `<session_id>` in `session.json`), `ros-maintainer-harness hook pre-tool-use` intercepts the tool call and rewrites `CommandLine` to execute inside the session container (`ros-harness-<session_id>`).
+- The session agent can run `colcon build`, `colcon test`, `git`, `gh`, and `pytest` directly without prefixing every command with `ros-maintainer-harness session exec`, and cannot bypass the container or leak host `gh` credentials by omitting the prefix.
+- Direct `colcon` or `rosdep` invocations on the host outside any session are automatically denied by the hook.

@@ -16,7 +16,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
+import sys
 from typing import Any, Dict, List, Optional
 
 DEFAULT_DISTRO_IMAGES = {
@@ -149,7 +151,7 @@ def check_token_and_environment(workspace_root: Path) -> Dict[str, Any]:
         and container_token == gh_cli_token
     )
 
-    # Check global MCP config for Gemini/Jetski/Antigravity or Claude
+    # Check global MCP config for Gemini/Antigravity or Claude
     global_mcp_configured = False
     try:
         home_dir = Path.home()
@@ -275,6 +277,9 @@ def generate_devcontainer_config(
         "postCreateCommand": (
             "bash -c 'source /opt/ros/$ROS_DISTRO/setup.bash 2>/dev/null && "
             "echo \"source /opt/ros/$ROS_DISTRO/setup.bash\" >> ~/.bashrc && "
+            "git config --global --add safe.directory \"*\" 2>/dev/null || true && "
+            f"mkdir -p {shlex.quote(str(session_dir.parent))} && "
+            f"ln -sfn /workspace {shlex.quote(str(session_dir))} && "
             "(pip install -r /workspace/tools/requirements.txt 2>/dev/null || true)'"
         ),
     }
@@ -398,22 +403,37 @@ def start_session_container(
     if rules_file.exists():
         cmd.extend(['-v', f"{rules_file}:/workspace/MAINTAINER_RULES.md:ro"])
 
+    # Mount the host's `gh` CLI binary read-only on Linux (without mounting ~/.config/gh)
+    # so `gh` commands inside the container work using ROS_CONTAINER_GITHUB_TOKEN.
+    if sys.platform.startswith('linux'):
+        gh_bin = shutil.which('gh')
+        if gh_bin and Path(gh_bin).is_file():
+            cmd.extend(['-v', f"{Path(gh_bin).resolve()}:/usr/local/bin/gh:ro"])
+
     container_env = {
         'ROS_DISTRO': distro,
         'ROS_MAINTAINER_SESSION_ID': session_id,
         'ROS_MAINTAINER_GATEWAY_URL': gateway_url or 'http://host.docker.internal:8765',
         'PYTHONUNBUFFERED': '1',
     }
-    token = get_container_github_token(workspace_root)
-    if token and token.lower() != 'none':
-        container_env['GITHUB_TOKEN'] = token
-
     for k, v in container_env.items():
         cmd.extend(['-e', f"{k}={v}"])
 
+    # Pass GITHUB_TOKEN / GH_TOKEN via environment inheritance (`-e KEY` without `=VALUE`)
+    # so the secret token value is never exposed in process arguments (`ps aux`).
+    run_env = os.environ.copy()
+    token = get_container_github_token(workspace_root)
+    if token and token.lower() != 'none':
+        run_env['GITHUB_TOKEN'] = token
+        run_env['GH_TOKEN'] = token
+        cmd.extend(['-e', 'GITHUB_TOKEN', '-e', 'GH_TOKEN'])
+    else:
+        run_env.pop('GITHUB_TOKEN', None)
+        run_env.pop('GH_TOKEN', None)
+
     cmd.extend([image, 'sleep', 'infinity'])
 
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    res = subprocess.run(cmd, env=run_env, capture_output=True, text=True, timeout=300)
     if res.returncode != 0:
         return {
             'success': False,
@@ -423,11 +443,17 @@ def start_session_container(
             'error': res.stderr.strip() or res.stdout.strip(),
         }
 
-    # Run post-create setup inside the container
+    # Run post-create setup inside the container:
+    # 1. Source ROS setup.bash in ~/.bashrc
+    # 2. Configure git safe.directory '*' for bind-mounted worktrees
+    # 3. Symlink host session_dir to /workspace so both host and container paths resolve
     setup_cmd = (
         "source /opt/ros/$ROS_DISTRO/setup.bash 2>/dev/null || true; "
         "grep -q '/opt/ros/' ~/.bashrc 2>/dev/null || "
         "echo 'source /opt/ros/$ROS_DISTRO/setup.bash' >> ~/.bashrc; "
+        "git config --global --add safe.directory '*' 2>/dev/null || true; "
+        f"mkdir -p {shlex.quote(str(session_dir.parent))} && "
+        f"ln -sfn /workspace {shlex.quote(str(session_dir))}; "
         "(pip install -r /workspace/tools/requirements.txt 2>/dev/null || true)"
     )
     subprocess.run(

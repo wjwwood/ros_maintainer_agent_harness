@@ -66,16 +66,20 @@ Before compiling or running tests on any external PR branch:
 
 ### Containerized Builds & Tests (Host Agents & Subagents)
 **NEVER** run `colcon build`, `colcon test`, `pytest`, or untrusted repository code directly on the host OS.
-If you are running as a host-side agent or subagent:
 1. Start the session container:
    `ros-maintainer-harness session up <session_id>` (or MCP tool `start_session_container`).
-2. Run all build and test commands inside the container:
-   - MCP tool: `exec_in_session(session_id="<session_id>", command="...")`
-   - CLI: `ros-maintainer-harness session exec <session_id> -- "<command>"`
-3. When spawning any subagent (e.g. `invoke_subagent`), explicitly instruct it to read `<session_dir>/AGENTS.md`
-   and execute all build/test commands via `exec_in_session` or `ros-maintainer-harness session exec`.
+2. **Automatic `PreToolUse` Hook Routing**:
+   - The harness installs `PreToolUse` hooks (`.agents/hooks.json`, `_agents/hooks.json`, `.claude/settings.json`,
+     and `~/.gemini/config/hooks.json`) that automatically intercept shell commands (`run_command` / `Bash`) when
+     `Cwd` is inside `<session_dir>` (or in a linked session conversation) and rewrite them to execute inside the
+     session container (`ros-harness-<session_id>`).
+   - Set your shell command working directory (`Cwd`) to `<session_dir>` and run `colcon`, `git`, `gh`, and `pytest`
+     commands directly.
+   - If your agent environment does not support `PreToolUse` input-rewriting hooks, use the MCP tool
+     `exec_in_session(session_id="<session_id>", command="...")` or
+     `ros-maintainer-harness session exec <session_id> -- "<command>"`.
 
-### Standard Build & Test Commands (Inside Container)
+### Standard Build & Test Commands
 ```bash
 colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 source install/setup.bash
@@ -148,10 +152,10 @@ Before scaffolding a session, running builds, or spawning subagents, verify the 
     2. Explicitly opt into unauthenticated container mode:
        `ros-maintainer-harness -w {ws_str} token-setup --no-token`
   - **NEVER** silently extract the user's host `gh auth token` and pass it into a container or `.env` file.
-- **MCP Server Registration**:
-  - If `global_mcp_configured` is `False`, register the MCP server so tools are available:
+- **MCP Server & Container Hooks Registration**:
+  - If `global_mcp_configured` is `False`, register the MCP server and `PreToolUse` container hooks:
     ```bash
-    ros-maintainer-harness -w {ws_str} mcp-install
+    ros-maintainer-harness -w {ws_str} mcp-install --target all
     ```
 
 ---
@@ -161,8 +165,9 @@ Before scaffolding a session, running builds, or spawning subagents, verify the 
 A conversation started at the workspace root (`{ws_str}`) acts as the **Maintainer Hub** by default:
 - **"What is the status of things we're working on?"**:
   - Call the MCP tool `get_workspace_status()` (or run `ros-maintainer-harness -w {ws_str} status`).
-  - Summarize active sessions, their lifecycle status, clickable `[<session_id>](conversation://<id>)` links,
-    latest `timeline.md` milestones, container status, CI runs, and pending approvals.
+  - Summarize active sessions, their lifecycle status, clickable `[<session_id>](conversation://<id>)` and
+    `[<session_id>](file://<session_dir>)` links, latest `timeline.md` milestones, container status, CI runs,
+    and pending approvals.
 - **"What should I work on next?"**:
   - Call the MCP tool `get_next_actions()` (or run `ros-maintainer-harness -w {ws_str} next`).
   - Surface prioritized items: pending approval tickets (`P1`), blocked sessions (`P1`), failed/completed CI runs
@@ -172,13 +177,16 @@ A conversation started at the workspace root (`{ws_str}`) acts as the **Maintain
     1. **Top-Level Dedicated Conversation (Recommended for interactive work)**:
        Call `start_session_conversation(pr_ref="<owner>/<repo>#<num>", mode="auto")` (or run
        `ros-maintainer-harness -w {ws_str} session start-conversation --pr <owner>/<repo>#<num>`).
-       This scaffolds the session, launches a new top-level Jetski conversation via `agentapi new-conversation`,
-       records its `conversation_id` in `session.json`, and returns a clickable
-       `[<session_id>](conversation://<id>)` link.
-    2. **Background Subagent (For autonomous hands-off tasks)**:
+       This scaffolds the session, starts the session container, launches a new top-level conversation via
+       `agentapi new-conversation` (when available), records its `conversation_id` in `session.json`, and returns
+       clickable `[<session_id>](conversation://<id>)` and `[<session_id>](file://<session_dir>)` links.
+    2. **Background Subagent (For autonomous hands-off tasks or agents without `agentapi`)**:
        Call `start_session_conversation(pr_ref="<owner>/<repo>#<num>", mode="prompt_only")`, pass the returned
-       `task_prompt` to `invoke_subagent`, and then link the subagent's `conversationId` via
-       `update_session_status(session_id="<id>", conversation_id="<subagent_id>")`.
+       `task_prompt` to your subagent tool (e.g. `invoke_subagent` or Claude Code `Task`), and link the subagent's
+       ID via `update_session_status(session_id="<id>", conversation_id="<subagent_id>")`.
+    3. **Dedicated Terminal / IDE Session**:
+       Launch an agent or Dev Container directly in the session folder:
+       `ros-maintainer-harness -w {ws_str} session launch <id> --agent <claude|gemini|cursor|code>`
 
 ---
 
@@ -207,8 +215,12 @@ happen inside the session's isolated container (`ros-harness-<session_id>`), **N
    - MCP tool: `start_session_container(session_id="<id>")`
    - CLI: `ros-maintainer-harness -w {ws_str} session up <id>`
 3. **Run Commands Inside the Session Container**:
-   - MCP tool: `exec_in_session(session_id="<id>", command="colcon build --symlink-install")`
-   - CLI: `ros-maintainer-harness -w {ws_str} session exec <id> -- "colcon build --symlink-install"`
+   - **Automatic `PreToolUse` Hook Routing**: When `Cwd` is set to `{ws_str}/sessions/<id>` (or inside a dedicated
+     session conversation), the harness `PreToolUse` hook automatically routes shell commands (`colcon`, `git`,
+     `gh`, `pytest`, etc.) into `ros-harness-<id>` with `ROS_CONTAINER_GITHUB_TOKEN`.
+   - **Explicit Container Execution**: From the Hub conversation (or if hooks are unavailable), use the MCP tool
+     `exec_in_session(session_id="<id>", command="colcon build --symlink-install")` or CLI
+     `ros-maintainer-harness -w {ws_str} session exec <id> -- "colcon build --symlink-install"`.
 4. **Stop the Container When Done**:
    - MCP tool: `stop_session_container(session_id="<id>")`
    - CLI: `ros-maintainer-harness -w {ws_str} session down <id>`
@@ -217,13 +229,12 @@ happen inside the session's isolated container (`ros-harness-<session_id>`), **N
 
 ## 5. Delegating to Subagents
 
-When spawning a subagent (e.g. via `invoke_subagent`) to work on a session:
+When spawning a subagent to work on a session:
 - You **MUST** instruct the subagent in its prompt to:
   1. Read `{ws_str}/sessions/<session_id>/AGENTS.md` and `{ws_str}/sessions/<session_id>/TASK.md`.
   2. Perform the pre-build diff security review before compiling.
-  3. Execute **all** build, test, and runtime commands inside the container using the MCP tool
-     `exec_in_session(session_id="<session_id>", command="...")` or
-     `ros-maintainer-harness -w {ws_str} session exec <session_id> -- "<command>"` (never on the host).
+  3. Set `Cwd` to `{ws_str}/sessions/<session_id>` so the `PreToolUse` hook routes shell commands into the container
+     automatically (or use `exec_in_session(session_id="<session_id>", command="...")` if hooks are unavailable).
   4. Log progress milestones to `timeline.md` using `log_status` and update session state via `update_session_status`.
 """
 
@@ -262,25 +273,23 @@ def get_session_agent_instructions(
 
 ---
 
-## 2. Containerized Build & Test Execution
+## 2. Containerized Build & Test Execution (Automatic `PreToolUse` Hook)
 
-- **If you are already inside the container** (`/workspace` exists):
-  Run `colcon build` and `colcon test` directly in `/workspace`.
-- **If you are running on the host** (or as a spawned subagent on the host):
-  **DO NOT** run `colcon build`, `colcon test`, or repository binaries directly on the host OS!
-  Always run them inside the session container (`ros-harness-{session_id}`):
-  - Via MCP tool:
-    `exec_in_session(session_id="{session_id}", command="colcon build --symlink-install")`
-  - Via CLI:
+- **Automatic Container Routing**:
+  - A `PreToolUse` hook (`.agents/hooks.json`, `.claude/settings.json`, `~/.gemini/config/hooks.json`) is installed
+    for this session. Whenever you run a shell command with `Cwd` inside `{sess_str}` (or from this session's linked
+    conversation), the hook **automatically executes your command inside the `ros-harness-{session_id}` Docker
+    container** with `/opt/ros/{distro}/setup.bash` sourced and `ROS_CONTAINER_GITHUB_TOKEN` active.
+  - Set `Cwd` to `{sess_str}` (or `{sess_str}/src/<repo>`) and run `colcon`, `git`, `gh`, `pytest`, etc. **directly**
+    without prefixing `ros-maintainer-harness session exec`:
     ```bash
-    ros-maintainer-harness -w {ws_str} session up {session_id}
-    ros-maintainer-harness -w {ws_str} session exec {session_id} -- \\
-      "colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
-    ros-maintainer-harness -w {ws_str} session exec {session_id} -- \\
-      "colcon test --event-handlers console_direct+ --return-code-on-test-failure"
-    ros-maintainer-harness -w {ws_str} session exec {session_id} -- \\
-      "colcon test-result --all --verbose"
+    colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+    colcon test --event-handlers console_direct+ --return-code-on-test-failure
+    colcon test-result --all --verbose
     ```
+- **Fallback (if running in an agent environment without `PreToolUse` hooks)**:
+  - Use the MCP tool `exec_in_session(session_id="{session_id}", command="...")` or CLI
+    `ros-maintainer-harness -w {ws_str} session exec {session_id} -- "<command>"`.
 
 ---
 

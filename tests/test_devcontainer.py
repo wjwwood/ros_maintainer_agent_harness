@@ -134,7 +134,10 @@ class TestDevcontainer(unittest.TestCase):
             session_dir.mkdir(parents=True, exist_ok=True)
             save_workspace_env_var(ws_root, 'ROS_CONTAINER_GITHUB_TOKEN', 'github_pat_ro')
 
+            captured_calls = []
+
             def fake_run(cmd, **kwargs):
+                captured_calls.append((cmd, kwargs))
                 res = MagicMock()
                 res.returncode = 0
                 if 'inspect' in cmd:
@@ -156,6 +159,10 @@ class TestDevcontainer(unittest.TestCase):
                 self.assertEqual(res['status'], 'started')
                 self.assertEqual(res['container_name'], 'ros-harness-session-pr-10')
                 self.assertTrue(mock_run.called)
+                run_cmd, run_kwargs = [c for c in captured_calls if 'run' in c[0]][0]
+                self.assertNotIn('GITHUB_TOKEN=github_pat_ro', run_cmd)
+                self.assertIn('GITHUB_TOKEN', run_cmd)
+                self.assertEqual(run_kwargs['env']['GITHUB_TOKEN'], 'github_pat_ro')
 
             def fake_running(cmd, **kwargs):
                 res = MagicMock()

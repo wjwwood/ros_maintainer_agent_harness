@@ -54,6 +54,8 @@ class TestPolicyValidation(unittest.TestCase):
             'wjwwood/fix_memory_leak',
             'user123/refactor_ci',
             'fix/crash_on_shutdown',
+            'fix-unique-junit-test-names',
+            'feature/sub/topic-1.2',
             'patch-1',
             'patch-99',
         ]
@@ -67,9 +69,11 @@ class TestPolicyValidation(unittest.TestCase):
 
     def test_disallowed_branch_patterns(self):
         invalid_branches = [
-            'random-branch',
-            'feature',
-            'foo/bar/baz',  # nested
+            '-option-injection',
+            'foo..bar',
+            'foo//bar',
+            'branch with spaces',
+            'trailing/',
             '',
         ]
         for branch in invalid_branches:

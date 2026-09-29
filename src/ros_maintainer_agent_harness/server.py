@@ -48,6 +48,7 @@ from .git_ops import (
 )
 from .hub import (
     format_conversation_link,
+    format_session_dir_link,
     get_next_actions as do_get_next_actions,
     get_workspace_status as do_get_workspace_status,
     parse_timeline_summary,
@@ -1125,8 +1126,8 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
         Scaffold a session (if `pr_ref` is given and not yet scaffolded) and launch or prepare
         a dedicated task conversation for that session.
 
-        When `mode='auto'` or `mode='agentapi'` and the Jetski `agentapi` CLI is available,
-        this spawns a brand-new top-level Jetski conversation titled `[<session_id>] <PR Title>`
+        When `mode='auto'` or `mode='agentapi'` and the `agentapi` CLI is available,
+        this spawns a brand-new top-level conversation titled `[<session_id>] <PR Title>`
         and records its `conversation_id` in `session.json`. It also returns `task_prompt` so
         the Hub agent can alternatively spawn a subagent via `invoke_subagent`.
 
@@ -1196,6 +1197,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             'session_id': session_id,
             'metadata': meta,
             'conversation_link': format_conversation_link(session_id, conv_id),
+            'session_dir_link': format_session_dir_link(session_id, session_dir),
         }
 
     return server

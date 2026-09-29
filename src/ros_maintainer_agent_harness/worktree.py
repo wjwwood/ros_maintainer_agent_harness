@@ -192,6 +192,14 @@ class SessionManager:
             distro=distro,
         )
 
+        # Install session-level PreToolUse container hooks (.agents/hooks.json, .claude/settings.json)
+        from .hooks import install_hooks_config
+        install_hooks_config(
+            target_dir=session_dir,
+            workspace_root=self.workspace.root,
+            session_id=session_id,
+        )
+
         write_session_metadata(
             session_dir,
             {

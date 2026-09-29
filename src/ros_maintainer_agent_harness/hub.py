@@ -26,7 +26,11 @@ from typing import Any, Dict, List, Optional
 
 from .approval import ApprovalManager
 from .ci import CITracker
-from .devcontainer import check_token_and_environment, get_container_status
+from .devcontainer import (
+    check_token_and_environment,
+    get_container_status,
+    start_session_container,
+)
 from .scaffolder import scaffold_session_from_pr
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
@@ -58,6 +62,7 @@ __all__ = [
     'check_worktree_dirty',
     'find_agentapi_executable',
     'format_conversation_link',
+    'format_session_dir_link',
     'get_next_actions',
     'get_session_metadata_path',
     'get_workspace_status',
@@ -126,10 +131,15 @@ def check_worktree_dirty(src_dir: Path) -> Dict[str, bool]:
 
 
 def format_conversation_link(label: str, conversation_id: Optional[str]) -> Optional[str]:
-    """Format a clickable Jetski conversation:// markdown link."""
+    """Format a clickable conversation:// markdown link."""
     if not conversation_id:
         return None
     return f"[{label}](conversation://{conversation_id})"
+
+
+def format_session_dir_link(label: str, session_dir: Path) -> str:
+    """Format a clickable file:// markdown link to a session directory."""
+    return f"[{label}](file://{session_dir.resolve()})"
 
 
 def get_workspace_status(
@@ -178,10 +188,12 @@ def get_workspace_status(
 
         conv_id = meta.get('conversation_id')
         conv_link = format_conversation_link(s.session_id, conv_id)
+        dir_link = format_session_dir_link(s.session_id, s.session_dir)
 
         session_summaries.append({
             'session_id': s.session_id,
             'session_dir': str(s.session_dir),
+            'session_dir_link': dir_link,
             'status': meta.get('status', 'active'),
             'topic': meta.get('topic') or meta.get('pr_title'),
             'distro': meta.get('distro') or s.distro or 'rolling',
@@ -388,7 +400,7 @@ def get_next_actions(
             continue
 
         ci_run = sess.get('latest_ci_run')
-        conv_link = sess.get('conversation_link') or sess_id
+        conv_link = sess.get('conversation_link') or sess.get('session_dir_link') or sess_id
         milestone = sess.get('latest_milestone') or 'No milestone recorded yet'
 
         if ci_run:
@@ -399,6 +411,7 @@ def get_next_actions(
                     'priority': 'P2_CI_FAILURE',
                     'category': 'ci_failure',
                     'session_id': sess_id,
+                    'session_dir_link': sess.get('session_dir_link'),
                     'conversation_link': sess.get('conversation_link'),
                     'title': f"Investigate {ci_status} CI run for {conv_link}",
                     'details': f"Job: {job_url} | Latest milestone: {milestone}",
@@ -410,6 +423,7 @@ def get_next_actions(
                     'priority': 'P2_CI_SUCCESS',
                     'category': 'ready_for_review',
                     'session_id': sess_id,
+                    'session_dir_link': sess.get('session_dir_link'),
                     'conversation_link': sess.get('conversation_link'),
                     'title': f"CI passed for {conv_link}: ready for final review or merge",
                     'details': f"Job: {job_url} | Latest milestone: {milestone}",
@@ -421,6 +435,7 @@ def get_next_actions(
                     'priority': 'P3_CI_RUNNING',
                     'category': 'ci_running',
                     'session_id': sess_id,
+                    'session_dir_link': sess.get('session_dir_link'),
                     'conversation_link': sess.get('conversation_link'),
                     'title': f"Check running CI job for {conv_link} ({ci_status})",
                     'details': f"Job: {job_url}",
@@ -433,6 +448,7 @@ def get_next_actions(
                 'priority': 'P1_SESSION_BLOCKED',
                 'category': 'session_blocked',
                 'session_id': sess_id,
+                'session_dir_link': sess.get('session_dir_link'),
                 'conversation_link': sess.get('conversation_link'),
                 'title': f"Unblock session {conv_link}",
                 'details': f"Topic: {sess.get('topic') or 'N/A'} | Latest milestone: {milestone}",
@@ -442,6 +458,7 @@ def get_next_actions(
                 'priority': 'P2_SESSION_REVIEW',
                 'category': 'session_review',
                 'session_id': sess_id,
+                'session_dir_link': sess.get('session_dir_link'),
                 'conversation_link': sess.get('conversation_link'),
                 'title': f"Review findings in session {conv_link} (status: {status})",
                 'details': f"Topic: {sess.get('topic') or 'N/A'} | Latest milestone: {milestone}",
@@ -451,6 +468,7 @@ def get_next_actions(
                 'priority': 'P3_SESSION_IN_PROGRESS',
                 'category': 'session_active',
                 'session_id': sess_id,
+                'session_dir_link': sess.get('session_dir_link'),
                 'conversation_link': sess.get('conversation_link'),
                 'title': f"Continue investigation in session {conv_link} (status: {status})",
                 'details': f"Topic: {sess.get('topic') or 'N/A'} | Latest milestone: {milestone}",
@@ -486,14 +504,14 @@ def get_next_actions(
 
 
 def find_agentapi_executable() -> Optional[str]:
-    """Locate the Jetski `agentapi` CLI executable if installed."""
+    """Locate the `agentapi` CLI executable if installed."""
     which_exe = shutil.which('agentapi')
     if which_exe:
         return which_exe
     try:
-        candidate = Path.home() / '.gemini' / 'jetski' / 'bin' / 'agentapi'
-        if candidate.exists():
-            return str(candidate)
+        for candidate in sorted(Path.home().glob('.gemini/*/bin/agentapi')):
+            if candidate.is_file():
+                return str(candidate)
     except Exception:
         pass
     return None
@@ -523,8 +541,9 @@ def build_task_conversation_prompt(
 5. **Report Back to the Maintainer Hub Conversation**:
    - This task was spawned from the Maintainer Hub conversation (`{hub_conversation_id}`).
    - When you finish your initial diff review, build, and test run (or if you encounter a blocker or need approval),
-     send a concise status update back to the Hub conversation using the `send_message` tool
-     (`Recipient="{hub_conversation_id}"`) or `agentapi send-message "{hub_conversation_id}" "<summary>"`.
+     send a concise status update back to the Hub conversation using `send_message`
+     (`Recipient="{hub_conversation_id}"`) or `agentapi send-message "{hub_conversation_id}" "<summary>"`
+     (if available in your agent environment).
 """
 
     extra_section = ""
@@ -535,10 +554,10 @@ def build_task_conversation_prompt(
 
 ## Session Environment
 - **Session ID**: `{session_id}`
-- **Session Directory**: `{sess_str}`
+- **Session Directory (Use as `Cwd`)**: `{sess_str}`
+- **Container Workspace Mount**: `/workspace` (inside `ros-harness-{session_id}`)
 - **Workspace Root**: `{ws_str}`
 - **Target ROS 2 Distro**: `{distro}`
-- **Sandbox Container**: `ros-harness-{session_id}`
 
 ## Mandatory Workflow
 1. **Read Session Instructions & Task**:
@@ -547,14 +566,23 @@ def build_task_conversation_prompt(
    - Inspect the git diff inside `{sess_str}/src/` before compiling anything.
    - Check for committed secrets, modified `.github/workflows/`, or suspicious commands in `CMakeLists.txt`,
      `setup.py`, `package.xml`, or tests. If anything suspicious is found, halt immediately and alert the user.
-3. **Containerized Build & Test Execution (Never Build on Host)**:
-   - Start the session container using the MCP tool `start_session_container(session_id="{session_id}")`
-     (or `ros-maintainer-harness -w {ws_str} session up {session_id}`).
-   - Run all `colcon build`, `colcon test`, and `colcon test-result` commands inside the container via
-     `exec_in_session(session_id="{session_id}", command="...")`
-     (or `ros-maintainer-harness -w {ws_str} session exec {session_id} -- "..."`).
+3. **Containerized Command, Build & Test Execution**:
+   - **Always set `Cwd` to `{sess_str}` (or a subdirectory inside `{sess_str}`).**
+   - When the `PreToolUse` container-routing hook is active (or when running inside the Dev Container),
+     all shell commands (`colcon build`, `colcon test`, `colcon test-result`, `git`, `gh`, `pytest`, `python3`)
+     automatically execute inside `ros-harness-{session_id}` (`/workspace`) with ROS `{distro}` and the
+     container's read-only `GITHUB_TOKEN` sourced. **Run commands directly without prefixing `session exec`:**
+     ```bash
+     colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+     colcon test --event-handlers console_direct+ --return-code-on-test-failure
+     colcon test-result --all --verbose
+     ```
+   - *(Fallback if running in an agent without `PreToolUse` hooks)*: Use the MCP tool
+     `exec_in_session(session_id="{session_id}", command="...")` or
+     `ros-maintainer-harness -w {ws_str} session exec {session_id} -- "..."`.
 4. **Log Milestones & Session Status**:
    - Record progress milestones to `timeline.md` using `log_status(session_id="{session_id}", ...)`
+     (or `ros-session-status -m "Milestone" "Details"` inside the container).
    - Update the session state using `update_session_status(session_id="{session_id}", status="...")`
      (`investigating`, `local_tests_passing`, `waiting_for_ci`, `needs_review`, `ready_to_merge`, `blocked`, `done`).
 {hub_section}{extra_section}"""
@@ -569,6 +597,7 @@ def start_session_conversation(
     hub_conversation_id: Optional[str] = None,
     mode: str = 'auto',
     model: Optional[str] = None,
+    auto_start_container: bool = True,
 ) -> Dict[str, Any]:
     """
     Scaffold (if needed) a session and start or prepare a dedicated task conversation for it.
@@ -582,8 +611,9 @@ def start_session_conversation(
         hub_conversation_id: Optional conversation ID of the calling Hub conversation.
         mode: 'auto' (uses `agentapi new-conversation` if available, else returns prompt for subagent),
               'agentapi' (launch top-level conversation via `agentapi`), or
-              'prompt_only' (prepare session and return prompt for `invoke_subagent`).
+              'prompt_only' (prepare session and return prompt for subagent delegation).
         model: Optional model tier for `agentapi new-conversation` ('flash_lite', 'flash', 'pro').
+        auto_start_container: Pre-start the detached session container when environment is ready.
     """
     if not workspace.is_initialized():
         workspace.initialize()
@@ -620,6 +650,19 @@ def start_session_conversation(
     if effective_hub_id:
         write_session_metadata(session_dir, {'hub_conversation_id': effective_hub_id})
 
+    # Pre-start the session container if environment is ready so the task agent has an active container immediately
+    container_info: Optional[Dict[str, Any]] = None
+    if auto_start_container:
+        env_check = check_token_and_environment(workspace.root)
+        if env_check.get('ready'):
+            container_info = start_session_container(
+                session_id=final_session_id,
+                session_dir=session_dir,
+                workspace_root=workspace.root,
+                distro=final_distro,
+                runtime=env_check.get('container_runtime'),
+            )
+
     task_prompt = build_task_conversation_prompt(
         session_id=final_session_id,
         session_dir=session_dir,
@@ -653,7 +696,6 @@ def start_session_conversation(
         agentapi_output = combined_out.strip()
         if res.returncode == 0:
             launch_method = 'agentapi'
-            # Extract UUID conversation ID from stdout/stderr if present
             matches = UUID_PATTERN.findall(combined_out)
             for candidate_uuid in matches:
                 if candidate_uuid != effective_hub_id:
@@ -676,8 +718,10 @@ def start_session_conversation(
         'success': True,
         'session_id': final_session_id,
         'session_dir': str(session_dir),
+        'session_dir_link': format_session_dir_link(final_session_id, session_dir),
         'distro': final_distro,
         'scaffolded': scaffolded,
+        'container': container_info,
         'launch_method': launch_method,
         'title': title,
         'conversation_id': spawned_conv_id,

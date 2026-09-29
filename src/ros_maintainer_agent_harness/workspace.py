@@ -126,6 +126,10 @@ class WorkspaceLayout:
         if not (self.root / 'AGENTS.md').exists():
             write_workspace_agent_instructions(self.root)
 
+        # Install workspace-level PreToolUse container hooks (.agents/hooks.json, .claude/settings.json)
+        from .hooks import install_hooks_config
+        install_hooks_config(target_dir=self.root, workspace_root=self.root)
+
     def get_policy(self) -> HarnessPolicy:
         """Load and return the parsed policy."""
         return load_policy(self.policy_path)
