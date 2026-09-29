@@ -43,7 +43,23 @@ Before scaffolding any session, starting any container, or spawning subagents:
      ros-maintainer-harness -w ~/maintainer_ws mcp-install --target all
      ```
 
-### 2. Scaffolding an Isolated Session
+### 2. Maintainer Hub & Spoke Coordinator Workflow
+When acting as a root coordinator ("Maintainer Hub"):
+- **"What is the status of things we're working on?"**:
+  - Call the MCP tool `get_workspace_status()` (or `ros-maintainer-harness -w ~/maintainer_ws status`).
+  - Present active sessions, their status, clickable `[<session_id>](conversation://<id>)` links, latest milestones,
+    container state, CI runs, and pending approvals.
+- **"What should I work on next?"**:
+  - Call the MCP tool `get_next_actions()` (or `ros-maintainer-harness -w ~/maintainer_ws next`).
+  - Surface pending approvals (`P1`), blocked sessions (`P1`), failed/completed CI runs (`P2`), active sessions (`P3`),
+    and candidate open GitHub PRs (`P4`).
+- **"I want to work on `<owner>/<repo>#<number>`" (Dedicated Task Conversation)**:
+  - Call `start_session_conversation(pr_ref="<owner>/<repo>#<number>", mode="auto")` (or CLI
+    `ros-maintainer-harness -w ~/maintainer_ws session start-conversation --pr <owner>/<repo>#<number>`) to scaffold
+    the session and launch a dedicated top-level conversation via `agentapi new-conversation` (or use `mode="prompt_only"`
+    with `invoke_subagent` and link its `conversationId` via `update_session_status`).
+
+### 3. Scaffolding an Isolated Session Directly
 Never clone target ROS repositories or run `colcon` inside the `ros_maintainer_agent_harness` repository directory.
 Always create or scaffold an isolated session inside the maintainer workspace (`~/maintainer_ws/sessions/<id>`):
 - **From a Pull Request**:
@@ -53,7 +69,7 @@ Always create or scaffold an isolated session inside the maintainer workspace (`
   - MCP tool: `create_session(session_id="<id>", distro="rolling", repo_path="...", branch="...")`
   - CLI: `ros-maintainer-harness -w ~/maintainer_ws session create <id> --distro rolling`
 
-### 3. Mandatory Pre-Build Diff Security Review
+### 4. Mandatory Pre-Build Diff Security Review
 Before compiling or running any tests on an external Pull Request:
 1. Inspect the git diff in `~/maintainer_ws/sessions/<session_id>/src/<repo>` against the target base branch.
 2. Check for:
@@ -63,7 +79,7 @@ Before compiling or running any tests on an external Pull Request:
      calls, shell execution, or access to paths outside the workspace).
 3. If anything suspicious is found, **halt immediately** and report the finding to the user before building.
 
-### 4. Mandatory Containerized Execution (Host Agents & Subagents)
+### 5. Mandatory Containerized Execution (Host Agents & Subagents)
 **NEVER** run `colcon build`, `colcon test`, `pytest` (for target ROS packages), or untrusted repository code
 directly on the host OS.
 1. Start the detached session sandbox container:
@@ -89,8 +105,9 @@ directly on the host OS.
      or `ros-maintainer-harness -w ~/maintainer_ws session exec <session_id> -- "<command>"`, **never** directly on
      the host OS.
 
-### 5. MCP Gateway Tools & Progress Logging
-- Record progress milestones to `<session_dir>/timeline.md` using the MCP `log_status` tool or `ros-session-status`.
+### 6. MCP Gateway Tools & Progress Logging
+- Record progress milestones to `<session_dir>/timeline.md` using the MCP `log_status` tool or `ros-session-status`,
+  and update session state via `update_session_status`.
 - Use the MCP gateway tools (`get_ci_status`, `get_ci_summary`, `launch_jenkins_ci`, `find_restarted_ci`,
   `git_push`, `create_pull_request`) for all CI queries and policy-guarded remote mutations.
 

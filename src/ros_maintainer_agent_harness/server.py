@@ -46,6 +46,15 @@ from .git_ops import (
     extract_repo_full_name,
     get_repo_remote_url,
 )
+from .hub import (
+    format_conversation_link,
+    get_next_actions as do_get_next_actions,
+    get_workspace_status as do_get_workspace_status,
+    parse_timeline_summary,
+    read_session_metadata,
+    start_session_conversation as do_start_session_conversation,
+    write_session_metadata,
+)
 from .mcp_config import get_agent_launch_info, write_session_mcp_configs
 from .rules import MaintainerRules
 from .scaffolder import scaffold_session_from_pr as do_scaffold_from_pr
@@ -553,16 +562,27 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
     # 8. list_sessions
     @server.tool()
     def list_sessions() -> List[Dict[str, Any]]:
-        """List all active sessions and their attached Git worktree branches."""
+        """List all active sessions, their metadata, linked conversation IDs, and Git worktree branches."""
         sessions = session_mgr.list_sessions()
-        return [
-            {
+        results = []
+        for s in sessions:
+            meta = read_session_metadata(s.session_dir)
+            tl = parse_timeline_summary(s.timeline_path, max_entries=1)
+            conv_id = meta.get('conversation_id')
+            results.append({
                 'session_id': s.session_id,
                 'session_dir': str(s.session_dir),
+                'status': meta.get('status', 'active'),
+                'topic': meta.get('topic') or meta.get('pr_title'),
+                'distro': meta.get('distro') or s.distro or 'rolling',
+                'pr_ref': meta.get('pr_ref'),
+                'pr_url': meta.get('pr_url'),
+                'conversation_id': conv_id,
+                'conversation_link': format_conversation_link(s.session_id, conv_id),
+                'latest_milestone': tl['latest_milestone'],
                 'active_branches': s.active_branches,
-            }
-            for s in sessions
-        ]
+            })
+        return results
 
     # 9. prune_session
     @server.tool()
@@ -1047,6 +1067,136 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             session_id: Session identifier.
         """
         return do_stop_session_container(session_id=session_id)
+
+    # 25. get_workspace_status
+    @server.tool()
+    def get_workspace_status(check_containers: bool = True) -> Dict[str, Any]:
+        """
+        Return a unified Maintainer Hub dashboard of all active sessions, their status,
+        linked task conversation links (`conversation://<id>`), container state, latest
+        timeline milestones, active/failed Jenkins CI runs, and pending approval requests.
+
+        Use this tool in the Hub conversation when the user asks "what is the status of
+        things we're working on?".
+        """
+        return do_get_workspace_status(workspace, check_containers=check_containers)
+
+    # 26. get_next_actions
+    @server.tool()
+    def get_next_actions(
+        repos: Optional[List[str]] = None,
+        include_github_prs: bool = True,
+        limit_prs: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        Return a prioritized list of recommended next maintainer actions across:
+        - Pending approval tickets waiting on the maintainer (`P1_APPROVAL_NEEDED`)
+        - Blocked sessions (`P1_SESSION_BLOCKED`)
+        - Failing or completed Jenkins CI runs (`P2_CI_FAILURE`, `P2_CI_SUCCESS`)
+        - Sessions ready for review or in progress (`P2_SESSION_REVIEW`, `P3_SESSION_IN_PROGRESS`)
+        - Open GitHub PRs requesting review or in target repositories (`P4_NEW_PR_TRIAGE`)
+
+        Use this tool in the Hub conversation when the user asks "what should I work on next?".
+
+        Args:
+            repos: Optional list of GitHub repositories (e.g. ['ros2/rclcpp', 'ros2/rcutils']) to query for open PRs.
+            include_github_prs: Whether to query GitHub via `gh` for open PRs (default: True).
+            limit_prs: Maximum number of open GitHub PRs to return (default: 10).
+        """
+        return do_get_next_actions(
+            workspace=workspace,
+            repos=repos,
+            include_github_prs=include_github_prs,
+            limit_prs=limit_prs,
+        )
+
+    # 27. start_session_conversation
+    @server.tool()
+    def start_session_conversation(
+        pr_ref: Optional[str] = None,
+        session_id: Optional[str] = None,
+        distro: Optional[str] = None,
+        extra_instructions: Optional[str] = None,
+        hub_conversation_id: Optional[str] = None,
+        mode: str = 'auto',
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Scaffold a session (if `pr_ref` is given and not yet scaffolded) and launch or prepare
+        a dedicated task conversation for that session.
+
+        When `mode='auto'` or `mode='agentapi'` and the Jetski `agentapi` CLI is available,
+        this spawns a brand-new top-level Jetski conversation titled `[<session_id>] <PR Title>`
+        and records its `conversation_id` in `session.json`. It also returns `task_prompt` so
+        the Hub agent can alternatively spawn a subagent via `invoke_subagent`.
+
+        Args:
+            pr_ref: Optional PR reference (e.g. 'ros2/rclcpp#160') to scaffold.
+            session_id: Optional session ID (required if `pr_ref` is not provided).
+            distro: Optional ROS distro override.
+            extra_instructions: Optional additional instructions from the maintainer.
+            hub_conversation_id: Optional conversation ID of the calling Hub conversation.
+            mode: 'auto', 'agentapi', or 'prompt_only'.
+            model: Optional model tier ('flash_lite', 'flash', 'pro').
+        """
+        try:
+            return do_start_session_conversation(
+                workspace=workspace,
+                pr_ref=pr_ref,
+                session_id=session_id,
+                distro=distro,
+                extra_instructions=extra_instructions,
+                hub_conversation_id=hub_conversation_id,
+                mode=mode,
+                model=model,
+            )
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    # 28. update_session_status
+    @server.tool()
+    def update_session_status(
+        session_id: str,
+        status: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        hub_conversation_id: Optional[str] = None,
+        topic: Optional[str] = None,
+        milestone: Optional[str] = None,
+        message: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Update a session's lifecycle status, linked task `conversation_id`, or `hub_conversation_id`
+        in `<session_dir>/session.json`, and optionally record a timeline entry.
+
+        Valid statuses: 'active', 'investigating', 'local_tests_passing', 'waiting_for_ci',
+        'needs_review', 'ready_to_merge', 'blocked', 'done'.
+        """
+        if not session_mgr.session_exists(session_id):
+            return {'success': False, 'error': f"Session '{session_id}' not found."}
+
+        session_dir = session_mgr.get_session_dir(session_id)
+        updates: Dict[str, Any] = {}
+        if status:
+            updates['status'] = status
+        if conversation_id:
+            updates['conversation_id'] = conversation_id
+        if hub_conversation_id:
+            updates['hub_conversation_id'] = hub_conversation_id
+        if topic:
+            updates['topic'] = topic
+
+        meta = write_session_metadata(session_dir, updates)
+        if message or milestone:
+            timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
+            timeline.log_status(message=message or f"Updated status to '{status}'.", milestone=milestone)
+
+        conv_id = meta.get('conversation_id')
+        return {
+            'success': True,
+            'session_id': session_id,
+            'metadata': meta,
+            'conversation_link': format_conversation_link(session_id, conv_id),
+        }
 
     return server
 

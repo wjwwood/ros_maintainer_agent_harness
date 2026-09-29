@@ -156,7 +156,33 @@ Before scaffolding a session, running builds, or spawning subagents, verify the 
 
 ---
 
-## 2. Scaffolding & Managing Sessions
+## 2. Maintainer Hub & Spoke Coordinator Workflow
+
+A conversation started at the workspace root (`{ws_str}`) acts as the **Maintainer Hub** by default:
+- **"What is the status of things we're working on?"**:
+  - Call the MCP tool `get_workspace_status()` (or run `ros-maintainer-harness -w {ws_str} status`).
+  - Summarize active sessions, their lifecycle status, clickable `[<session_id>](conversation://<id>)` links,
+    latest `timeline.md` milestones, container status, CI runs, and pending approvals.
+- **"What should I work on next?"**:
+  - Call the MCP tool `get_next_actions()` (or run `ros-maintainer-harness -w {ws_str} next`).
+  - Surface prioritized items: pending approval tickets (`P1`), blocked sessions (`P1`), failed/completed CI runs
+    (`P2`), active sessions ready for review (`P2`/`P3`), and open GitHub PRs not yet in a session (`P4`).
+- **"I want to work on `<owner>/<repo>#<num>`" (Starting a Dedicated Task Conversation)**:
+  - Keep the Hub conversation's context clean by spinning up a dedicated task conversation or subagent:
+    1. **Top-Level Dedicated Conversation (Recommended for interactive work)**:
+       Call `start_session_conversation(pr_ref="<owner>/<repo>#<num>", mode="auto")` (or run
+       `ros-maintainer-harness -w {ws_str} session start-conversation --pr <owner>/<repo>#<num>`).
+       This scaffolds the session, launches a new top-level Jetski conversation via `agentapi new-conversation`,
+       records its `conversation_id` in `session.json`, and returns a clickable
+       `[<session_id>](conversation://<id>)` link.
+    2. **Background Subagent (For autonomous hands-off tasks)**:
+       Call `start_session_conversation(pr_ref="<owner>/<repo>#<num>", mode="prompt_only")`, pass the returned
+       `task_prompt` to `invoke_subagent`, and then link the subagent's `conversationId` via
+       `update_session_status(session_id="<id>", conversation_id="<subagent_id>")`.
+
+---
+
+## 3. Scaffolding & Managing Sessions Directly
 
 Do not clone repositories or run builds directly in `{ws_str}`. Always work inside an isolated session:
 - **From a GitHub Pull Request**:
@@ -168,7 +194,7 @@ Do not clone repositories or run builds directly in `{ws_str}`. Always work insi
 
 ---
 
-## 3. Mandatory Containerized Execution (Never Build on Host!)
+## 4. Mandatory Containerized Execution (Never Build on Host!)
 
 All compilation (`colcon build`), testing (`colcon test`, `pytest`), and execution of repository code **MUST**
 happen inside the session's isolated container (`ros-harness-<session_id>`), **NEVER** directly on the host OS.
@@ -189,7 +215,7 @@ happen inside the session's isolated container (`ros-harness-<session_id>`), **N
 
 ---
 
-## 4. Delegating to Subagents
+## 5. Delegating to Subagents
 
 When spawning a subagent (e.g. via `invoke_subagent`) to work on a session:
 - You **MUST** instruct the subagent in its prompt to:
@@ -198,7 +224,7 @@ When spawning a subagent (e.g. via `invoke_subagent`) to work on a session:
   3. Execute **all** build, test, and runtime commands inside the container using the MCP tool
      `exec_in_session(session_id="<session_id>", command="...")` or
      `ros-maintainer-harness -w {ws_str} session exec <session_id> -- "<command>"` (never on the host).
-  4. Log progress milestones to `timeline.md` using `log_status` or `ros-session-status`.
+  4. Log progress milestones to `timeline.md` using `log_status` and update session state via `update_session_status`.
 """
 
 
@@ -258,12 +284,15 @@ def get_session_agent_instructions(
 
 ---
 
-## 3. Progress Logging, Git Push & CI Gateway
+## 3. Progress Logging, Session Status, Git Push & CI Gateway
 
-- **Timeline Logging**:
-  Record every key milestone in `timeline.md`:
+- **Timeline & Session Status**:
+  Record every key milestone in `timeline.md` and keep `session.json` status updated:
   - MCP tool: `log_status(session_id="{session_id}", milestone="...", message="...")`
+  - MCP tool: `update_session_status(session_id="{session_id}", status="local_tests_passing")`
   - CLI (inside container): `ros-session-status -m "Milestone" "Message"`
+  - If `hub_conversation_id` is set in `session.json`, notify the Hub conversation via `send_message` or
+    `agentapi send-message` when your investigation/build/test completes or if you are blocked.
 - **Remote Mutations & CI**:
   Use the `ros-maintainer-harness` MCP tools for policy-checked operations:
   - `git_push(session_id="{session_id}", repo_path="...", branch="...", reason="...")`
