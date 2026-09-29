@@ -169,6 +169,23 @@ class TestContainerHooks(unittest.TestCase):
         )
         self.assertEqual(second_res, {})
 
+        # Windows-style .EXE path should also be recognized as passthrough
+        win_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': (
+                        "'D:\\a\\Scripts\\ros-maintainer-harness.EXE' -w 'D:\\ws' "
+                        "session exec -d /workspace pr-rclcpp-160 -- 'git status && git diff'"
+                    ),
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        self.assertEqual(evaluate_pre_tool_use(win_payload, workspace_root=self.ws_root), {})
+
         # Multiline docker exec command should also be recognized as passthrough
         docker_multiline_payload = {
             'conversationId': 'spoke-conv-1234',

@@ -15,7 +15,6 @@
 import json
 import os
 from pathlib import Path
-import re
 import shlex
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
@@ -163,7 +162,10 @@ def _first_executable_in_segment(segment: str) -> Optional[str]:
             continue
         if tok in ('command', 'nohup'):
             continue
-        return Path(tok).name
+        name = Path(tok.replace('\\', '/')).name
+        if name.lower().endswith('.exe'):
+            name = name[:-4]
+        return name
     return None
 
 
