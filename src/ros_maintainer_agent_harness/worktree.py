@@ -13,11 +13,13 @@
 # limitations under the License.
 
 import dataclasses
+import datetime
+import json
 from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .devcontainer import stop_session_container, write_devcontainer_config
 from .instructions import write_session_agent_instructions
@@ -37,6 +39,78 @@ def validate_session_id(session_id: str) -> str:
             "must consist only of alphanumeric characters, hyphens, and underscores."
         )
     return session_id
+
+
+def get_session_metadata_path(session_dir: Path) -> Path:
+    return session_dir / 'session.json'
+
+
+def read_session_metadata(session_dir: Path) -> Dict[str, Any]:
+    """Read structured session metadata from <session_dir>/session.json with fallback inference."""
+    meta_path = get_session_metadata_path(session_dir)
+    data: Dict[str, Any] = {}
+    if meta_path.exists():
+        try:
+            loaded = json.loads(meta_path.read_text(encoding='utf-8'))
+            if isinstance(loaded, dict):
+                data = loaded
+        except Exception:
+            data = {}
+
+    session_id = session_dir.name
+    data.setdefault('session_id', session_id)
+    data.setdefault('status', 'active')
+    data.setdefault('topic', None)
+    data.setdefault('distro', 'rolling')
+    data.setdefault('pr_ref', None)
+    data.setdefault('pr_url', None)
+    data.setdefault('pr_title', None)
+    data.setdefault('pr_author', None)
+    data.setdefault('conversation_id', None)
+    data.setdefault('hub_conversation_id', None)
+    data.setdefault('updated_at', None)
+
+    dc_path = session_dir / '.devcontainer' / 'devcontainer.json'
+    if dc_path.exists():
+        try:
+            dc = json.loads(dc_path.read_text(encoding='utf-8'))
+            dc_distro = dc.get('containerEnv', {}).get('ROS_DISTRO')
+            if dc_distro:
+                data['distro'] = dc_distro
+        except Exception:
+            pass
+
+    task_path = session_dir / 'TASK.md'
+    if task_path.exists() and not data.get('pr_url'):
+        try:
+            task_text = task_path.read_text(encoding='utf-8')
+            m_pr = re.search(r'\*\*Pull Request\*\*:\s*\[([^\]]+)\]\(([^)]+)\)', task_text)
+            if m_pr:
+                data['pr_ref'] = m_pr.group(1).strip()
+                data['pr_url'] = m_pr.group(2).strip()
+            m_title = re.search(r'\*\*Title\*\*:\s*(.+)', task_text)
+            if m_title:
+                data['pr_title'] = m_title.group(1).strip()
+            m_author = re.search(r'\*\*Author\*\*:\s*`@?([^`\n]+)`', task_text)
+            if m_author:
+                data['pr_author'] = m_author.group(1).strip()
+        except Exception:
+            pass
+
+    return data
+
+
+def write_session_metadata(session_dir: Path, updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge updates into <session_dir>/session.json and return the updated dictionary."""
+    session_dir.mkdir(parents=True, exist_ok=True)
+    current = read_session_metadata(session_dir)
+    for k, v in updates.items():
+        if v is not None:
+            current[k] = v
+    current['updated_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    meta_path = get_session_metadata_path(session_dir)
+    meta_path.write_text(json.dumps(current, indent=2) + '\n', encoding='utf-8')
+    return current
 
 
 @dataclasses.dataclass
@@ -110,12 +184,22 @@ class SessionManager:
             workspace_path=self.workspace.root,
         )
 
-        # Write auto-discovered agent instructions (AGENTS.md, GEMINI.md, CLAUDE.md)
+        # Write auto-discovered agent instructions (AGENTS.md, CLAUDE.md)
         write_session_agent_instructions(
             session_id=session_id,
             session_dir=session_dir,
             workspace_root=self.workspace.root,
             distro=distro,
+        )
+
+        write_session_metadata(
+            session_dir,
+            {
+                'session_id': session_id,
+                'topic': topic,
+                'distro': distro,
+                'status': 'active',
+            },
         )
 
         timeline = TimelineLogger(

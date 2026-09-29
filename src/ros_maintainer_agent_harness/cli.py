@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import argparse
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -29,6 +30,15 @@ from .devcontainer import (
     stop_session_container,
     write_devcontainer_config,
 )
+from .hub import (
+    format_conversation_link,
+    get_next_actions,
+    get_workspace_status,
+    read_session_metadata,
+    start_session_conversation,
+    VALID_SESSION_STATUSES,
+    write_session_metadata,
+)
 from .instructions import write_workspace_agent_instructions
 from .mcp_config import (
     get_agent_launch_info,
@@ -38,6 +48,7 @@ from .mcp_config import (
 from .rules import MaintainerRules
 from .scaffolder import scaffold_session_from_pr
 from .server import run_server
+from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
 from .worktree import SessionManager
 
@@ -56,6 +67,15 @@ def get_default_workspace_path() -> Path:
         if curr.parent == curr:
             break
         curr = curr.parent
+
+    # Fall back to ~/ros_maintenance_ws if it is an initialized workspace
+    try:
+        home_ws = (Path.home() / 'ros_maintenance_ws').resolve()
+        if (home_ws / 'config' / 'policy.yaml').exists() and (home_ws / 'tools').exists():
+            return home_ws
+    except Exception:
+        pass
+
     return cwd
 
 
@@ -470,6 +490,145 @@ def handle_session_down(args: argparse.Namespace) -> int:
         return 1
 
 
+def handle_session_start_conversation(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+
+    try:
+        res = start_session_conversation(
+            workspace=layout,
+            pr_ref=args.pr,
+            session_id=args.session_id,
+            distro=args.distro,
+            extra_instructions=args.instructions,
+            hub_conversation_id=args.hub_conversation_id,
+            mode=args.mode,
+            model=args.model,
+        )
+    except Exception as e:
+        print(f"Error starting session conversation: {e}", file=sys.stderr)
+        return 1
+
+    print(f"✅ Prepared dedicated task conversation for session '{res['session_id']}'")
+    print(f"  - Session dir:   {res['session_dir']}")
+    print(f"  - Launch method: {res['launch_method']}")
+    if res.get('conversation_id'):
+        print(f"  - Conversation:  {res['conversation_link']}")
+    if args.mode == 'prompt_only':
+        print("\n--- Task Prompt ---")
+        print(res['task_prompt'])
+    return 0
+
+
+def handle_session_status(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    mgr = SessionManager(layout)
+
+    if not mgr.session_exists(args.session_id):
+        print(f"Error: Session '{args.session_id}' does not exist.", file=sys.stderr)
+        return 1
+
+    session_dir = mgr.get_session_dir(args.session_id)
+    updates = {}
+    if args.set_status:
+        updates['status'] = args.set_status
+    if args.conversation_id:
+        updates['conversation_id'] = args.conversation_id
+    if args.hub_conversation_id:
+        updates['hub_conversation_id'] = args.hub_conversation_id
+    if args.topic:
+        updates['topic'] = args.topic
+
+    if updates:
+        meta = write_session_metadata(session_dir, updates)
+    else:
+        meta = read_session_metadata(session_dir)
+
+    if args.message or args.milestone:
+        tl = TimelineLogger(args.session_id, session_dir, layout.audit_log_path)
+        tl.log_status(message=args.message or f"Updated status to '{args.set_status}'.", milestone=args.milestone)
+
+    conv_link = format_conversation_link(args.session_id, meta.get('conversation_id'))
+    print(f"📁 Session Status: {args.session_id}")
+    print(f"  - Status:       {meta.get('status')}")
+    print(f"  - Distro:       {meta.get('distro')}")
+    print(f"  - Topic/Title:  {meta.get('topic') or meta.get('pr_title') or 'N/A'}")
+    print(f"  - PR:           {meta.get('pr_ref') or meta.get('pr_url') or 'N/A'}")
+    print(f"  - Conversation: {conv_link or 'Not linked'}")
+    print(f"  - Hub Conv ID:  {meta.get('hub_conversation_id') or 'N/A'}")
+    return 0
+
+
+def handle_status(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    status = get_workspace_status(layout, check_containers=not args.no_containers)
+
+    if args.json:
+        print(json.dumps(status, indent=2))
+        return 0
+
+    summary = status['summary']
+    print(f"=== ROS Maintainer Hub Status ({status['workspace_root']}) ===")
+    print(
+        f"Sessions: {summary['total_sessions']} | "
+        f"Running Containers: {summary['running_containers']} | "
+        f"Pending Approvals: {summary['pending_approvals']} | "
+        f"Active CI: {summary['active_ci_runs']}"
+    )
+    print("=" * 72)
+
+    if not status['sessions']:
+        print("No active sessions.")
+    else:
+        for s in status['sessions']:
+            c_str = '🟢 running' if s['container_running'] else '⚪ stopped'
+            conv_str = s.get('conversation_link') or 'none'
+            print(f"📁 {s['session_id']} [{s['status']}] (distro: {s['distro']}, container: {c_str})")
+            if s.get('pr_ref') or s.get('topic'):
+                print(f"   PR/Topic:     {s.get('pr_ref') or ''} {s.get('topic') or ''}".strip())
+            print(f"   Conversation: {conv_str}")
+            if s.get('latest_milestone'):
+                print(f"   Milestone:    {s['latest_milestone']}")
+            if s.get('latest_ci_run'):
+                ci = s['latest_ci_run']
+                print(f"   Latest CI:    [{ci.get('status')}] {ci.get('job_url')}")
+            if s.get('pending_approvals'):
+                print(f"   Approvals:    {len(s['pending_approvals'])} pending")
+            print("-" * 72)
+
+    return 0
+
+
+def handle_next(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    res = get_next_actions(
+        workspace=layout,
+        repos=args.repo,
+        include_github_prs=not args.no_github,
+        limit_prs=args.limit,
+    )
+
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return 0
+
+    print(f"=== Recommended Next Actions ({res['workspace_root']}) ===")
+    if not res['actions']:
+        print("No pending actions or open PRs found.")
+        return 0
+
+    for idx, act in enumerate(res['actions'], 1):
+        print(f"{idx}. [{act['priority']}] {act['title']}")
+        if act.get('details'):
+            print(f"   Details: {act['details']}")
+        if act.get('suggested_command'):
+            print(f"   Command: {act['suggested_command']}")
+    return 0
+
+
 def handle_rules(args: argparse.Namespace) -> int:
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
@@ -751,6 +910,25 @@ def parse_args():
     # doctor
     subparsers.add_parser('doctor', help='Check workspace readiness, container runtime, GitHub tokens, and MCP config')
 
+    # status (Hub dashboard)
+    st_parser = subparsers.add_parser(
+        'status', help='Show Maintainer Hub status dashboard across all active sessions, containers, CI, and approvals'
+    )
+    st_parser.add_argument('--json', action='store_true', help='Output status dashboard as JSON')
+    st_parser.add_argument('--no-containers', action='store_true', help='Skip querying container runtime state')
+
+    # next (Triage next actions)
+    nx_parser = subparsers.add_parser(
+        'next', help='Show prioritized next actions across in-flight sessions, approvals, CI, and open GitHub PRs'
+    )
+    nx_parser.add_argument(
+        '-r', '--repo', action='append', default=None,
+        help='GitHub repository (owner/repo) to query for open PRs (can be specified multiple times)',
+    )
+    nx_parser.add_argument('--no-github', action='store_true', help='Skip querying GitHub for open PRs')
+    nx_parser.add_argument('-n', '--limit', type=int, default=10, help='Maximum open PRs to query (default: 10)')
+    nx_parser.add_argument('--json', action='store_true', help='Output recommendations as JSON')
+
     # token-setup
     ts_parser = subparsers.add_parser(
         'token-setup', help='Configure read-only container GitHub token (or opt into unauthenticated mode) in .env'
@@ -885,6 +1063,37 @@ def parse_args():
     s_down = session_subparsers.add_parser('down', help='Stop and remove the sandbox container for a session')
     s_down.add_argument('session_id', type=str, help='Session ID')
 
+    # session start-conversation
+    s_conv = session_subparsers.add_parser(
+        'start-conversation',
+        help='Scaffold a session (if needed) and start or prepare a dedicated task conversation',
+    )
+    s_conv.add_argument('--pr', type=str, default=None, help='PR URL or shorthand (e.g. ros2/rclcpp#160)')
+    s_conv.add_argument('--session-id', type=str, default=None, help='Session ID')
+    s_conv.add_argument('--distro', type=str, default=None, help='Target ROS distro override')
+    s_conv.add_argument(
+        '--mode', choices=['auto', 'agentapi', 'prompt_only'], default='auto',
+        help='Launch method: auto, agentapi (top-level Jetski conversation), or prompt_only',
+    )
+    s_conv.add_argument('--model', choices=['flash_lite', 'flash', 'pro'], default=None, help='Model tier for agentapi')
+    s_conv.add_argument('--hub-conversation-id', type=str, default=None, help='Parent Hub conversation ID')
+    s_conv.add_argument('--instructions', type=str, default=None, help='Extra instructions for the task agent')
+
+    # session status
+    s_stat = session_subparsers.add_parser(
+        'status', help='View or update session status, linked conversation ID, or milestone'
+    )
+    s_stat.add_argument('session_id', type=str, help='Session ID')
+    s_stat.add_argument(
+        '--set-status', choices=list(VALID_SESSION_STATUSES), default=None,
+        help='Update session lifecycle status',
+    )
+    s_stat.add_argument('--conversation-id', type=str, default=None, help='Link task conversation ID')
+    s_stat.add_argument('--hub-conversation-id', type=str, default=None, help='Link parent Hub conversation ID')
+    s_stat.add_argument('--topic', type=str, default=None, help='Update session topic')
+    s_stat.add_argument('--milestone', type=str, default=None, help='Log milestone to timeline.md')
+    s_stat.add_argument('--message', type=str, default=None, help='Log status message to timeline.md')
+
     # rules
     rules_parser = subparsers.add_parser('rules', help='View or update maintainer style & preferences')
     rules_subparsers = rules_parser.add_subparsers(dest='rules_action')
@@ -974,6 +1183,10 @@ def main():
         return handle_init(args)
     elif args.command == 'doctor':
         return handle_doctor(args)
+    elif args.command == 'status':
+        return handle_status(args)
+    elif args.command == 'next':
+        return handle_next(args)
     elif args.command == 'token-setup':
         return handle_token_setup(args)
     elif args.command == 'mcp-install':
@@ -1001,6 +1214,10 @@ def main():
             return handle_session_exec(args)
         elif args.session_action == 'down':
             return handle_session_down(args)
+        elif args.session_action == 'start-conversation':
+            return handle_session_start_conversation(args)
+        elif args.session_action == 'status':
+            return handle_session_status(args)
         else:
             print("Run `ros-maintainer-harness session --help` for session commands.")
             return 0

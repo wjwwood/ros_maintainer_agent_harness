@@ -96,19 +96,19 @@ Once generated, configure the token in your maintainer workspace using `token-se
 Run the built-in `token-setup` command to store the token in `<workspace>/.env` with `0600` permissions:
 
 ```bash
-ros-maintainer-harness -w ~/maintainer_ws token-setup --container-token "github_pat_yourReadOnlyTokenHere"
+ros-maintainer-harness -w ~/ros_maintenance_ws token-setup --container-token "github_pat_yourReadOnlyTokenHere"
 ```
 
 Or if you want to explicitly run containers without a GitHub token (unauthenticated mode):
 
 ```bash
-ros-maintainer-harness -w ~/maintainer_ws token-setup --no-token
+ros-maintainer-harness -w ~/ros_maintenance_ws token-setup --no-token
 ```
 
 You can verify your token configuration at any time (and check that your container token does not accidentally match your host `gh auth token`) by running:
 
 ```bash
-ros-maintainer-harness -w ~/maintainer_ws doctor
+ros-maintainer-harness -w ~/ros_maintenance_ws doctor
 ```
 
 ### Method B: Host Environment Variable

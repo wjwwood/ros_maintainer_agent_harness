@@ -46,7 +46,7 @@ If your agent extension runs on the host machine, it can use the `stdio` transpo
         "--transport",
         "stdio",
         "--workspace",
-        "/path/to/ros_maintainer_ws"
+        "/path/to/ros_maintenance_ws"
       ]
     }
   }

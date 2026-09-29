@@ -34,7 +34,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
 
     def test_full_multi_session_lifecycle(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            ws_root = Path(temp_dir) / 'maintainer_ws'
+            ws_root = Path(temp_dir) / 'ros_maintenance_ws'
             layout = WorkspaceLayout(ws_root)
             layout.initialize()
 

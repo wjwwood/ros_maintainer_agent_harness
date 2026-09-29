@@ -85,10 +85,10 @@ The harness uses **Linked Git Worktrees** and volume bind mounts to keep session
 
 ```
 HOST DIRECTORY                                      CONTAINER MOUNT
-~/ros_maintainer_ws/
+~/ros_maintenance_ws/
 ├── config/maintainer_rules.md ─────────────────►  /workspace/MAINTAINER_RULES.md (ro)
 ├── tools/ ─────────────────────────────────────►  /workspace/tools/
-├── shared_repos/ ──────────────────────────────►  ~/ros_maintainer_ws/shared_repos/
+├── shared_repos/ ──────────────────────────────►  ~/ros_maintenance_ws/shared_repos/
 └── sessions/pr-rclcpp-160/ ────────────────────►  /workspace/
     ├── src/                                       /workspace/src/
     ├── build/                                     /workspace/build/

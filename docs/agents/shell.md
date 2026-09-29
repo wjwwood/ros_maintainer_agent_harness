@@ -14,7 +14,7 @@ This starts a bash shell with the working directory set to `sessions/pr-rclcpp-1
 
 ```bash
 echo $ROS_MAINTAINER_SESSION_ID    # pr-rclcpp-160
-echo $ROS_MAINTAINER_WS            # /path/to/ros_maintainer_ws
+echo $ROS_MAINTAINER_WS            # /path/to/ros_maintenance_ws
 echo $ROS_DISTRO                   # e.g. jazzy or rolling
 echo $ROS_MAINTAINER_GATEWAY_URL   # http://127.0.0.1:8765
 ```
@@ -28,10 +28,10 @@ If you have `@devcontainers/cli` installed (`npm install -g @devcontainers/cli`)
 
 ```bash
 # Start container (if not already running)
-devcontainer up --workspace-folder ~/ros_maintainer_ws/sessions/pr-rclcpp-160
+devcontainer up --workspace-folder ~/ros_maintenance_ws/sessions/pr-rclcpp-160
 
 # Exec into an interactive bash shell
-devcontainer exec --workspace-folder ~/ros_maintainer_ws/sessions/pr-rclcpp-160 bash
+devcontainer exec --workspace-folder ~/ros_maintenance_ws/sessions/pr-rclcpp-160 bash
 ```
 
 ### Using Plain Docker
@@ -41,9 +41,9 @@ You can also run directly with Docker using the same volume mounts:
 docker run -it --rm \
   --name session-pr-160 \
   --add-host=host.docker.internal:host-gateway \
-  -v ~/ros_maintainer_ws/sessions/pr-rclcpp-160:/workspace \
-  -v ~/ros_maintainer_ws/tools:/workspace/tools \
-  -v ~/ros_maintainer_ws/config/maintainer_rules.md:/workspace/MAINTAINER_RULES.md:ro \
+  -v ~/ros_maintenance_ws/sessions/pr-rclcpp-160:/workspace \
+  -v ~/ros_maintenance_ws/tools:/workspace/tools \
+  -v ~/ros_maintenance_ws/config/maintainer_rules.md:/workspace/MAINTAINER_RULES.md:ro \
   -e ROS_DISTRO=jazzy \
   -e ROS_MAINTAINER_SESSION_ID=pr-rclcpp-160 \
   -e ROS_MAINTAINER_GATEWAY_URL=http://host.docker.internal:8765 \

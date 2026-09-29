@@ -14,16 +14,16 @@ Before starting a conversation in Antigravity or Gemini, initialize your maintai
 
 ```bash
 # 1. Initialize workspace (writes config/, tools/, AGENTS.md, CLAUDE.md)
-ros-maintainer-harness -w ~/maintainer_ws init
+ros-maintainer-harness -w ~/ros_maintenance_ws init
 
 # 2. Configure container GitHub token (or pass --no-token for unauthenticated mode)
-ros-maintainer-harness -w ~/maintainer_ws token-setup --container-token <READONLY_PAT>
+ros-maintainer-harness -w ~/ros_maintenance_ws token-setup --container-token <READONLY_PAT>
 
 # 3. Register the MCP server in ~/.gemini/config/mcp_config.json
-ros-maintainer-harness -w ~/maintainer_ws mcp-install --target gemini
+ros-maintainer-harness -w ~/ros_maintenance_ws mcp-install --target gemini
 
 # 4. Verify readiness
-ros-maintainer-harness -w ~/maintainer_ws doctor
+ros-maintainer-harness -w ~/ros_maintenance_ws doctor
 ```
 
 > [!IMPORTANT]
@@ -37,27 +37,34 @@ You can start an Antigravity or Gemini conversation in either of two ways:
 
 1. Scaffold the session from a Pull Request:
    ```bash
-   ros-maintainer-harness -w ~/maintainer_ws session from-pr ros2/rclcpp#160
+   ros-maintainer-harness -w ~/ros_maintenance_ws session from-pr ros2/rclcpp#160
    ```
 2. Launch Antigravity or Gemini in the session directory:
    ```bash
-   ros-maintainer-harness -w ~/maintainer_ws session launch pr-rclcpp-160 --agent antigravity
+   ros-maintainer-harness -w ~/ros_maintenance_ws session launch pr-rclcpp-160 --agent antigravity
    ```
    Because `sessions/pr-rclcpp-160/` contains auto-generated `AGENTS.md` and `TASK.md` files, Antigravity automatically loads the session rules on startup.
 
-### Option B: Open the Maintainer Workspace Root (Multi-PR Coordinator & Subagents)
+### Option B: Open the Maintainer Workspace Root as a "Maintainer Hub" (Recommended)
 
-1. Open `~/maintainer_ws` (or this repository) as your workspace in Antigravity.
+1. Open `~/ros_maintenance_ws` (or this repository) as your workspace in Antigravity/Jetski.
 2. Antigravity automatically discovers `AGENTS.md` at the workspace root.
-3. Prompt the agent naturally, for example:
-   ```text
-   Use the maintainer harness in ~/maintainer_ws to review and test PR ros2/rclcpp#160.
-   ```
-4. Following the rules in `AGENTS.md`, the agent will:
-   - Run `check_environment` / `ros-maintainer-harness doctor` first (and prompt you if `ROS_CONTAINER_GITHUB_TOKEN` has not been configured yet).
-   - Scaffold the session via `scaffold_session_from_pr`.
-   - Inspect the PR diff in `sessions/<id>/src/<repo>` for security issues before building.
-   - Start the session container (`start_session_container` / `session up`) and execute all `colcon build` and `colcon test` commands inside the container via `exec_in_session` (or `session exec`), including when delegating work to subagents via `invoke_subagent`.
+3. Use a single long-lived **Maintainer Hub** conversation to coordinate your work across multiple PRs:
+   - **Check Status Across All Tasks**:
+     ```text
+     What is the status of things we're still working on?
+     ```
+     Calls `get_workspace_status` (or `ros-maintainer-harness status`) to display all active sessions, clickable `[<session_id>](conversation://<id>)` links, latest milestones, container state, CI runs, and pending approvals.
+   - **Triage What to Work on Next**:
+     ```text
+     What should I work on next?
+     ```
+     Calls `get_next_actions` (or `ros-maintainer-harness next`) to prioritize pending approval tickets, blocked sessions, failed/completed CI jobs, and open GitHub PRs not yet in an active session.
+   - **Start a Dedicated Task Conversation for a PR**:
+     ```text
+     I want to work on ros2/rclcpp#160
+     ```
+     Calls `start_session_conversation(pr_ref="ros2/rclcpp#160")`, which scaffolds `sessions/pr-rclcpp-160/`, launches a dedicated top-level conversation via `agentapi new-conversation` (or spawns a background subagent via `invoke_subagent`), links the `conversation_id` in `session.json`, and returns a clickable `conversation://<id>` link in the Hub chat.
 
 ## How Containerized Execution Works for Host Agents & Subagents
 

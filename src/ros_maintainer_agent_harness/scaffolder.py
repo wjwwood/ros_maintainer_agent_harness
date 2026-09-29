@@ -23,7 +23,7 @@ from typing import Optional
 from .pr_harvester import PRMetadata, fetch_pr_metadata
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
-from .worktree import SessionManager, validate_session_id
+from .worktree import SessionManager, validate_session_id, write_session_metadata
 
 
 @dataclasses.dataclass
@@ -277,9 +277,25 @@ def scaffold_session_from_pr(
         f"- **Worktree**: `{worktree_path.relative_to(session_dir)}`"
     )
 
-    # 7. Write TASK.md prompt
+    # 7. Write TASK.md prompt and persist session metadata
     task_file = session_dir / 'TASK.md'
     task_file.write_text(generate_task_prompt(meta, final_distro), encoding='utf-8')
+
+    write_session_metadata(
+        session_dir,
+        {
+            'session_id': final_session_id,
+            'topic': f"PR #{meta.number}: {meta.title}",
+            'distro': final_distro,
+            'pr_ref': meta.shorthand,
+            'pr_url': meta.url,
+            'pr_title': meta.title,
+            'pr_author': meta.author,
+            'base_ref': meta.base_ref,
+            'head_ref': meta.head_ref,
+            'status': 'investigating',
+        },
+    )
 
     return ScaffoldResult(
         session_id=final_session_id,

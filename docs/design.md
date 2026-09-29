@@ -13,10 +13,10 @@ When maintaining ROS 2 repositories with the assistance of an AI coding agent, t
 
 ## 2. Maintainer Workspace Layout & File Locations
 
-All shared configuration, repositories, tools, session workspaces, and audit logs live under a single unified workspace on the host (e.g. `~/ros_maintainer_ws/`):
+All shared configuration, repositories, tools, session workspaces, and audit logs live under a single unified workspace on the host (e.g. `~/ros_maintenance_ws/`):
 
 ```
-~/ros_maintainer_ws/
+~/ros_maintenance_ws/
 ├── config/                     # Configuration and maintainer preferences
 │   ├── policy.yaml             # Enforced push/CI policies
 │   └── maintainer_rules.md     # Human-readable maintainer conventions & preferences
@@ -59,7 +59,7 @@ Sharing a single pre-built `venv/` directory across containers or between host a
 
 ### The Solution: Shared `requirements.txt` + Container-Local Environments
 1. **Shared Specification (`tools/requirements.txt`)**:
-   * Shared Python dependencies (such as `PyGithub`, `requests`, `jenkinsapi`) are defined declaratively in `~/ros_maintainer_ws/tools/requirements.txt`.
+   * Shared Python dependencies (such as `PyGithub`, `requests`, `jenkinsapi`) are defined declaratively in `~/ros_maintenance_ws/tools/requirements.txt`.
 2. **Container-Local Installation**:
    * Each devcontainer creates and manages its own isolated environment (e.g. in `/root/.venv` or system site-packages) upon container initialization (`postCreateCommand: pip install -r /workspace/tools/requirements.txt`).
 3. **Shared Executables (`tools/bin/`)**:
@@ -144,7 +144,7 @@ This section explains how files are shared between the host and container, and h
 
 ```mermaid
 flowchart TD
-    subgraph HostFS ["Host Workspace (~/ros_maintainer_ws/)"]
+    subgraph HostFS ["Host Workspace (~/ros_maintenance_ws/)"]
         HostIDE["Maintainer Host Editor / Terminal"]
         SharedClones["shared_repos/<br/>(Primary .git object storage)"]
         SharedTools["tools/<br/>(bin/ and requirements.txt)"]
@@ -223,7 +223,7 @@ The MCP server runs on the maintainer's host machine. FastMCP supports both stan
        "mcpServers": {
          "ros-maintainer-harness": {
            "command": "ros-maintainer-harness",
-           "args": ["serve", "--workspace", "~/ros_maintainer_ws"]
+           "args": ["serve", "--workspace", "~/ros_maintenance_ws"]
          }
        }
      }
