@@ -87,7 +87,10 @@ def generate_task_prompt(meta: PRMetadata, distro: str) -> str:
      secrets, modified CI workflows, or suspicious changes in build scripts and test code (e.g. unexpected
      network calls or command execution). If anything suspicious is found, halt and notify the maintainer.
 
-2. **Build & Local Testing**:
+2. **Containerized Build & Local Testing (Never Build Directly on Host)**:
+   - If you are running on the host OS (or as a spawned subagent on the host), execute all builds and tests
+     inside the session's isolated container using the MCP tool `exec_in_session` or
+     `ros-maintainer-harness session exec`:
    - Build packages with colcon:
      ```bash
      colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -136,7 +139,7 @@ def ensure_shared_repo(
     }
 
     res = subprocess.run(
-        ['git', '-c', 'url.git@github.com:.insteadof=', 'clone', '--', clone_url, str(repo_dir)],
+        ['git', '-c', 'url.https://github.com/.insteadOf=git@github.com:', 'clone', '--', clone_url, str(repo_dir)],
         capture_output=True,
         text=True,
         timeout=120,
@@ -162,7 +165,7 @@ def fetch_pr_ref_in_repo(repo_dir: Path, meta: PRMetadata) -> str:
     # Try fetching GitHub PR head ref: pull/{number}/head:pr-{number}
     fetch_res = subprocess.run(
         [
-            'git', '-c', 'url.git@github.com:.insteadof=', 'fetch',
+            'git', '-c', 'url.https://github.com/.insteadOf=git@github.com:', 'fetch',
             'origin', f"pull/{meta.number}/head:{local_branch}", '--force'
         ],
         cwd=str(repo_dir),
@@ -179,7 +182,7 @@ def fetch_pr_ref_in_repo(repo_dir: Path, meta: PRMetadata) -> str:
     if meta.head_repo_url:
         fork_res = subprocess.run(
             [
-                'git', '-c', 'url.git@github.com:.insteadof=', 'fetch',
+                'git', '-c', 'url.https://github.com/.insteadOf=git@github.com:', 'fetch',
                 meta.head_repo_url, f"{meta.head_ref}:{local_branch}", '--force'
             ],
             cwd=str(repo_dir),

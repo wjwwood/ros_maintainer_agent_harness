@@ -318,6 +318,74 @@ class TestCLI(unittest.TestCase):
                 with patch('pathlib.Path.cwd', return_value=outside_dir):
                     self.assertEqual(get_default_workspace_path(), outside_dir)
 
+    def test_cli_token_doctor_and_container_commands(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = str(Path(temp_dir) / 'cli_ws')
+
+            # 1. token-setup --no-token
+            ts_args = ['ros-maintainer-harness', '-w', ws_root, 'token-setup', '--no-token']
+            with patch.object(sys, 'argv', ts_args):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn('ROS_CONTAINER_GITHUB_TOKEN=none', fake_out.getvalue())
+
+            # 2. doctor (with docker mocked)
+            with patch('ros_maintainer_agent_harness.devcontainer.detect_container_runtime', return_value='docker'):
+                with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', ws_root, 'doctor']):
+                    with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                        ret = main()
+                        self.assertEqual(ret, 0)
+                        self.assertIn('Environment is ready', fake_out.getvalue())
+
+            # 3. Create session and test session up / exec / down
+            create_args = ['ros-maintainer-harness', '-w', ws_root, 'session', 'create', 'sess-1']
+            with patch.object(sys, 'argv', create_args):
+                with patch('sys.stdout', new=io.StringIO()):
+                    main()
+
+            sess_dir = Path(ws_root) / 'sessions' / 'sess-1'
+            self.assertTrue((sess_dir / 'AGENTS.md').is_file())
+            self.assertTrue((sess_dir / 'GEMINI.md').is_file())
+            self.assertTrue((sess_dir / 'CLAUDE.md').is_file())
+
+            with patch('ros_maintainer_agent_harness.cli.start_session_container') as mock_up:
+                mock_up.return_value = {
+                    'success': True,
+                    'status': 'started',
+                    'container_name': 'ros-harness-sess-1',
+                    'runtime': 'docker',
+                }
+                with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', ws_root, 'session', 'up', 'sess-1']):
+                    with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                        ret = main()
+                        self.assertEqual(ret, 0)
+                        self.assertIn('ros-harness-sess-1', fake_out.getvalue())
+
+            with patch('ros_maintainer_agent_harness.cli.exec_in_session_container') as mock_exec:
+                mock_exec.return_value = {
+                    'success': True,
+                    'returncode': 0,
+                    'stdout': 'colcon build done\n',
+                    'stderr': '',
+                }
+                exec_args = [
+                    'ros-maintainer-harness', '-w', ws_root, 'session', 'exec', 'sess-1', '--', 'colcon build'
+                ]
+                with patch.object(sys, 'argv', exec_args):
+                    with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                        ret = main()
+                        self.assertEqual(ret, 0)
+                        self.assertIn('colcon build done', fake_out.getvalue())
+
+            with patch('ros_maintainer_agent_harness.cli.stop_session_container') as mock_down:
+                mock_down.return_value = {'success': True, 'container_name': 'ros-harness-sess-1'}
+                with patch.object(sys, 'argv', ['ros-maintainer-harness', '-w', ws_root, 'session', 'down', 'sess-1']):
+                    with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                        ret = main()
+                        self.assertEqual(ret, 0)
+                        self.assertIn('Stopped and removed container', fake_out.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()

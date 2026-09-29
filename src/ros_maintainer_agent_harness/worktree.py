@@ -19,7 +19,8 @@ import shutil
 import subprocess
 from typing import Dict, List, Optional
 
-from .devcontainer import write_devcontainer_config
+from .devcontainer import stop_session_container, write_devcontainer_config
+from .instructions import write_session_agent_instructions
 from .mcp_config import write_session_mcp_configs
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
@@ -107,6 +108,14 @@ class SessionManager:
         write_session_mcp_configs(
             session_dir=session_dir,
             workspace_path=self.workspace.root,
+        )
+
+        # Write auto-discovered agent instructions (AGENTS.md, GEMINI.md, CLAUDE.md)
+        write_session_agent_instructions(
+            session_id=session_id,
+            session_dir=session_dir,
+            workspace_root=self.workspace.root,
+            distro=distro,
         )
 
         timeline = TimelineLogger(
@@ -281,11 +290,17 @@ class SessionManager:
 
     def prune_session(self, session_id: str, force: bool = False) -> bool:
         """
-        Prune a session by removing linked Git worktrees and deleting session directory.
+        Prune a session by stopping any running container, removing linked Git worktrees,
+        and deleting the session directory.
         """
         session_dir = self.get_session_dir(session_id)
         if not session_dir.exists():
             return False
+
+        try:
+            stop_session_container(session_id)
+        except Exception:
+            pass
 
         src_dir = session_dir / 'src'
         if src_dir.exists():

@@ -21,6 +21,7 @@ from ros_maintainer_agent_harness.mcp_config import (
     generate_mcp_config_dict,
     generate_mcp_server_entry,
     get_agent_launch_info,
+    install_global_mcp_config,
     write_session_mcp_configs,
 )
 
@@ -99,6 +100,30 @@ class TestMCPConfig(unittest.TestCase):
             data = json.loads((session_dir / 'mcp.json').read_text(encoding='utf-8'))
             self.assertIn('mcpServers', data)
             self.assertIn('ros-maintainer-harness', data['mcpServers'])
+
+    def test_install_global_mcp_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_home = Path(temp_dir) / 'home'
+            ws_path = Path(temp_dir) / 'ws'
+            ws_path.mkdir(parents=True)
+
+            # Pre-create an empty 0-byte ~/.gemini/config/mcp_config.json to verify resilient merge
+            gemini_cfg = fake_home / '.gemini' / 'config' / 'mcp_config.json'
+            gemini_cfg.parent.mkdir(parents=True, exist_ok=True)
+            gemini_cfg.write_text('', encoding='utf-8')
+
+            updated = install_global_mcp_config(
+                workspace_path=ws_path,
+                targets=['gemini', 'claude'],
+                home_dir=fake_home,
+            )
+            self.assertIn('gemini', updated)
+            self.assertIn('claude', updated)
+
+            g_data = json.loads(gemini_cfg.read_text(encoding='utf-8'))
+            self.assertIn('ros-maintainer-harness', g_data['mcpServers'])
+            c_data = json.loads((fake_home / '.claude.json').read_text(encoding='utf-8'))
+            self.assertIn('ros-maintainer-harness', c_data['mcpServers'])
 
     def test_get_agent_launch_info(self):
         session_dir = Path('/tmp/sessions/session-pr-100')

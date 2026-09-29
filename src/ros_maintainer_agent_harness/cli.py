@@ -21,8 +21,20 @@ import sys
 from .approval import ApprovalManager
 from .audit import format_audit_record, read_audit_records
 from .ci import CITracker, JenkinsManager
-from .devcontainer import write_devcontainer_config
-from .mcp_config import get_agent_launch_info, write_session_mcp_configs
+from .devcontainer import (
+    check_token_and_environment,
+    exec_in_session_container,
+    save_workspace_env_var,
+    start_session_container,
+    stop_session_container,
+    write_devcontainer_config,
+)
+from .instructions import write_workspace_agent_instructions
+from .mcp_config import (
+    get_agent_launch_info,
+    install_global_mcp_config,
+    write_session_mcp_configs,
+)
 from .rules import MaintainerRules
 from .scaffolder import scaffold_session_from_pr
 from .server import run_server
@@ -52,6 +64,8 @@ def handle_init(args: argparse.Namespace) -> int:
     layout = WorkspaceLayout(ws_path)
 
     if layout.is_initialized():
+        if not (ws_path / 'AGENTS.md').exists():
+            write_workspace_agent_instructions(ws_path)
         print(f"Workspace already initialized at: {ws_path}")
         return 0
 
@@ -62,6 +76,100 @@ def handle_init(args: argparse.Namespace) -> int:
     print(f"  - Repos:     {layout.shared_repos_dir}")
     print(f"  - Sessions:  {layout.sessions_dir}")
     print(f"  - Audit log: {layout.audit_dir}")
+    print(f"  - Agent instructions: {ws_path / 'AGENTS.md'} (+ GEMINI.md, CLAUDE.md)")
+    return 0
+
+
+def handle_doctor(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    report = check_token_and_environment(ws_path)
+
+    print(f"=== ROS Maintainer Harness Doctor ({report['workspace_root']}) ===")
+    ws_icon = '✅' if report['workspace_initialized'] else '❌'
+    rt_icon = '✅' if report['container_runtime'] else '❌'
+    tok_icon = '✅' if report['container_token_configured'] else '⚠️ '
+    host_icon = '✅' if report['host_token_configured'] else 'ℹ️ '
+    mcp_icon = '✅' if report['global_mcp_configured'] else '⚠️ '
+
+    print(f"  {ws_icon} Workspace initialized:       {report['workspace_initialized']}")
+    print(f"  {rt_icon} Container runtime:           {report['container_runtime'] or 'NOT FOUND'}")
+    print(
+        f"  {tok_icon} Container GitHub token:      "
+        f"{report['container_token_configured']} (mode: {report['container_token_mode']})"
+    )
+    print(f"  {host_icon} Host GitHub auth detected:   {report['host_token_configured']}")
+    print(f"  {mcp_icon} Global MCP config installed: {report['global_mcp_configured']}")
+
+    if report['warnings']:
+        print("\nWarnings:")
+        for w in report['warnings']:
+            print(f"  ⚠️  {w}")
+
+    if report['recommendations']:
+        print("\nRecommended Actions:")
+        for r in report['recommendations']:
+            print(f"  -> {r}")
+
+    if report['ready']:
+        print("\n✅ Environment is ready for containerized session execution.")
+        return 0
+    else:
+        print("\n❌ Action required before starting agent sessions (see recommendations above).")
+        return 1
+
+
+def handle_token_setup(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    if not layout.is_initialized():
+        layout.initialize()
+
+    updated = False
+    if args.no_token:
+        env_file = save_workspace_env_var(ws_path, 'ROS_CONTAINER_GITHUB_TOKEN', 'none')
+        print(f"✅ Configured explicit unauthenticated container mode (ROS_CONTAINER_GITHUB_TOKEN=none) in {env_file}")
+        updated = True
+    elif args.container_token:
+        env_file = save_workspace_env_var(ws_path, 'ROS_CONTAINER_GITHUB_TOKEN', args.container_token.strip())
+        print(f"✅ Saved read-only container token (ROS_CONTAINER_GITHUB_TOKEN) to {env_file} (mode 0600)")
+        updated = True
+
+    if args.host_token:
+        env_file = save_workspace_env_var(ws_path, 'ROS_HOST_GITHUB_TOKEN', args.host_token.strip())
+        print(f"✅ Saved host token (ROS_HOST_GITHUB_TOKEN) to {env_file} (mode 0600)")
+        updated = True
+
+    if not updated:
+        print(
+            "Error: Provide `--container-token <TOKEN>`, `--no-token`, or `--host-token <TOKEN>`.",
+            file=sys.stderr,
+        )
+        return 1
+
+    return 0
+
+
+def handle_mcp_install(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    if not layout.is_initialized():
+        layout.initialize()
+
+    if args.target == 'all':
+        targets = ['gemini', 'claude']
+    else:
+        targets = [args.target or 'gemini']
+
+    written = install_global_mcp_config(
+        workspace_path=ws_path,
+        transport=args.transport or 'stdio',
+        host=args.host or '127.0.0.1',
+        port=args.port or 8765,
+        targets=targets,
+    )
+    print(f"✅ Registered ros-maintainer-harness MCP server for workspace '{ws_path}':")
+    for target_name, path in written.items():
+        print(f"  - {target_name:<8} -> {path}")
     return 0
 
 
@@ -261,6 +369,16 @@ def handle_session_from_pr(args: argparse.Namespace) -> int:
     print(f"  - Task File:  {res.task_file}")
     print(f"  - Timeline:   {res.timeline_path}")
 
+    env_report = check_token_and_environment(layout.root)
+    if not env_report['container_token_configured']:
+        print(
+            "\n⚠️  Note: ROS_CONTAINER_GITHUB_TOKEN is not configured yet.\n"
+            "   Before starting the session container, run:\n"
+            "     ros-maintainer-harness token-setup --container-token <READONLY_PAT>\n"
+            "   or opt into unauthenticated container mode:\n"
+            "     ros-maintainer-harness token-setup --no-token"
+        )
+
     if args.launch:
         launch_args = argparse.Namespace(
             workspace=str(layout.root),
@@ -273,6 +391,83 @@ def handle_session_from_pr(args: argparse.Namespace) -> int:
         return handle_session_launch(launch_args)
 
     return 0
+
+
+def handle_session_up(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    mgr = SessionManager(layout)
+
+    if not mgr.session_exists(args.session_id):
+        print(f"Error: Session '{args.session_id}' does not exist.", file=sys.stderr)
+        return 1
+
+    session_dir = mgr.get_session_dir(args.session_id)
+    info = mgr.get_session_info(args.session_id)
+    distro = args.distro or (info.distro if info and info.distro else 'rolling')
+
+    print(f"🐳 Starting sandbox container for session '{args.session_id}' (distro: {distro})...")
+    res = start_session_container(
+        session_id=args.session_id,
+        session_dir=session_dir,
+        workspace_root=layout.root,
+        distro=distro,
+        custom_image=args.image,
+    )
+    if not res.get('success'):
+        print(f"Error starting container: {res.get('error')}", file=sys.stderr)
+        return 1
+
+    print(f"✅ Container '{res.get('container_name')}' is {res.get('status')} ({res.get('runtime')}).")
+    return 0
+
+
+def handle_session_exec(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    mgr = SessionManager(layout)
+
+    if not mgr.session_exists(args.session_id):
+        print(f"Error: Session '{args.session_id}' does not exist.", file=sys.stderr)
+        return 1
+
+    cmd_parts = list(args.exec_command or [])
+    if cmd_parts and cmd_parts[0] == '--':
+        cmd_parts = cmd_parts[1:]
+    if not cmd_parts:
+        print("Error: Provide a command to execute inside the session container.", file=sys.stderr)
+        return 1
+
+    command_str = ' '.join(cmd_parts) if len(cmd_parts) > 1 else cmd_parts[0]
+    session_dir = mgr.get_session_dir(args.session_id)
+    info = mgr.get_session_info(args.session_id)
+    distro = info.distro if info and info.distro else 'rolling'
+
+    res = exec_in_session_container(
+        session_id=args.session_id,
+        command=command_str,
+        workdir=args.workdir or '/workspace',
+        timeout=args.timeout or 600,
+        auto_start=not args.no_auto_start,
+        session_dir=session_dir,
+        workspace_root=layout.root,
+        distro=distro,
+    )
+    if res.get('stdout'):
+        sys.stdout.write(res['stdout'])
+    if res.get('stderr'):
+        sys.stderr.write(res['stderr'])
+    return int(res.get('returncode', 0 if res.get('success') else 1))
+
+
+def handle_session_down(args: argparse.Namespace) -> int:
+    res = stop_session_container(session_id=args.session_id)
+    if res.get('success'):
+        print(f"✅ Stopped and removed container '{res.get('container_name')}'.")
+        return 0
+    else:
+        print(f"Error stopping container: {res.get('error') or res.get('output')}", file=sys.stderr)
+        return 1
 
 
 def handle_rules(args: argparse.Namespace) -> int:
@@ -553,6 +748,41 @@ def parse_args():
     # init
     subparsers.add_parser('init', help='Initialize workspace layout and default configs')
 
+    # doctor
+    subparsers.add_parser('doctor', help='Check workspace readiness, container runtime, GitHub tokens, and MCP config')
+
+    # token-setup
+    ts_parser = subparsers.add_parser(
+        'token-setup', help='Configure read-only container GitHub token (or opt into unauthenticated mode) in .env'
+    )
+    ts_parser.add_argument(
+        '--container-token', type=str, default=None,
+        help='Read-only fine-grained GitHub PAT for container environments (ROS_CONTAINER_GITHUB_TOKEN)',
+    )
+    ts_parser.add_argument(
+        '--no-token', action='store_true',
+        help='Explicitly opt into unauthenticated container mode (sets ROS_CONTAINER_GITHUB_TOKEN=none)',
+    )
+    ts_parser.add_argument(
+        '--host-token', type=str, default=None,
+        help='Optional host GitHub token for the MCP gateway (ROS_HOST_GITHUB_TOKEN)',
+    )
+
+    # mcp-install
+    mcp_inst = subparsers.add_parser(
+        'mcp-install', help='Register ros-maintainer-harness in global user MCP configs (~/.gemini, ~/.claude.json)'
+    )
+    mcp_inst.add_argument(
+        '--target', choices=['gemini', 'antigravity', 'claude', 'all'], default='gemini',
+        help='Target global MCP client config to update (default: gemini)',
+    )
+    mcp_inst.add_argument(
+        '--transport', choices=['stdio', 'sse', 'streamable-http'], default='stdio',
+        help='MCP transport protocol (default: stdio)',
+    )
+    mcp_inst.add_argument('--host', type=str, default='127.0.0.1', help='Host for network transport')
+    mcp_inst.add_argument('--port', type=int, default=8765, help='Port for network transport')
+
     # serve
     serve_parser = subparsers.add_parser('serve', help='Run the Host MCP Server Gateway')
     serve_parser.add_argument(
@@ -633,6 +863,27 @@ def parse_args():
         '--launch', choices=['claude', 'cursor', 'code', 'vscode', 'shell'], default=None,
         help='Automatically launch agent or IDE after scaffolding',
     )
+
+    # session up
+    s_up = session_subparsers.add_parser('up', help='Start the detached sandbox container for a session')
+    s_up.add_argument('session_id', type=str, help='Session ID')
+    s_up.add_argument('--distro', type=str, default=None, help='Optional ROS distro override')
+    s_up.add_argument('--image', type=str, default=None, help='Optional container image override')
+
+    # session exec
+    s_exec = session_subparsers.add_parser('exec', help='Execute a command inside the session sandbox container')
+    s_exec.add_argument('session_id', type=str, help='Session ID')
+    s_exec.add_argument('-d', '--workdir', type=str, default='/workspace', help='Working directory in container')
+    s_exec.add_argument('--timeout', type=int, default=600, help='Command timeout in seconds (default: 600)')
+    s_exec.add_argument(
+        '--no-auto-start', action='store_true',
+        help='Do not automatically start the container if it is not running',
+    )
+    s_exec.add_argument('exec_command', nargs=argparse.REMAINDER, help='Command to execute inside container')
+
+    # session down
+    s_down = session_subparsers.add_parser('down', help='Stop and remove the sandbox container for a session')
+    s_down.add_argument('session_id', type=str, help='Session ID')
 
     # rules
     rules_parser = subparsers.add_parser('rules', help='View or update maintainer style & preferences')
@@ -721,6 +972,12 @@ def main():
         return handle_instructions(args)
     elif args.command == 'init':
         return handle_init(args)
+    elif args.command == 'doctor':
+        return handle_doctor(args)
+    elif args.command == 'token-setup':
+        return handle_token_setup(args)
+    elif args.command == 'mcp-install':
+        return handle_mcp_install(args)
     elif args.command == 'serve':
         return handle_serve(args)
     elif args.command == 'session':
@@ -738,6 +995,12 @@ def main():
             return handle_session_mcp_config(args)
         elif args.session_action == 'from-pr':
             return handle_session_from_pr(args)
+        elif args.session_action == 'up':
+            return handle_session_up(args)
+        elif args.session_action == 'exec':
+            return handle_session_exec(args)
+        elif args.session_action == 'down':
+            return handle_session_down(args)
         else:
             print("Run `ros-maintainer-harness session --help` for session commands.")
             return 0

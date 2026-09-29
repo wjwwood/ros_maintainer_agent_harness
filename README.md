@@ -58,15 +58,23 @@ Prerequisites:
 
 ### Typical Workflow
 
-#### 1. Initialize the workspace
+#### 1. Initialize the workspace, configure tokens, and register the MCP server
 
-Initialize the maintainer directory structure and default configuration:
+Initialize the maintainer directory structure, configure your container GitHub token (see [GitHub Token Setup](docs/github_tokens.md)), and register the MCP server with your host agent:
 
 ```bash
-ros-maintainer-harness init
-```
+# 1. Initialize workspace (generates config/, tools/, AGENTS.md, GEMINI.md, CLAUDE.md)
+ros-maintainer-harness -w ~/maintainer_ws init
 
-By default this initializes the current directory (`.`), but you can specify a path with `--workspace` or set `$ROS_MAINTAINER_WS`.
+# 2. Configure a read-only fine-grained PAT for containers (or pass --no-token)
+ros-maintainer-harness -w ~/maintainer_ws token-setup --container-token <READONLY_PAT>
+
+# 3. Register the MCP server in ~/.gemini/config/mcp_config.json (and/or ~/.claude.json)
+ros-maintainer-harness -w ~/maintainer_ws mcp-install --target all
+
+# 4. Verify environment readiness
+ros-maintainer-harness -w ~/maintainer_ws doctor
+```
 
 #### 2. Create a session from a PR
 
@@ -81,19 +89,30 @@ This single command:
 - Auto-detects the target ROS 2 distribution from the base branch (e.g., `jazzy` or `rolling`).
 - Clones the target repository into `shared_repos/` if not already present.
 - Creates a new linked git worktree in `sessions/pr-rclcpp-160/src/rclcpp`.
-- Generates `.devcontainer/devcontainer.json` configured for that ROS distribution.
-- Writes editor/agent MCP configs (`mcp.json`, `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`).
+- Generates `.devcontainer/devcontainer.json` configured for that ROS distribution (including mounting `shared_repos/` so worktree git pointers resolve inside the container).
+- Writes editor/agent MCP configs (`mcp.json`, `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/mcp_config.json`) and auto-discovered agent rule files (`AGENTS.md`, `GEMINI.md`, `CLAUDE.md`).
 - Pre-populates `timeline.md` and generates a structured `TASK.md` goal prompt for the agent.
 
-#### 3. Launch an agent in the session
+#### 3. Run builds & tests in the session container or launch an agent
 
-Launch your preferred coding agent inside the session directory with the appropriate environment variables pre-configured:
+For host-based agents (or subagents), start the detached session sandbox container and execute builds/tests inside it:
+
+```bash
+# Start the detached session container (ros-harness-pr-rclcpp-160)
+ros-maintainer-harness session up pr-rclcpp-160
+
+# Run colcon build and tests inside the container (or via the MCP exec_in_session tool)
+ros-maintainer-harness session exec pr-rclcpp-160 -- "colcon build --symlink-install"
+ros-maintainer-harness session exec pr-rclcpp-160 -- "colcon test --event-handlers console_direct+"
+```
+
+Or launch your preferred coding agent directly inside the session directory:
 
 ```bash
 ros-maintainer-harness session launch pr-rclcpp-160 --agent claude
 ```
 
-Supported agents/editors include `claude`, `cursor`, `code`/`vscode`, or an interactive container `shell`. You can also pass `--dry-run` to inspect the command line and environment without launching.
+Supported agents/editors include `claude`, `cursor`, `code`/`vscode`, `gemini`, `antigravity`, or an interactive `shell`. You can also pass `--dry-run` to inspect the command line and environment without launching.
 
 #### 4. Monitor CI without burning agent tokens
 
@@ -194,6 +213,7 @@ The workspace uses linked Git worktrees and session overlay directories so multi
 
 When running `ros-maintainer-harness serve`, the host gateway exposes tools to connected AI coding agents over the Model Context Protocol:
 
+- **Environment & Container Sandbox**: `check_environment` (pre-flight check for runtime, tokens, and MCP config), `start_session_container`, `exec_in_session` (runs `colcon build`/`colcon test` inside the session container), `stop_session_container`.
 - **Git & GitHub**: `git_push` (guarded by policy), `create_pull_request` (requires approval ticket).
 - **CI Management**: `launch_jenkins_ci`, `get_ci_status` (supports host-side blocking wait), `get_ci_summary` (parses JUnit failures & compiler errors), `list_ci_runs`, `cancel_ci_run`, `find_restarted_ci`.
 - **Sessions & Workspaces**: `scaffold_session_from_pr`, `create_session`, `list_sessions`, `prune_session`, `generate_mcp_config`, `get_session_launch_info`.

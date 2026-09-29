@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 from typing import Any, Dict, List, Optional
 
 
 def get_harness_executable() -> str:
     """Resolve the path or command name for ros-maintainer-harness."""
-    # Check if currently running within a python script or binary
+    which_exe = shutil.which('ros-maintainer-harness')
+    if which_exe:
+        return which_exe
     local_bin = Path.home() / '.local' / 'bin' / 'ros-maintainer-harness'
     if local_bin.exists():
         return str(local_bin)
@@ -138,6 +141,59 @@ def write_session_mcp_configs(
         written_files['gemini'] = p
 
     return written_files
+
+
+def install_global_mcp_config(
+    workspace_path: Path,
+    transport: str = 'stdio',
+    host: str = '127.0.0.1',
+    port: int = 8765,
+    targets: Optional[List[str]] = None,
+    home_dir: Optional[Path] = None,
+) -> Dict[str, Path]:
+    """
+    Register ros-maintainer-harness in global user-level MCP configuration files
+    (e.g. ~/.gemini/config/mcp_config.json and/or ~/.claude.json).
+    """
+    base_home = (home_dir or Path.home()).resolve()
+    selected_targets = targets or ['gemini']
+    server_entry = generate_mcp_server_entry(
+        workspace_path=workspace_path,
+        transport=transport,
+        host=host,
+        port=port,
+    )
+
+    updated: Dict[str, Path] = {}
+
+    def _merge_and_write(target_path: Path) -> None:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        data: Dict[str, Any] = {}
+        if target_path.exists():
+            try:
+                raw = target_path.read_text(encoding='utf-8').strip()
+                if raw:
+                    loaded = json.loads(raw)
+                    if isinstance(loaded, dict):
+                        data = loaded
+            except Exception:
+                data = {}
+        if 'mcpServers' not in data or not isinstance(data.get('mcpServers'), dict):
+            data['mcpServers'] = {}
+        data['mcpServers']['ros-maintainer-harness'] = server_entry
+        target_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+
+    if 'gemini' in selected_targets or 'antigravity' in selected_targets:
+        gemini_path = base_home / '.gemini' / 'config' / 'mcp_config.json'
+        _merge_and_write(gemini_path)
+        updated['gemini'] = gemini_path
+
+    if 'claude' in selected_targets:
+        claude_path = base_home / '.claude.json'
+        _merge_and_write(claude_path)
+        updated['claude'] = claude_path
+
+    return updated
 
 
 def get_agent_launch_info(
