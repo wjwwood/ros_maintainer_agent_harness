@@ -304,4 +304,3 @@ def write_session_agent_instructions(
     claude_file = sess_dir / 'CLAUDE.md'
     claude_file.write_text('@AGENTS.md\n', encoding='utf-8')
     return {'AGENTS.md': agents_file, 'CLAUDE.md': claude_file}
-
