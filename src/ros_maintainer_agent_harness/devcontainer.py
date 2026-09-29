@@ -150,19 +150,20 @@ def check_token_and_environment(workspace_root: Path) -> Dict[str, Any]:
     )
 
     # Check global MCP config for Gemini/Jetski/Antigravity or Claude
-    gemini_mcp_path = Path.home() / '.gemini' / 'config' / 'mcp_config.json'
-    claude_mcp_path = Path.home() / '.claude.json'
     global_mcp_configured = False
-    for mcp_path in (gemini_mcp_path, claude_mcp_path):
-        if mcp_path.exists():
-            try:
+    try:
+        home_dir = Path.home()
+        gemini_mcp_path = home_dir / '.gemini' / 'config' / 'mcp_config.json'
+        claude_mcp_path = home_dir / '.claude.json'
+        for mcp_path in (gemini_mcp_path, claude_mcp_path):
+            if mcp_path.exists():
                 content = mcp_path.read_text(encoding='utf-8').strip()
                 if content:
                     data = json.loads(content)
                     if 'ros-maintainer-harness' in data.get('mcpServers', {}):
                         global_mcp_configured = True
-            except Exception:
-                pass
+    except Exception:
+        pass
 
     warnings: List[str] = []
     recommendations: List[str] = []

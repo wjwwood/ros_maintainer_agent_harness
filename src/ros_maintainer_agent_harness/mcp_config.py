@@ -25,9 +25,12 @@ def get_harness_executable() -> str:
     which_exe = shutil.which('ros-maintainer-harness')
     if which_exe:
         return which_exe
-    local_bin = Path.home() / '.local' / 'bin' / 'ros-maintainer-harness'
-    if local_bin.exists():
-        return str(local_bin)
+    try:
+        local_bin = Path.home() / '.local' / 'bin' / 'ros-maintainer-harness'
+        if local_bin.exists():
+            return str(local_bin)
+    except Exception:
+        pass
     return 'ros-maintainer-harness'
 
 
