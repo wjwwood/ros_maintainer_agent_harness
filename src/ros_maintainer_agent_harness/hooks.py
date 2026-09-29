@@ -84,22 +84,16 @@ def resolve_session_for_hook(
     Determine whether a tool invocation belongs to a maintainer session.
 
     Resolution order:
-    0. `explicit_session_id` if provided and valid
     1. `cwd` is inside `<workspace_root>/sessions/<session_id>`
     2. `workspace_paths` contains `<workspace_root>/sessions/<session_id>`
     3. `conversation_id` matches a session's `conversation_id` in `session.json`
-    4. `command_line` explicitly references `<workspace_root>/sessions/<session_id>`
+       (and does not match `hub_conversation_id`)
+    4. `explicit_session_id` if provided and `conversation_id` is not a Hub conversation
     """
     ws_root = workspace_root.resolve()
     sessions_dir = ws_root / 'sessions'
     if not sessions_dir.is_dir():
         return None
-
-    # 0. Check explicit_session_id
-    if explicit_session_id:
-        sdir = sessions_dir / explicit_session_id
-        if sdir.is_dir():
-            return explicit_session_id, sdir, read_session_metadata(sdir)
 
     # 1. Check Cwd
     found = _extract_session_from_path(cwd, sessions_dir)
@@ -115,29 +109,33 @@ def resolve_session_for_hook(
             return sid, sdir, read_session_metadata(sdir)
 
     # 3. Check conversation_id in sessions/*/session.json
+    is_hub_conversation = False
     if conversation_id:
         for sdir in sorted(sessions_dir.iterdir()):
             if not sdir.is_dir():
                 continue
             meta = read_session_metadata(sdir)
+            if meta.get('hub_conversation_id') == conversation_id:
+                is_hub_conversation = True
             if (
                 meta.get('conversation_id') == conversation_id
                 and meta.get('hub_conversation_id') != conversation_id
             ):
                 return sdir.name, sdir, meta
 
-    # 4. Check if command_line explicitly references a session path
-    if command_line:
-        sessions_prefix = str(sessions_dir) + os.sep
-        idx = command_line.find(sessions_prefix)
-        if idx != -1:
-            remainder = command_line[idx + len(sessions_prefix):]
-            match = re.match(r'^([A-Za-z0-9._-]+)', remainder)
-            if match:
-                sid = match.group(1)
-                sdir = sessions_dir / sid
-                if sdir.is_dir():
-                    return sid, sdir, read_session_metadata(sdir)
+    if is_hub_conversation:
+        return None
+
+    # 4. Fallback to explicit_session_id when not in Hub conversation and Cwd is not workspace root
+    if explicit_session_id:
+        try:
+            if cwd and Path(cwd).expanduser().resolve() == ws_root:
+                return None
+        except Exception:
+            pass
+        sdir = sessions_dir / explicit_session_id
+        if sdir.is_dir():
+            return explicit_session_id, sdir, read_session_metadata(sdir)
 
     return None
 
@@ -148,11 +146,22 @@ def _first_executable_in_segment(segment: str) -> Optional[str]:
         tokens = shlex.split(segment, posix=True)
     except ValueError:
         tokens = segment.strip().split()
-    for tok in tokens:
+    idx = 0
+    in_env = False
+    while idx < len(tokens):
+        tok = tokens[idx]
+        idx += 1
         # Skip env assignments like PATH=... or FOO=bar
         if '=' in tok and not tok.startswith('-') and not tok.startswith('/'):
             continue
-        if tok in ('env', 'command', 'nohup'):
+        if tok == 'env':
+            in_env = True
+            continue
+        if in_env and tok.startswith('-'):
+            if tok in ('-u', '--unset', '-C', '--chdir', '-S', '--split-string') and idx < len(tokens):
+                idx += 1
+            continue
+        if tok in ('command', 'nohup'):
             continue
         return Path(tok).name
     return None
@@ -168,8 +177,8 @@ def is_host_passthrough_command(command_line: str) -> bool:
     if not stripped:
         return True
 
-    # Split on top-level &&, ||, or ;
-    segments = [s.strip() for s in re.split(r'&&|\|\||;', stripped) if s.strip()]
+    # Split on top-level &&, ||, ;, or newline
+    segments = [s.strip() for s in re.split(r'&&|\|\||;|\n', stripped) if s.strip()]
     if not segments:
         return True
 
@@ -195,7 +204,7 @@ def is_forbidden_uncontainerized_host_command(command_line: str) -> Optional[str
     if not stripped or is_host_passthrough_command(stripped):
         return None
 
-    segments = [s.strip() for s in re.split(r'&&|\|\||;|\|', stripped) if s.strip()]
+    segments = [s.strip() for s in re.split(r'&&|\|\||;|\||\n', stripped) if s.strip()]
     for seg in segments:
         exe = _first_executable_in_segment(seg)
         if exe in ('colcon', 'rosdep'):
@@ -230,13 +239,13 @@ def build_session_exec_command(
     container_workdir: str,
     command_line: str,
 ) -> str:
-    """Wrap `command_line` in `ros-maintainer-harness -w <ws_root> session exec <session_id>`."""
+    """Wrap `command_line` in `ros-maintainer-harness -w <ws_root> session exec -d <workdir> <session_id>`."""
     harness_bin = get_harness_executable()
     ws_str = str(workspace_root.resolve())
     return (
         f"{shlex.quote(harness_bin)} -w {shlex.quote(ws_str)} "
-        f"session exec {shlex.quote(session_id)} "
-        f"-d {shlex.quote(container_workdir)} -- {shlex.quote(command_line)}"
+        f"session exec -d {shlex.quote(container_workdir)} "
+        f"{shlex.quote(session_id)} -- {shlex.quote(command_line)}"
     )
 
 

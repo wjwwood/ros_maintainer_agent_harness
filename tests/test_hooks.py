@@ -81,8 +81,7 @@ class TestContainerHooks(unittest.TestCase):
         res = evaluate_pre_tool_use(payload, workspace_root=self.ws_root)
         self.assertEqual(res['decision'], 'allow')
         self.assertIn('overwrite', res)
-        self.assertIn('session exec pr-rclcpp-160', res['overwrite']['CommandLine'])
-        self.assertIn('-d /workspace/src/rclcpp', res['overwrite']['CommandLine'])
+        self.assertIn('session exec -d /workspace/src/rclcpp pr-rclcpp-160', res['overwrite']['CommandLine'])
         self.assertIn('colcon build --symlink-install', res['overwrite']['CommandLine'])
         self.assertEqual(res['overwrite']['Cwd'], str(self.session.session_dir.resolve()))
 
@@ -101,8 +100,7 @@ class TestContainerHooks(unittest.TestCase):
         res = evaluate_pre_tool_use(payload, workspace_root=self.ws_root)
         self.assertEqual(res['decision'], 'allow')
         self.assertIn('overwrite', res)
-        self.assertIn('session exec pr-rclcpp-160', res['overwrite']['CommandLine'])
-        self.assertIn('-d /workspace', res['overwrite']['CommandLine'])
+        self.assertIn('session exec -d /workspace pr-rclcpp-160', res['overwrite']['CommandLine'])
         self.assertIn('gh pr view 160 --repo ros2/rclcpp', res['overwrite']['CommandLine'])
 
     def test_hub_conversation_commands_not_rewritten_when_outside_session(self):
@@ -117,7 +115,11 @@ class TestContainerHooks(unittest.TestCase):
                 },
             },
         }
-        res = evaluate_pre_tool_use(payload, workspace_root=self.ws_root)
+        res = evaluate_pre_tool_use(
+            payload,
+            workspace_root=self.ws_root,
+            explicit_session_id='pr-rclcpp-160',
+        )
         self.assertEqual(res, {})
 
     def test_passthrough_commands_not_double_wrapped(self):
@@ -134,6 +136,19 @@ class TestContainerHooks(unittest.TestCase):
         }
         res = evaluate_pre_tool_use(payload, workspace_root=self.ws_root)
         self.assertEqual(res, {})
+
+        env_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': 'env -u ANTIGRAVITY_PROJECT_ID agentapi send-message hub-conv-9999 "hello"',
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        self.assertEqual(evaluate_pre_tool_use(env_payload, workspace_root=self.ws_root), {})
 
     def test_uncontainerized_host_colcon_denied_outside_session(self):
         payload = {
@@ -165,7 +180,7 @@ class TestContainerHooks(unittest.TestCase):
         self.assertIn('hookSpecificOutput', res)
         out = res['hookSpecificOutput']
         self.assertEqual(out['permissionDecision'], 'allow')
-        self.assertIn('session exec pr-rclcpp-160', out['updatedInput']['command'])
+        self.assertIn('session exec -d /workspace pr-rclcpp-160', out['updatedInput']['command'])
         self.assertIn('pytest -v', out['updatedInput']['command'])
 
     def test_cli_hook_pre_tool_use(self):
@@ -187,7 +202,7 @@ class TestContainerHooks(unittest.TestCase):
                 self.assertEqual(rc, 0)
         out = json.loads(stdout_buf.getvalue())
         self.assertEqual(out['decision'], 'allow')
-        self.assertIn('session exec pr-rclcpp-160', out['overwrite']['CommandLine'])
+        self.assertIn('session exec -d /workspace pr-rclcpp-160', out['overwrite']['CommandLine'])
 
     def test_install_hooks_merges_existing_config_without_duplicating(self):
         first = install_hooks_config(target_dir=self.ws_root, workspace_root=self.ws_root)

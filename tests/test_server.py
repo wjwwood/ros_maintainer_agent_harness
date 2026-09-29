@@ -156,6 +156,61 @@ class TestMCPServer(unittest.TestCase):
         denied_rec = [r for r in audit_records if r['status'] == 'DENIED'][0]
         self.assertEqual(denied_rec['reason'], 'Accidental push to rolling')
 
+    def test_git_push_external_fork_from_pr_worktree(self):
+        from ros_maintainer_agent_harness.worktree import write_session_metadata
+
+        fork_remote_dir = self.ws_root / 'sachingp19' / 'launch.git'
+        subprocess.run(['git', 'init', '--bare', str(fork_remote_dir)], check=True)
+
+        repo_dir = self.ws_root / 'pr_worktree'
+        repo_dir.mkdir()
+        subprocess.run(['git', 'init', '-b', 'pr-1002'], cwd=str(repo_dir), check=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=str(repo_dir), check=True)
+        subprocess.run(['git', 'config', 'user.name', 'Tester'], cwd=str(repo_dir), check=True)
+        (repo_dir / 'file.txt').write_text('fork fix')
+        subprocess.run(['git', 'add', '.'], cwd=str(repo_dir), check=True)
+        subprocess.run(['git', 'commit', '-m', 'Fix JUnit test names'], cwd=str(repo_dir), check=True)
+
+        session_dir = self.workspace.sessions_dir / 'pr-launch-1002'
+        session_dir.mkdir(parents=True, exist_ok=True)
+        write_session_metadata(
+            session_dir,
+            {
+                'session_id': 'pr-launch-1002',
+                'is_fork': True,
+                'head_ref': 'fix-unique-junit-test-names',
+                'head_repo_owner': 'sachingp19',
+                'head_repo_url': str(fork_remote_dir),
+            },
+        )
+
+        # 1. Push without ticket -> PENDING_APPROVAL for sachingp19/launch:fix-unique-junit-test-names
+        res_pending = self._call('git_push', {
+            'session_id': 'pr-launch-1002',
+            'repo_path': str(repo_dir),
+            'branch': 'fix-unique-junit-test-names',
+            'reason': 'Push review fix to contributor fork branch',
+        })
+        self.assertEqual(res_pending['status'], 'PENDING_APPROVAL')
+        ticket_id = res_pending['ticket_id']
+
+        # 2. Approve ticket and push HEAD:refs/heads/fix-unique-junit-test-names to fork remote
+        self._call('respond_approval_request', {
+            'ticket_id': ticket_id,
+            'approve': True,
+            'maintainer': 'wjwwood',
+        })
+        res_pushed = self._call('git_push', {
+            'session_id': 'pr-launch-1002',
+            'repo_path': str(repo_dir),
+            'branch': 'fix-unique-junit-test-names',
+            'reason': 'Push review fix to contributor fork branch',
+            'approval_ticket_id': ticket_id,
+        })
+        self.assertTrue(res_pushed['success'])
+        self.assertEqual(res_pushed['status'], 'APPROVED')
+        self.assertEqual(res_pushed['target'], 'sachingp19/launch:fix-unique-junit-test-names')
+
     def test_launch_jenkins_ci_and_cooldown(self):
         # 1. Launch CI
         res = self._call('launch_jenkins_ci', {

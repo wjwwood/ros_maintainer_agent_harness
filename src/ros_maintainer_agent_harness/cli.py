@@ -466,6 +466,26 @@ def handle_session_exec(args: argparse.Namespace) -> int:
         return 1
 
     cmd_parts = list(args.exec_command or [])
+    workdir = args.workdir or '/workspace'
+    timeout = args.timeout or 600
+    no_auto_start = bool(args.no_auto_start)
+
+    while cmd_parts and cmd_parts[0] != '--' and cmd_parts[0].startswith('-'):
+        opt = cmd_parts.pop(0)
+        if opt in ('-d', '--workdir') and cmd_parts:
+            workdir = cmd_parts.pop(0)
+        elif opt.startswith('--workdir='):
+            workdir = opt.split('=', 1)[1]
+        elif opt == '--timeout' and cmd_parts:
+            timeout = int(cmd_parts.pop(0))
+        elif opt.startswith('--timeout='):
+            timeout = int(opt.split('=', 1)[1])
+        elif opt == '--no-auto-start':
+            no_auto_start = True
+        else:
+            cmd_parts.insert(0, opt)
+            break
+
     if cmd_parts and cmd_parts[0] == '--':
         cmd_parts = cmd_parts[1:]
     if not cmd_parts:
@@ -480,9 +500,9 @@ def handle_session_exec(args: argparse.Namespace) -> int:
     res = exec_in_session_container(
         session_id=args.session_id,
         command=command_str,
-        workdir=args.workdir or '/workspace',
-        timeout=args.timeout or 600,
-        auto_start=not args.no_auto_start,
+        workdir=workdir,
+        timeout=timeout,
+        auto_start=not no_auto_start,
         session_dir=session_dir,
         workspace_root=layout.root,
         distro=distro,

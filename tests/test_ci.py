@@ -259,6 +259,102 @@ class TestCI(unittest.TestCase):
                     self.assertIn('🏆 **Milestone**: Jenkins CI Succeeded', timeline_text)
                     self.assertIn('Build #123 finished successfully in 45.0s', timeline_text)
 
+    def test_jenkins_manager_live_launch_ci_with_gist_and_child_jobs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = CITracker(Path(temp_dir) / 'ci_runs.json')
+            mgr = JenkinsManager(
+                ci_server='https://ci.ros2.org',
+                tracker=tracker,
+                auth=('testuser', 'testtoken'),
+            )
+
+            def fake_get(url, **kwargs):
+                resp = MagicMock()
+                resp.status_code = 200
+                if 'ros2.repos' in url:
+                    resp.text = (
+                        "repositories:\n"
+                        "  ros2/launch:\n"
+                        "    type: git\n"
+                        "    url: https://github.com/ros2/launch.git\n"
+                        "    version: rolling\n"
+                    )
+                elif '/pulls/1002' in url:
+                    resp.json.return_value = {
+                        'head': {
+                            'ref': 'fix-unique-junit-test-names',
+                            'repo': {'full_name': 'sachingp19/launch'},
+                        },
+                        'base': {
+                            'repo': {'full_name': 'ros2/launch'},
+                        },
+                    }
+                elif 'crumbIssuer' in url:
+                    resp.json.return_value = {
+                        'crumbRequestField': 'Jenkins-Crumb',
+                        'crumb': 'crumb-123',
+                    }
+                elif '/job/ci_launcher/api/json' in url:
+                    resp.json.return_value = {'nextBuildNumber': 38000}
+                elif 'consoleText' in url:
+                    resp.text = (
+                        "Started by user testuser\n"
+                        "* Linux [![Build Status](http://ci.ros2.org/buildStatus/icon?job=ci_linux&build=25001)]"
+                        "(http://ci.ros2.org/job/ci_linux/25001/)\n"
+                        "* Windows [![Build Status](http://ci.ros2.org/buildStatus/icon?job=ci_windows&build=26001)]"
+                        "(http://ci.ros2.org/job/ci_windows/26001/)\n"
+                        "Finished: SUCCESS\n"
+                    )
+                return resp
+
+            def fake_post(url, **kwargs):
+                resp = MagicMock()
+                resp.status_code = 201
+                if 'api.github.com/gists' in url:
+                    resp.json.return_value = {
+                        'html_url': 'https://gist.github.com/testuser/abc123',
+                        'files': {
+                            'ros2.repos': {
+                                'raw_url': 'https://gist.githubusercontent.com/testuser/abc123/raw/ros2.repos',
+                            },
+                        },
+                    }
+                elif '/issues/1002/comments' in url:
+                    resp.json.return_value = {
+                        'html_url': 'https://github.com/ros2/launch/pull/1002#issuecomment-999',
+                    }
+                return resp
+
+            with patch.object(mgr.session, 'get', side_effect=fake_get):
+                with patch.object(mgr.session, 'post', side_effect=fake_post):
+                    res = mgr.launch_ci(
+                        session_id='pr-launch-1002',
+                        pr_url='ros2/launch#1002',
+                        target_distro='rolling',
+                        only_fixes_test=True,
+                        packages=['launch'],
+                        comment=True,
+                        dry_run=False,
+                    )
+
+            self.assertTrue(res['success'])
+            self.assertEqual(res['build_num'], 38000)
+            self.assertEqual(
+                res['gist_url'],
+                'https://gist.githubusercontent.com/testuser/abc123/raw/ros2.repos',
+            )
+            self.assertEqual(len(res['child_jobs']), 2)
+            self.assertEqual(res['child_jobs'][0]['job_name'], 'ci_linux')
+            self.assertEqual(res['child_jobs'][0]['build_num'], 25001)
+            self.assertIn('--packages-up-to launch', res['parameters']['CI_BUILD_ARGS'])
+            self.assertIn('--packages-select launch', res['parameters']['CI_TEST_ARGS'])
+            self.assertEqual(
+                res['comment_url'],
+                'https://github.com/ros2/launch/pull/1002#issuecomment-999',
+            )
+            runs = tracker.list_runs(session_id='pr-launch-1002')
+            self.assertEqual(len(runs), 3)
+
 
 if __name__ == '__main__':
     unittest.main()

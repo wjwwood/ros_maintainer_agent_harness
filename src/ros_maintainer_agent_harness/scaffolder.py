@@ -162,6 +162,28 @@ def fetch_pr_ref_in_repo(repo_dir: Path, meta: PRMetadata) -> str:
         'GIT_SSH_COMMAND': 'ssh -o BatchMode=yes',
     }
 
+    if meta.is_fork and meta.head_repo_url:
+        for remote_name in ('fork', meta.head_repo_owner):
+            if not remote_name or remote_name == 'origin':
+                continue
+            set_res = subprocess.run(
+                ['git', 'remote', 'set-url', '--', remote_name, meta.head_repo_url],
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=git_env,
+            )
+            if set_res.returncode != 0:
+                subprocess.run(
+                    ['git', 'remote', 'add', '--', remote_name, meta.head_repo_url],
+                    cwd=str(repo_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    env=git_env,
+                )
+
     # Try fetching GitHub PR head ref: pull/{number}/head:pr-{number}
     fetch_res = subprocess.run(
         [
@@ -293,6 +315,9 @@ def scaffold_session_from_pr(
             'pr_author': meta.author,
             'base_ref': meta.base_ref,
             'head_ref': meta.head_ref,
+            'head_repo_owner': meta.head_repo_owner,
+            'head_repo_url': meta.head_repo_url,
+            'is_fork': meta.is_fork,
             'status': 'investigating',
         },
     )
