@@ -129,18 +129,51 @@ def execute_git_push(
     """
     Execute git push with policy-enforced arguments.
 
+    If the target ``branch`` does not exist as a local branch ref (for example,
+    when the session worktree is checked out on ``pr-<num>`` while pushing to a
+    contributor's PR branch ``<head_ref>``), automatically pushes
+    ``HEAD:refs/heads/<branch>``.
+
     Returns:
         (success: bool, output_or_error_message: str)
     """
     if not repo_dir.exists():
         return (False, f"Repository directory '{repo_dir}' does not exist.")
 
+    refspec = branch
+    if ':' not in branch:
+        current_branch = get_current_branch(repo_dir)
+        has_local_ref = False
+        try:
+            chk = subprocess.run(
+                ['git', 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}'],
+                cwd=str(repo_dir),
+                capture_output=True,
+                timeout=10,
+                env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
+            )
+            has_local_ref = (chk.returncode == 0)
+        except Exception:
+            pass
+        if not has_local_ref or (
+            current_branch and current_branch != branch and current_branch.startswith('pr-')
+        ):
+            refspec = f'HEAD:refs/heads/{branch}'
+
     cmd = ['git', 'push']
     if force_with_lease:
         cmd.append('--force-with-lease')
     if dry_run:
         cmd.append('--dry-run')
-    cmd.extend(['--', remote, branch])
+    cmd.extend(['--', remote, refspec])
+
+    git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+    default_sock = Path.home() / '.ssh' / 'ssh_auth_sock'
+    if (
+        (not git_env.get('SSH_AUTH_SOCK') or not Path(git_env['SSH_AUTH_SOCK']).exists())
+        and default_sock.exists()
+    ):
+        git_env['SSH_AUTH_SOCK'] = str(default_sock)
 
     try:
         res = subprocess.run(
@@ -149,7 +182,7 @@ def execute_git_push(
             capture_output=True,
             text=True,
             timeout=120,
-            env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
+            env=git_env,
         )
     except subprocess.TimeoutExpired:
         return (False, "git push timed out after 120 seconds.")

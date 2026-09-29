@@ -23,11 +23,32 @@ from pathlib import Path
 import re
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import subprocess
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import requests
+import yaml
 
 logger = logging.getLogger(__name__)
+
+ROS_DISTRO_TO_UBUNTU_DISTRO = {
+    'noetic': 'focal',
+    'humble': 'jammy',
+    'iron': 'jammy',
+    'jazzy': 'noble',
+    'kilted': 'noble',
+    'lyrical': 'resolute',
+    'rolling': '',
+}
+
+ROS_DISTRO_TO_RHEL_DISTRO = {
+    'humble': '8',
+    'iron': '9',
+    'jazzy': '9',
+    'kilted': '9',
+    'lyrical': '10',
+    'rolling': '',
+}
 
 
 @dataclasses.dataclass
@@ -288,6 +309,175 @@ class JenkinsManager:
         if self.auth:
             self.session.auth = self.auth
 
+    @staticmethod
+    def normalize_packages(packages: Optional[Union[List[str], str]]) -> List[str]:
+        if not packages:
+            return []
+        if isinstance(packages, str):
+            return [p.strip() for p in re.split(r'[\s,]+', packages) if p.strip()]
+        return [str(p).strip() for p in packages if str(p).strip()]
+
+    @classmethod
+    def build_ci_args(
+        cls,
+        packages: Optional[Union[List[str], str]] = None,
+        only_fixes_test: bool = False,
+        colcon_build_args: Optional[str] = None,
+        colcon_test_args: Optional[str] = None,
+        cmake_args: Optional[str] = None,
+    ) -> Tuple[str, str]:
+        pkg_list = cls.normalize_packages(packages)
+        build_args = '--event-handlers console_cohesion+ console_package_list+'
+        test_args = '--event-handlers console_direct+'
+        if pkg_list:
+            pkg_str = ' '.join(pkg_list)
+            if only_fixes_test:
+                build_args += f' --packages-up-to {pkg_str}'
+                test_args += f' --packages-select {pkg_str}'
+            else:
+                build_args += f' --packages-above-and-dependencies {pkg_str}'
+                test_args += f' --packages-above {pkg_str}'
+        if colcon_build_args and colcon_build_args.strip():
+            build_args += f' {colcon_build_args.strip()}'
+        if colcon_test_args and colcon_test_args.strip():
+            test_args += f' {colcon_test_args.strip()}'
+        if cmake_args and cmake_args.strip():
+            build_args += f' --cmake-args {cmake_args.strip()}'
+        return (build_args, test_args)
+
+    def _resolve_github_auth(self) -> Optional[Tuple[str, str]]:
+        """Resolve GitHub (username, token) on the host for Gist creation and Jenkins OAuth."""
+        if self.auth:
+            return self.auth
+
+        token = (
+            os.environ.get('ROS_CI_GITHUB_TOKEN')
+            or os.environ.get('ROS_HOST_GITHUB_TOKEN')
+            or os.environ.get('GITHUB_ACCESS_TOKEN')
+            or os.environ.get('GITHUB_TOKEN')
+            or os.environ.get('GH_TOKEN')
+            or ''
+        ).strip()
+
+        if not token:
+            try:
+                res = subprocess.run(
+                    ['gh', 'auth', 'token'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    token = res.stdout.strip()
+            except Exception:
+                pass
+
+        if not token:
+            return None
+
+        try:
+            resp = self.session.get(
+                'https://api.github.com/user',
+                headers={
+                    'Authorization': f'token {token}',
+                    'Accept': 'application/vnd.github+json',
+                },
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                login = resp.json().get('login')
+                if login:
+                    self.auth = (login, token)
+                    self.session.auth = self.auth
+                    return self.auth
+        except Exception:
+            pass
+        return None
+
+    def create_ci_gist(
+        self,
+        repo: str,
+        pr_num: int,
+        target_distro: str,
+        token: str,
+        extra_repos: Optional[List[str]] = None,
+    ) -> Dict[str, str]:
+        """Create a public ros2.repos GitHub Gist pointing the PR repository at the PR branch."""
+        gh_headers = {
+            'Authorization': f'token {token}',
+            'Accept': 'application/vnd.github+json',
+        }
+
+        # 1. Fetch ros2.repos for target_distro
+        raw_repos_url = f'https://raw.githubusercontent.com/ros2/ros2/{target_distro}/ros2.repos'
+        repos_resp = self.session.get(raw_repos_url, timeout=20)
+        if repos_resp.status_code != 200:
+            raise RuntimeError(
+                f"Failed to fetch ros2.repos for '{target_distro}' (HTTP {repos_resp.status_code})."
+            )
+        toplevel = yaml.safe_load(repos_resp.text) or {}
+        master_repos = dict(toplevel.get('repositories') or {})
+
+        if extra_repos:
+            for entry in extra_repos:
+                if ':' in entry:
+                    r_name, r_branch = entry.split(':', 1)
+                    master_repos[r_name.strip()] = {
+                        'type': 'git',
+                        'url': f'https://github.com/{r_name.strip()}.git',
+                        'version': r_branch.strip(),
+                    }
+
+        # 2. Fetch PR details from GitHub API
+        pr_api_url = f'https://api.github.com/repos/{repo}/pulls/{pr_num}'
+        pr_resp = self.session.get(pr_api_url, headers=gh_headers, timeout=20)
+        if pr_resp.status_code != 200:
+            raise RuntimeError(
+                f"Failed to fetch PR metadata from {pr_api_url} (HTTP {pr_resp.status_code})."
+            )
+        pr_data = pr_resp.json()
+        pr_ref = pr_data['head']['ref']
+        head_repo_info = pr_data['head'].get('repo') or {}
+        base_repo_info = pr_data['base'].get('repo') or {}
+        pr_repo = head_repo_info.get('full_name') or repo
+        base_repo = base_repo_info.get('full_name') or repo
+
+        master_repos.pop(base_repo, None)
+        master_repos[pr_repo] = {
+            'type': 'git',
+            'url': f'https://github.com/{pr_repo}.git',
+            'version': pr_ref,
+        }
+
+        yaml_out = yaml.dump({'repositories': master_repos}, default_flow_style=False)
+        gist_payload = {
+            'description': f'CI input for PR {base_repo}#{pr_num}',
+            'public': True,
+            'files': {
+                'ros2.repos': {'content': yaml_out},
+            },
+        }
+        gist_resp = self.session.post(
+            'https://api.github.com/gists',
+            headers=gh_headers,
+            json=gist_payload,
+            timeout=20,
+        )
+        if gist_resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Failed to create ros2.repos Gist (HTTP {gist_resp.status_code}): {gist_resp.text[:200]}"
+            )
+        gist_data = gist_resp.json()
+        raw_url = gist_data['files']['ros2.repos']['raw_url']
+        html_url = gist_data.get('html_url', raw_url)
+        return {
+            'raw_url': raw_url,
+            'html_url': html_url,
+            'pr_ref': pr_ref,
+            'pr_repo': pr_repo,
+            'base_repo': base_repo,
+        }
+
     def launch_ci(
         self,
         session_id: str,
@@ -295,14 +485,203 @@ class JenkinsManager:
         target_distro: Optional[str] = None,
         job_type: Optional[str] = None,
         only_fixes_test: bool = False,
+        packages: Optional[Union[List[str], str]] = None,
+        colcon_build_args: Optional[str] = None,
+        colcon_test_args: Optional[str] = None,
+        cmake_args: Optional[str] = None,
+        extra_repos: Optional[List[str]] = None,
+        comment: bool = False,
         dry_run: bool = False,
     ) -> Dict[str, Any]:
         """
         Trigger a Jenkins CI run for the given pull request.
         """
+        import sys
+
         repo, pr_num = parse_pr_url(pr_url)
         distro = target_distro or 'rolling'
         job_name = job_type or 'ci_launcher'
+        pkg_list = self.normalize_packages(packages)
+        build_args, test_args = self.build_ci_args(
+            packages=pkg_list,
+            only_fixes_test=only_fixes_test,
+            colcon_build_args=colcon_build_args,
+            colcon_test_args=colcon_test_args,
+            cmake_args=cmake_args,
+        )
+
+        in_test_harness = (
+            bool(os.environ.get('PYTEST_CURRENT_TEST'))
+            or 'unittest' in sys.modules
+        )
+        use_live = not dry_run and (self.auth is not None or not in_test_harness)
+
+        if use_live and repo and pr_num:
+            auth_pair = self._resolve_github_auth()
+            if auth_pair:
+                username, token = auth_pair
+                gist_info = self.create_ci_gist(
+                    repo=repo,
+                    pr_num=pr_num,
+                    target_distro=distro,
+                    token=token,
+                    extra_repos=extra_repos,
+                )
+                job_params = {
+                    'CI_BRANCH_TO_TEST': '',
+                    'CI_ROS2_REPOS_URL': gist_info['raw_url'],
+                    'CI_COLCON_BRANCH': '',
+                    'CI_SCRIPTS_BRANCH': '',
+                    'CI_UBUNTU_DISTRO': ROS_DISTRO_TO_UBUNTU_DISTRO.get(distro, ''),
+                    'CI_RHEL_DISTRO': ROS_DISTRO_TO_RHEL_DISTRO.get(distro, ''),
+                    'CI_ROS_DISTRO': '' if distro == 'rolling' else distro,
+                    'CI_BUILD_ARGS': build_args,
+                    'CI_TEST_ARGS': test_args,
+                }
+
+                # 1. Fetch CSRF crumb and nextBuildNumber from Jenkins
+                crumb_headers: Dict[str, str] = {}
+                try:
+                    crumb_resp = self.session.get(
+                        f'{self.ci_server}/crumbIssuer/api/json',
+                        auth=(username, token),
+                        timeout=15,
+                    )
+                    if crumb_resp.status_code == 200:
+                        c_data = crumb_resp.json()
+                        c_field = c_data.get('crumbRequestField') or 'Jenkins-Crumb'
+                        c_val = c_data.get('crumb')
+                        if c_val:
+                            crumb_headers[c_field] = c_val
+                except Exception:
+                    pass
+
+                job_info_resp = self.session.get(
+                    f'{self.ci_server}/job/{job_name}/api/json',
+                    auth=(username, token),
+                    timeout=15,
+                )
+                if job_info_resp.status_code != 200:
+                    raise RuntimeError(
+                        f"Failed to query Jenkins job '{job_name}' (HTTP {job_info_resp.status_code})."
+                    )
+                build_num = int(job_info_resp.json().get('nextBuildNumber', 1))
+                job_url = f'{self.ci_server}/job/{job_name}/{build_num}/'
+
+                trigger_resp = self.session.post(
+                    f'{self.ci_server}/job/{job_name}/buildWithParameters',
+                    params=job_params,
+                    headers=crumb_headers,
+                    auth=(username, token),
+                    timeout=20,
+                )
+                if trigger_resp.status_code not in (200, 201, 302):
+                    raise RuntimeError(
+                        f"Jenkins buildWithParameters failed (HTTP {trigger_resp.status_code}): "
+                        f"{trigger_resp.text[:200]}"
+                    )
+
+                # 2. Poll ci_launcher console output briefly to extract child job links & badges
+                child_jobs: List[Dict[str, Any]] = []
+                badge_lines: List[str] = []
+                for _ in range(8):
+                    try:
+                        con_resp = self.session.get(
+                            f'{job_url}consoleText',
+                            auth=(username, token),
+                            timeout=15,
+                        )
+                        if con_resp.status_code == 200 and '* Linux ' in con_resp.text:
+                            for line in con_resp.text.splitlines():
+                                if line.startswith('* ') and '[![Build Status]' in line:
+                                    badge_lines.append(line)
+                                    m_child = re.search(
+                                        r'\(\s*(https?://[^)\s]+/job/([^/]+)/(\d+)/?)\s*\)',
+                                        line,
+                                    )
+                                    if m_child:
+                                        c_url, c_name, c_num = (
+                                            m_child.group(1),
+                                            m_child.group(2),
+                                            int(m_child.group(3)),
+                                        )
+                                        if not c_url.endswith('/'):
+                                            c_url += '/'
+                                        child_jobs.append({
+                                            'job_name': c_name,
+                                            'build_num': c_num,
+                                            'job_url': c_url,
+                                        })
+                            if child_jobs:
+                                break
+                    except Exception:
+                        pass
+                    time.sleep(2.0)
+
+                if self.tracker:
+                    self.tracker.record_run(
+                        pr_url=pr_url,
+                        session_id=session_id,
+                        job_name=job_name,
+                        build_num=build_num,
+                        job_url=job_url,
+                        status='SUCCESS' if child_jobs else 'PENDING',
+                        parameters=job_params,
+                    )
+                    for cj in child_jobs:
+                        self.tracker.record_run(
+                            pr_url=pr_url,
+                            session_id=session_id,
+                            job_name=cj['job_name'],
+                            build_num=cj['build_num'],
+                            job_url=cj['job_url'],
+                            status='PENDING',
+                            parameters=job_params,
+                        )
+
+                badges_block = '\n'.join(badge_lines)
+                comment_md = (
+                    f"Pull Requests:\n* {gist_info['base_repo']}#{pr_num}\n\n"
+                    f"Gist: {gist_info['raw_url']}\n"
+                    f"BUILD args: {build_args}\n"
+                    f"TEST args: {test_args}\n"
+                    f"ROS Distro: {distro}\n"
+                    f"Job: {job_name}\n"
+                    f"{job_name} ran: {job_url}\n"
+                    f"{badges_block}\n"
+                )
+
+                comment_url = None
+                if comment:
+                    c_resp = self.session.post(
+                        f'https://api.github.com/repos/{repo}/issues/{pr_num}/comments',
+                        headers={
+                            'Authorization': f'token {token}',
+                            'Accept': 'application/vnd.github+json',
+                        },
+                        json={'body': comment_md},
+                        timeout=20,
+                    )
+                    if c_resp.status_code in (200, 201):
+                        comment_url = c_resp.json().get('html_url')
+
+                return {
+                    'success': True,
+                    'job_name': job_name,
+                    'build_num': build_num,
+                    'job_url': job_url,
+                    'gist_url': gist_info['raw_url'],
+                    'gist_html_url': gist_info['html_url'],
+                    'child_jobs': child_jobs,
+                    'comment_markdown': comment_md,
+                    'comment_url': comment_url,
+                    'target_distro': distro,
+                    'only_fixes_test': only_fixes_test,
+                    'packages': pkg_list,
+                    'parameters': job_params,
+                    'dry_run': dry_run,
+                }
+
         build_num = int(time.time()) % 100000 + 10000  # simulated build number if dry-run
         job_url = f"{self.ci_server}/job/{job_name}/{build_num}/"
 
@@ -311,6 +690,9 @@ class JenkinsManager:
             'PR_NUM': pr_num,
             'ROS_DISTRO': distro,
             'ONLY_FIXES_TEST': only_fixes_test,
+            'PACKAGES': pkg_list,
+            'CI_BUILD_ARGS': build_args,
+            'CI_TEST_ARGS': test_args,
         }
 
         if not dry_run and self.tracker:
@@ -331,6 +713,7 @@ class JenkinsManager:
             'job_url': job_url,
             'target_distro': distro,
             'only_fixes_test': only_fixes_test,
+            'packages': pkg_list,
             'parameters': params,
             'dry_run': dry_run,
         }

@@ -25,6 +25,7 @@ DEFAULT_BLOCKED_BRANCH_PATTERNS = [
 ]
 
 DEFAULT_ALLOWED_BRANCH_PATTERNS = [
+    r'^[a-zA-Z0-9][a-zA-Z0-9_./-]*[a-zA-Z0-9_-]$',
     r'^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$',
     r'^fix/[a-zA-Z0-9_-]+$',
     r'^patch-[0-9]+$',
@@ -76,6 +77,9 @@ class HarnessPolicy:
 
     def is_branch_push_allowed(self, branch_name: str) -> bool:
         """Check if branch name matches allowed patterns and does not match blocked base branches."""
+        if not branch_name or '..' in branch_name or '//' in branch_name:
+            return False
+
         # 1. Built-in hard invariant check: Never push to base distro branches
         for blocked_pat in DEFAULT_BLOCKED_BRANCH_PATTERNS:
             if re.match(blocked_pat, branch_name):
@@ -316,6 +320,7 @@ identity:
 policies:
   git_push:
     allowed_branch_patterns:
+      - '^[a-zA-Z0-9][a-zA-Z0-9_./-]*[a-zA-Z0-9_-]$'
       - '^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$'
       - '^fix/[a-zA-Z0-9_-]+$'
       - '^patch-[0-9]+$'

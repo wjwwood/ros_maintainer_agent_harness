@@ -28,10 +28,11 @@ class TestConfig(unittest.TestCase):
     def test_default_policy_validation(self):
         policy = HarnessPolicy()
 
-        # Allowed branch patterns
+        # Allowed branch patterns (prefixed and single-segment contributor PR branches)
         self.assertTrue(policy.is_branch_push_allowed('maintainer_user/fix_linter'))
         self.assertTrue(policy.is_branch_push_allowed('fix/patch_1'))
         self.assertTrue(policy.is_branch_push_allowed('patch-1'))
+        self.assertTrue(policy.is_branch_push_allowed('fix-unique-junit-test-names'))
 
         # Blocked base distro branches (hard invariant)
         self.assertFalse(policy.is_branch_push_allowed('main'))
@@ -41,8 +42,10 @@ class TestConfig(unittest.TestCase):
         self.assertFalse(policy.is_branch_push_allowed('iron'))
         self.assertFalse(policy.is_branch_push_allowed('humble'))
 
-        # Disallowed non-matching branches
-        self.assertFalse(policy.is_branch_push_allowed('feature_xyz'))
+        # Disallowed non-matching/unsafe branches
+        self.assertFalse(policy.is_branch_push_allowed('-flag-injection'))
+        self.assertFalse(policy.is_branch_push_allowed('bad..branch'))
+        self.assertFalse(policy.is_branch_push_allowed('branch with spaces'))
 
         # Allowed repos
         self.assertTrue(policy.is_repository_allowed('ros2/rclcpp'))

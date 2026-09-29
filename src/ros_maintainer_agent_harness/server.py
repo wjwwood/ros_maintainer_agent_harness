@@ -48,6 +48,7 @@ from .git_ops import (
 )
 from .hub import (
     format_conversation_link,
+    format_session_dir_link,
     get_next_actions as do_get_next_actions,
     get_workspace_status as do_get_workspace_status,
     parse_timeline_summary,
@@ -128,6 +129,20 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
         session_dir = workspace.sessions_dir / session_id
         timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
         policy = workspace.get_policy()
+
+        meta = read_session_metadata(session_dir)
+        if meta.get('is_fork') and meta.get('head_repo_url'):
+            if remote == 'origin' and branch == meta.get('head_ref'):
+                remote = 'fork'
+            if get_repo_remote_url(repo_dir, remote) is None and remote in ('fork', meta.get('head_repo_owner')):
+                import subprocess as _sp
+                _sp.run(
+                    ['git', 'remote', 'add', '--', remote, meta['head_repo_url']],
+                    cwd=str(repo_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
 
         remote_url = get_repo_remote_url(repo_dir, remote)
         repo_full_name = extract_repo_full_name(remote_url)
@@ -212,6 +227,12 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
         target_distro: Optional[str] = None,
         job_type: Optional[str] = None,
         only_fixes_test: bool = False,
+        packages: Optional[List[str]] = None,
+        colcon_build_args: Optional[str] = None,
+        colcon_test_args: Optional[str] = None,
+        cmake_args: Optional[str] = None,
+        extra_repos: Optional[List[str]] = None,
+        comment: bool = False,
         reason: str = '',
         approval_ticket_id: Optional[str] = None,
         dry_run: bool = False,
@@ -225,6 +246,12 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             target_distro: Target ROS 2 distro (e.g. 'rolling', 'jazzy').
             job_type: Jenkins launcher job type (default: 'ci_launcher').
             only_fixes_test: Whether to run only tests affected by the PR.
+            packages: Optional list of ROS package names to build/test (e.g. ['launch']).
+            colcon_build_args: Additional colcon build arguments.
+            colcon_test_args: Additional colcon test arguments.
+            cmake_args: Additional CMake arguments passed to colcon build.
+            extra_repos: Optional list of 'owner/repo:branch' entries to include in ros2.repos Gist.
+            comment: If True, post the CI build badge summary comment on the GitHub PR.
             reason: MANDATORY explanation for why CI is being launched.
             approval_ticket_id: Ticket ID if rate-limit override was approved.
             dry_run: If True, validate policy and generate launcher parameters without calling Jenkins.
@@ -280,6 +307,12 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             target_distro=target_distro,
             job_type=job_type,
             only_fixes_test=only_fixes_test,
+            packages=packages,
+            colcon_build_args=colcon_build_args,
+            colcon_test_args=colcon_test_args,
+            cmake_args=cmake_args,
+            extra_repos=extra_repos,
+            comment=comment,
             dry_run=dry_run,
         )
 
@@ -296,6 +329,10 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             'status': 'APPROVED',
             'job_url': res.get('job_url'),
             'build_num': res.get('build_num'),
+            'gist_url': res.get('gist_url'),
+            'child_jobs': res.get('child_jobs'),
+            'comment_markdown': res.get('comment_markdown'),
+            'comment_url': res.get('comment_url'),
             'details': res,
         }
 
@@ -1125,8 +1162,8 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
         Scaffold a session (if `pr_ref` is given and not yet scaffolded) and launch or prepare
         a dedicated task conversation for that session.
 
-        When `mode='auto'` or `mode='agentapi'` and the Jetski `agentapi` CLI is available,
-        this spawns a brand-new top-level Jetski conversation titled `[<session_id>] <PR Title>`
+        When `mode='auto'` or `mode='agentapi'` and the `agentapi` CLI is available,
+        this spawns a brand-new top-level conversation titled `[<session_id>] <PR Title>`
         and records its `conversation_id` in `session.json`. It also returns `task_prompt` so
         the Hub agent can alternatively spawn a subagent via `invoke_subagent`.
 
@@ -1196,6 +1233,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             'session_id': session_id,
             'metadata': meta,
             'conversation_link': format_conversation_link(session_id, conv_id),
+            'session_dir_link': format_session_dir_link(session_id, session_dir),
         }
 
     return server

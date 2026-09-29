@@ -30,8 +30,13 @@ from .devcontainer import (
     stop_session_container,
     write_devcontainer_config,
 )
+from .hooks import (
+    evaluate_pre_tool_use,
+    install_hooks_config,
+)
 from .hub import (
     format_conversation_link,
+    format_session_dir_link,
     get_next_actions,
     get_workspace_status,
     read_session_metadata,
@@ -86,6 +91,7 @@ def handle_init(args: argparse.Namespace) -> int:
     if layout.is_initialized():
         if not (ws_path / 'AGENTS.md').exists():
             write_workspace_agent_instructions(ws_path)
+        install_hooks_config(target_dir=ws_path, workspace_root=ws_path)
         print(f"Workspace already initialized at: {ws_path}")
         return 0
 
@@ -187,9 +193,17 @@ def handle_mcp_install(args: argparse.Namespace) -> int:
         port=args.port or 8765,
         targets=targets,
     )
+    hook_written = install_hooks_config(
+        target_dir=ws_path,
+        workspace_root=ws_path,
+        include_global=True,
+    )
     print(f"✅ Registered ros-maintainer-harness MCP server for workspace '{ws_path}':")
     for target_name, path in written.items():
         print(f"  - {target_name:<8} -> {path}")
+    print("✅ Installed PreToolUse container routing hooks:")
+    for hook_name, path in hook_written.items():
+        print(f"  - {hook_name:<12} -> {path}")
     return 0
 
 
@@ -452,6 +466,26 @@ def handle_session_exec(args: argparse.Namespace) -> int:
         return 1
 
     cmd_parts = list(args.exec_command or [])
+    workdir = args.workdir or '/workspace'
+    timeout = args.timeout or 600
+    no_auto_start = bool(args.no_auto_start)
+
+    while cmd_parts and cmd_parts[0] != '--' and cmd_parts[0].startswith('-'):
+        opt = cmd_parts.pop(0)
+        if opt in ('-d', '--workdir') and cmd_parts:
+            workdir = cmd_parts.pop(0)
+        elif opt.startswith('--workdir='):
+            workdir = opt.split('=', 1)[1]
+        elif opt == '--timeout' and cmd_parts:
+            timeout = int(cmd_parts.pop(0))
+        elif opt.startswith('--timeout='):
+            timeout = int(opt.split('=', 1)[1])
+        elif opt == '--no-auto-start':
+            no_auto_start = True
+        else:
+            cmd_parts.insert(0, opt)
+            break
+
     if cmd_parts and cmd_parts[0] == '--':
         cmd_parts = cmd_parts[1:]
     if not cmd_parts:
@@ -466,9 +500,9 @@ def handle_session_exec(args: argparse.Namespace) -> int:
     res = exec_in_session_container(
         session_id=args.session_id,
         command=command_str,
-        workdir=args.workdir or '/workspace',
-        timeout=args.timeout or 600,
-        auto_start=not args.no_auto_start,
+        workdir=workdir,
+        timeout=timeout,
+        auto_start=not no_auto_start,
         session_dir=session_dir,
         workspace_root=layout.root,
         distro=distro,
@@ -550,9 +584,11 @@ def handle_session_status(args: argparse.Namespace) -> int:
         tl.log_status(message=args.message or f"Updated status to '{args.set_status}'.", milestone=args.milestone)
 
     conv_link = format_conversation_link(args.session_id, meta.get('conversation_id'))
+    dir_link = format_session_dir_link(args.session_id, session_dir)
     print(f"📁 Session Status: {args.session_id}")
     print(f"  - Status:       {meta.get('status')}")
     print(f"  - Distro:       {meta.get('distro')}")
+    print(f"  - Directory:    {dir_link}")
     print(f"  - Topic/Title:  {meta.get('topic') or meta.get('pr_title') or 'N/A'}")
     print(f"  - PR:           {meta.get('pr_ref') or meta.get('pr_url') or 'N/A'}")
     print(f"  - Conversation: {conv_link or 'Not linked'}")
@@ -585,9 +621,11 @@ def handle_status(args: argparse.Namespace) -> int:
         for s in status['sessions']:
             c_str = '🟢 running' if s['container_running'] else '⚪ stopped'
             conv_str = s.get('conversation_link') or 'none'
+            dir_str = s.get('session_dir_link') or s.get('session_dir')
             print(f"📁 {s['session_id']} [{s['status']}] (distro: {s['distro']}, container: {c_str})")
             if s.get('pr_ref') or s.get('topic'):
                 print(f"   PR/Topic:     {s.get('pr_ref') or ''} {s.get('topic') or ''}".strip())
+            print(f"   Directory:    {dir_str}")
             print(f"   Conversation: {conv_str}")
             if s.get('latest_milestone'):
                 print(f"   Milestone:    {s['latest_milestone']}")
@@ -1073,7 +1111,7 @@ def parse_args():
     s_conv.add_argument('--distro', type=str, default=None, help='Target ROS distro override')
     s_conv.add_argument(
         '--mode', choices=['auto', 'agentapi', 'prompt_only'], default='auto',
-        help='Launch method: auto, agentapi (top-level Jetski conversation), or prompt_only',
+        help='Launch method: auto, agentapi (top-level conversation), or prompt_only',
     )
     s_conv.add_argument('--model', choices=['flash_lite', 'flash', 'pro'], default=None, help='Model tier for agentapi')
     s_conv.add_argument('--hub-conversation-id', type=str, default=None, help='Parent Hub conversation ID')
@@ -1161,7 +1199,55 @@ def parse_args():
     ci_cancel.add_argument('target', type=str, help='Jenkins job URL or build number to cancel')
     ci_cancel.add_argument('--reason', type=str, required=True, help='Reason for aborting the build')
 
+    # hook
+    hook_parser = subparsers.add_parser('hook', help='Lifecycle hook handlers for automatic container routing')
+    hook_subparsers = hook_parser.add_subparsers(dest='hook_action')
+
+    h_pre = hook_subparsers.add_parser('pre-tool-use', help='Evaluate PreToolUse hook payload from stdin')
+    h_pre.add_argument('--session', type=str, default=None, help='Explicit session ID override')
+
+    h_inst = hook_subparsers.add_parser('install', help='Install PreToolUse container routing hooks')
+    h_inst.add_argument('--session', type=str, default=None, help='Install hooks for a specific session ID')
+    h_inst.add_argument('--global-hooks', action='store_true', help='Also install in ~/.gemini/config/hooks.json')
+
     return parser.parse_args()
+
+
+def handle_hook(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    if args.hook_action == 'pre-tool-use':
+        raw = sys.stdin.read().strip()
+        if not raw:
+            return 0
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return 0
+        if not isinstance(payload, dict):
+            return 0
+        result = evaluate_pre_tool_use(
+            payload=payload,
+            workspace_root=ws_path,
+            explicit_session_id=args.session,
+        )
+        if result:
+            print(json.dumps(result))
+        return 0
+    elif args.hook_action == 'install':
+        layout = WorkspaceLayout(ws_path)
+        mgr = SessionManager(layout)
+        target_dir = mgr.get_session_dir(args.session) if args.session else ws_path
+        written = install_hooks_config(
+            target_dir=target_dir,
+            workspace_root=ws_path,
+            session_id=args.session,
+            include_global=args.global_hooks,
+        )
+        print(f"✅ Installed PreToolUse container routing hooks for '{target_dir}':")
+        for fmt, p in written.items():
+            print(f"  - {fmt:<12} -> {p}")
+        return 0
+    return 0
 
 
 def handle_instructions(args: argparse.Namespace) -> int:
@@ -1231,6 +1317,8 @@ def main():
         return handle_approval(args)
     elif args.command == 'ci':
         return handle_ci(args)
+    elif args.command == 'hook':
+        return handle_hook(args)
 
     return 0
 

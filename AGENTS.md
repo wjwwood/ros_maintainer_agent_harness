@@ -47,8 +47,8 @@ Before scaffolding any session, starting any container, or spawning subagents:
 When acting as a root coordinator ("Maintainer Hub"):
 - **"What is the status of things we're working on?"**:
   - Call the MCP tool `get_workspace_status()` (or `ros-maintainer-harness -w ~/ros_maintenance_ws status`).
-  - Present active sessions, their status, clickable `[<session_id>](conversation://<id>)` links, latest milestones,
-    container state, CI runs, and pending approvals.
+  - Present active sessions, their status, clickable `[<session_id>](conversation://<id>)` and
+    `[<session_id>](file://<session_dir>)` links, latest milestones, container state, CI runs, and pending approvals.
 - **"What should I work on next?"**:
   - Call the MCP tool `get_next_actions()` (or `ros-maintainer-harness -w ~/ros_maintenance_ws next`).
   - Surface pending approvals (`P1`), blocked sessions (`P1`), failed/completed CI runs (`P2`), active sessions (`P3`),
@@ -56,8 +56,8 @@ When acting as a root coordinator ("Maintainer Hub"):
 - **"I want to work on `<owner>/<repo>#<number>`" (Dedicated Task Conversation)**:
   - Call `start_session_conversation(pr_ref="<owner>/<repo>#<number>", mode="auto")` (or CLI
     `ros-maintainer-harness -w ~/ros_maintenance_ws session start-conversation --pr <owner>/<repo>#<number>`) to scaffold
-    the session and launch a dedicated top-level conversation via `agentapi new-conversation` (or use `mode="prompt_only"`
-    with `invoke_subagent` and link its `conversationId` via `update_session_status`).
+    the session, start the session container, and launch a dedicated top-level conversation via `agentapi new-conversation`
+    (or use `mode="prompt_only"` with `invoke_subagent` and link its `conversationId` via `update_session_status`).
 
 ### 3. Scaffolding an Isolated Session Directly
 Never clone target ROS repositories or run `colcon` inside the `ros_maintainer_agent_harness` repository directory.
@@ -85,25 +85,23 @@ directly on the host OS.
 1. Start the detached session sandbox container:
    - MCP tool: `start_session_container(session_id="<session_id>")`
    - CLI: `ros-maintainer-harness -w ~/ros_maintenance_ws session up <session_id>`
-2. Execute all build, test, and diagnostic commands inside the session container:
-   - MCP tool: `exec_in_session(session_id="<session_id>", command="colcon build --symlink-install")`
-   - CLI:
-     ```bash
-     ros-maintainer-harness -w ~/ros_maintenance_ws session exec <session_id> -- \
-       "colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
-     ros-maintainer-harness -w ~/ros_maintenance_ws session exec <session_id> -- \
-       "colcon test --event-handlers console_direct+ --return-code-on-test-failure"
-     ros-maintainer-harness -w ~/ros_maintenance_ws session exec <session_id> -- \
-       "colcon test-result --all --verbose"
-     ```
+2. **Automatic `PreToolUse` Hook Routing**:
+   - The harness installs `PreToolUse` hooks (`.agents/hooks.json`, `.claude/settings.json`, and
+     `~/.gemini/config/hooks.json`) that automatically intercept shell commands (`run_command` / `Bash`) when `Cwd`
+     is inside `~/ros_maintenance_ws/sessions/<session_id>` (or in a linked session conversation) and rewrite them to
+     execute inside `ros-harness-<session_id>`.
+   - Inside a session conversation, set `Cwd` to `~/ros_maintenance_ws/sessions/<session_id>` and run `colcon`, `git`,
+     `gh`, and `pytest` commands directly without prefixing `session exec`.
+   - From the Hub conversation (or in agent environments without `PreToolUse` hooks), use the MCP tool
+     `exec_in_session(session_id="<session_id>", command="...")` or CLI
+     `ros-maintainer-harness -w ~/ros_maintenance_ws session exec <session_id> -- "<command>"`.
 3. **Subagent Delegation Rule**:
    Whenever you spawn a subagent (e.g. via `invoke_subagent`) to investigate, build, or test a session, you **MUST**
    include in the subagent's prompt:
    - The exact `session_id` and `session_dir` (`~/ros_maintenance_ws/sessions/<session_id>`).
    - Instructions to read `<session_dir>/AGENTS.md` and `<session_dir>/TASK.md` first.
-   - Strict instructions to run all build/test commands inside the container via the MCP tool `exec_in_session`
-     or `ros-maintainer-harness -w ~/ros_maintenance_ws session exec <session_id> -- "<command>"`, **never** directly on
-     the host OS.
+   - Instructions to set `Cwd` to `<session_dir>` so the `PreToolUse` hook routes shell commands into the container
+     automatically (or use `exec_in_session` if hooks are unavailable).
 
 ### 6. MCP Gateway Tools & Progress Logging
 - Record progress milestones to `<session_dir>/timeline.md` using the MCP `log_status` tool or `ros-session-status`,
