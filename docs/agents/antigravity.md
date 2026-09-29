@@ -14,16 +14,16 @@ Before starting a conversation in Antigravity or Gemini, initialize your maintai
 
 ```bash
 # 1. Initialize workspace (writes config/, tools/, AGENTS.md, CLAUDE.md)
-ros-maintainer-harness -w ~/maintainer_ws init
+ros-maintainer-harness -w ~/ros_maintenance_ws init
 
 # 2. Configure container GitHub token (or pass --no-token for unauthenticated mode)
-ros-maintainer-harness -w ~/maintainer_ws token-setup --container-token <READONLY_PAT>
+ros-maintainer-harness -w ~/ros_maintenance_ws token-setup --container-token <READONLY_PAT>
 
 # 3. Register the MCP server in ~/.gemini/config/mcp_config.json
-ros-maintainer-harness -w ~/maintainer_ws mcp-install --target gemini
+ros-maintainer-harness -w ~/ros_maintenance_ws mcp-install --target gemini
 
 # 4. Verify readiness
-ros-maintainer-harness -w ~/maintainer_ws doctor
+ros-maintainer-harness -w ~/ros_maintenance_ws doctor
 ```
 
 > [!IMPORTANT]
@@ -37,17 +37,17 @@ You can start an Antigravity or Gemini conversation in either of two ways:
 
 1. Scaffold the session from a Pull Request:
    ```bash
-   ros-maintainer-harness -w ~/maintainer_ws session from-pr ros2/rclcpp#160
+   ros-maintainer-harness -w ~/ros_maintenance_ws session from-pr ros2/rclcpp#160
    ```
 2. Launch Antigravity or Gemini in the session directory:
    ```bash
-   ros-maintainer-harness -w ~/maintainer_ws session launch pr-rclcpp-160 --agent antigravity
+   ros-maintainer-harness -w ~/ros_maintenance_ws session launch pr-rclcpp-160 --agent antigravity
    ```
    Because `sessions/pr-rclcpp-160/` contains auto-generated `AGENTS.md` and `TASK.md` files, Antigravity automatically loads the session rules on startup.
 
 ### Option B: Open the Maintainer Workspace Root as a "Maintainer Hub" (Recommended)
 
-1. Open `~/maintainer_ws` (or this repository) as your workspace in Antigravity/Jetski.
+1. Open `~/ros_maintenance_ws` (or this repository) as your workspace in Antigravity/Jetski.
 2. Antigravity automatically discovers `AGENTS.md` at the workspace root.
 3. Use a single long-lived **Maintainer Hub** conversation to coordinate your work across multiple PRs:
    - **Check Status Across All Tasks**:

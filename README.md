@@ -64,16 +64,16 @@ Initialize the maintainer directory structure, configure your container GitHub t
 
 ```bash
 # 1. Initialize workspace (generates config/, tools/, AGENTS.md, CLAUDE.md)
-ros-maintainer-harness -w ~/maintainer_ws init
+ros-maintainer-harness -w ~/ros_maintenance_ws init
 
 # 2. Configure a read-only fine-grained PAT for containers (or pass --no-token)
-ros-maintainer-harness -w ~/maintainer_ws token-setup --container-token <READONLY_PAT>
+ros-maintainer-harness -w ~/ros_maintenance_ws token-setup --container-token <READONLY_PAT>
 
 # 3. Register the MCP server in ~/.gemini/config/mcp_config.json (and/or ~/.claude.json)
-ros-maintainer-harness -w ~/maintainer_ws mcp-install --target all
+ros-maintainer-harness -w ~/ros_maintenance_ws mcp-install --target all
 
 # 4. Verify environment readiness
-ros-maintainer-harness -w ~/maintainer_ws doctor
+ros-maintainer-harness -w ~/ros_maintenance_ws doctor
 ```
 
 #### 2. Create a session from a PR
@@ -172,7 +172,7 @@ ros-maintainer-harness policy check --branch wjwwood/fix_timer --repo ros2/rclcp
 The workspace uses linked Git worktrees and session overlay directories so multiple tasks can run in parallel without cloning separate copies of large repositories:
 
 ```
-~/ros_maintainer_ws/
+~/ros_maintenance_ws/
 ├── config/                     # Configuration and maintainer preferences
 │   ├── policy.yaml             # Enforced push and CI policies
 │   └── maintainer_rules.md     # Maintainer conventions & preferences (mounted read-only)
@@ -228,7 +228,7 @@ You can connect any MCP-compatible client directly to the gateway. For local std
   "mcpServers": {
     "ros-maintainer-harness": {
       "command": "ros-maintainer-harness",
-      "args": ["serve", "--transport", "stdio", "--workspace", "/path/to/ros_maintainer_ws"]
+      "args": ["serve", "--transport", "stdio", "--workspace", "/path/to/ros_maintenance_ws"]
     }
   }
 }

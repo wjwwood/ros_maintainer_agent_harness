@@ -67,6 +67,15 @@ def get_default_workspace_path() -> Path:
         if curr.parent == curr:
             break
         curr = curr.parent
+
+    # Fall back to ~/ros_maintenance_ws if it is an initialized workspace
+    try:
+        home_ws = (Path.home() / 'ros_maintenance_ws').resolve()
+        if (home_ws / 'config' / 'policy.yaml').exists() and (home_ws / 'tools').exists():
+            return home_ws
+    except Exception:
+        pass
+
     return cwd
 
 

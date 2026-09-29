@@ -311,12 +311,24 @@ class TestCLI(unittest.TestCase):
                 with patch('pathlib.Path.cwd', return_value=nested_dir):
                     self.assertEqual(get_default_workspace_path(), ws_dir)
 
-            # 3. When outside workspace, defaults to cwd
+            # 3. When outside workspace and ~/ros_maintenance_ws is initialized, falls back to it
             outside_dir = temp_path / 'outside'
             outside_dir.mkdir()
+            fake_home = temp_path / 'home'
+            home_ws = fake_home / 'ros_maintenance_ws'
+            WorkspaceLayout(home_ws).initialize()
             with patch.dict('os.environ', {}, clear=True):
                 with patch('pathlib.Path.cwd', return_value=outside_dir):
-                    self.assertEqual(get_default_workspace_path(), outside_dir)
+                    with patch('pathlib.Path.home', return_value=fake_home):
+                        self.assertEqual(get_default_workspace_path(), home_ws.resolve())
+
+            # 4. When outside workspace and ~/ros_maintenance_ws is not initialized, defaults to cwd
+            empty_home = temp_path / 'empty_home'
+            empty_home.mkdir()
+            with patch.dict('os.environ', {}, clear=True):
+                with patch('pathlib.Path.cwd', return_value=outside_dir):
+                    with patch('pathlib.Path.home', return_value=empty_home):
+                        self.assertEqual(get_default_workspace_path(), outside_dir)
 
     def test_cli_token_doctor_and_container_commands(self):
         with tempfile.TemporaryDirectory() as temp_dir:

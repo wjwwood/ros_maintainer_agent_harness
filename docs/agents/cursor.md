@@ -33,7 +33,7 @@ When the session was created, the harness automatically created `.cursor/mcp.jso
         "--transport",
         "stdio",
         "--workspace",
-        "/path/to/ros_maintainer_ws"
+        "/path/to/ros_maintenance_ws"
       ]
     }
   }
