@@ -167,6 +167,70 @@ def _first_executable_in_segment(segment: str) -> Optional[str]:
     return None
 
 
+def _split_top_level_segments(command_line: str, include_pipe: bool = False) -> List[str]:
+    """
+    Split a shell command string on top-level `&&`, `||`, `;`, or `\n`
+    (and optionally `|`) while ignoring separators inside single or double quotes.
+    """
+    segments: List[str] = []
+    buf: List[str] = []
+    in_single = False
+    in_double = False
+    escaped = False
+    i = 0
+    n = len(command_line)
+
+    while i < n:
+        ch = command_line[i]
+        if escaped:
+            buf.append(ch)
+            escaped = False
+            i += 1
+            continue
+
+        if ch == '\\' and not in_single:
+            escaped = True
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+            i += 1
+            continue
+
+        if not in_single and not in_double:
+            if command_line.startswith('&&', i) or command_line.startswith('||', i):
+                seg = ''.join(buf).strip()
+                if seg:
+                    segments.append(seg)
+                buf = []
+                i += 2
+                continue
+            if ch in (';', '\n') or (include_pipe and ch == '|'):
+                seg = ''.join(buf).strip()
+                if seg:
+                    segments.append(seg)
+                buf = []
+                i += 1
+                continue
+
+        buf.append(ch)
+        i += 1
+
+    tail = ''.join(buf).strip()
+    if tail:
+        segments.append(tail)
+    return segments
+
+
 def is_host_passthrough_command(command_line: str) -> bool:
     """
     Return True if `command_line` is purely a host-control command
@@ -177,8 +241,11 @@ def is_host_passthrough_command(command_line: str) -> bool:
     if not stripped:
         return True
 
-    # Split on top-level &&, ||, ;, or newline
-    segments = [s.strip() for s in re.split(r'&&|\|\||;|\n', stripped) if s.strip()]
+    first_exe = _first_executable_in_segment(stripped)
+    if first_exe == 'ros-maintainer-harness' and 'session exec' in stripped:
+        return True
+
+    segments = _split_top_level_segments(stripped, include_pipe=False)
     if not segments:
         return True
 
@@ -204,7 +271,7 @@ def is_forbidden_uncontainerized_host_command(command_line: str) -> Optional[str
     if not stripped or is_host_passthrough_command(stripped):
         return None
 
-    segments = [s.strip() for s in re.split(r'&&|\|\||;|\||\n', stripped) if s.strip()]
+    segments = _split_top_level_segments(stripped, include_pipe=True)
     for seg in segments:
         exe = _first_executable_in_segment(seg)
         if exe in ('colcon', 'rosdep'):
@@ -476,16 +543,25 @@ def install_hooks_config(
 ) -> Dict[str, Path]:
     """
     Install `PreToolUse` container-routing hooks into `target_dir` (defaults to `workspace_root`)
-    for both Antigravity/Gemini (`.agents/hooks.json`, `_agents/hooks.json`) and Claude Code
-    (`.claude/settings.json`), and optionally into `~/.gemini/config/hooks.json`.
+    for both Antigravity/Gemini (`.agents/hooks.json`) and Claude Code (`.claude/settings.json`),
+    and optionally into `~/.gemini/config/hooks.json`.
     """
     ws_root = workspace_root.resolve()
     base_dir = (target_dir or ws_root).resolve()
     hook_cmd = get_harness_hook_command(ws_root, session_id=session_id)
 
+    # Remove duplicate _agents/hooks.json if present so hooks do not fire twice per directory
+    alt_hooks = base_dir / '_agents' / 'hooks.json'
+    if alt_hooks.exists():
+        try:
+            alt_hooks.unlink()
+            if not any(alt_hooks.parent.iterdir()):
+                alt_hooks.parent.rmdir()
+        except Exception:
+            pass
+
     written: Dict[str, Path] = {}
     written['antigravity'] = _merge_hooks_json(base_dir / '.agents' / 'hooks.json', hook_cmd)
-    written['antigravity_alt'] = _merge_hooks_json(base_dir / '_agents' / 'hooks.json', hook_cmd)
     written['claude'] = _merge_claude_settings_hooks(base_dir / '.claude' / 'settings.json', hook_cmd)
 
     if include_global:
