@@ -299,16 +299,30 @@ def get_session_agent_instructions(
   Record every key milestone in `timeline.md` and keep `session.json` status updated:
   - MCP tool: `log_status(session_id="{session_id}", milestone="...", message="...")`
   - MCP tool: `update_session_status(session_id="{session_id}", status="local_tests_passing")`
+  - CLI (host):
+    `ros-maintainer-harness -w {ws_str} session status {session_id} --set-status local_tests_passing`
   - CLI (inside container): `ros-session-status -m "Milestone" "Message"`
   - If `hub_conversation_id` is set in `session.json`, notify the Hub conversation via `send_message` or
     `agentapi send-message` when your investigation/build/test completes or if you are blocked.
-- **Remote Mutations & CI**:
-  Use the `ros-maintainer-harness` MCP tools for policy-checked operations:
-  - `git_push(session_id="{session_id}", repo_path="...", branch="...", reason="...")`
-  - `launch_jenkins_ci(session_id="{session_id}", pr_url="...", reason="...")`
-  - `get_ci_status(session_id="{session_id}", wait_for_completion=True)`
-  - `get_ci_summary(job_url_or_id="...")`
-  - `find_restarted_ci(session_id="{session_id}", pr_or_comment_url="...")`
+- **Remote Mutations & CI (MCP Tools or Host CLI Equivalents)**:
+  Use the `ros-maintainer-harness` MCP tools (or the equivalent `ros-maintainer-harness` CLI subcommands, which the
+  `PreToolUse` hook automatically passes through to the host):
+  - **Git Push**:
+    - MCP: `git_push(session_id="{session_id}", repo_path="...", branch="...", remote="...", reason="...")`
+    - CLI: `ros-maintainer-harness -w {ws_str} git-push -s {session_id} -b <branch> --remote <remote> -m "<reason>"`
+      *(If pushing to an external contributor fork returns `PENDING_APPROVAL` with a `ticket_id`, ask the maintainer or
+      Hub conversation for approval, then re-run with `--approval-ticket-id <ticket_id>`).*
+  - **Launch Jenkins CI**:
+    - MCP: `launch_jenkins_ci(session_id="{session_id}", pr_url="...", packages=[...], comment=True, reason="...")`
+    - CLI:
+      `ros-maintainer-harness -w {ws_str} ci launch -s {session_id} --pr <pr_url> --packages <pkgs> --comment -m "..."`
+  - **Monitor & Summarize CI**:
+    - MCP: `get_ci_status(session_id="{session_id}", wait_for_completion=True)` / `get_ci_summary(job_url_or_id="...")`
+    - CLI: `ros-maintainer-harness -w {ws_str} ci status <job_url> --wait` or
+      `ros-maintainer-harness -w {ws_str} ci summary <job_url>`
+  - **Find Restarted CI**:
+    - MCP: `find_restarted_ci(session_id="{session_id}", pr_or_comment_url="...", update_comment=True)`
+    - CLI: `ros-maintainer-harness -w {ws_str} ci find-restarted <pr_or_comment_url> -s {session_id} --update-comment`
 """
 
 

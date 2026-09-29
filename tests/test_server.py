@@ -211,6 +211,101 @@ class TestMCPServer(unittest.TestCase):
         self.assertEqual(res_pushed['status'], 'APPROVED')
         self.assertEqual(res_pushed['target'], 'sachingp19/launch:fix-unique-junit-test-names')
 
+        # 3. Also test contributor fork whose PR head branch is named 'rolling' (e.g. ciandonovan/launch:rolling)
+        #    and verify CLI handle_git_push + container path resolution (/workspace/src/launch)
+        import argparse
+        from ros_maintainer_agent_harness.cli import handle_ci, handle_git_push
+
+        fork2_remote_dir = self.ws_root / 'ciandonovan' / 'launch.git'
+        subprocess.run(['git', 'init', '--bare', str(fork2_remote_dir)], check=True)
+
+        session_dir_712 = self.workspace.sessions_dir / 'pr-launch-712'
+        wt_712 = session_dir_712 / 'src' / 'launch'
+        wt_712.mkdir(parents=True, exist_ok=True)
+        subprocess.run(['git', 'init', '-b', 'pr-712'], cwd=str(wt_712), check=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=str(wt_712), check=True)
+        subprocess.run(['git', 'config', 'user.name', 'Tester'], cwd=str(wt_712), check=True)
+        (wt_712 / 'file.txt').write_text('resolve merge conflict')
+        subprocess.run(['git', 'add', '.'], cwd=str(wt_712), check=True)
+        subprocess.run(['git', 'commit', '-m', 'Merge rolling into PR 712'], cwd=str(wt_712), check=True)
+
+        write_session_metadata(
+            session_dir_712,
+            {
+                'session_id': 'pr-launch-712',
+                'pr_ref': 'ros2/launch#712',
+                'is_fork': True,
+                'head_ref': 'rolling',
+                'head_repo_owner': 'ciandonovan',
+                'head_repo_url': str(fork2_remote_dir),
+            },
+        )
+
+        # First call via CLI handle_git_push (using container path /workspace/src/launch) -> PENDING_APPROVAL (exit 1)
+        gp_args_1 = argparse.Namespace(
+            workspace=str(self.ws_root),
+            session='pr-launch-712',
+            repo_path='/workspace/src/launch',
+            branch='rolling',
+            remote='fork',
+            force_with_lease=False,
+            force=False,
+            reason='Push conflict resolution to contributor fork rolling branch',
+            approval_ticket_id=None,
+            dry_run=False,
+            json=True,
+        )
+        rc1 = handle_git_push(gp_args_1)
+        self.assertEqual(rc1, 1)
+
+        tickets = self._call_list('list_approval_requests', {'status': 'PENDING'})
+        ticket_712 = [t['ticket_id'] for t in tickets if t['session_id'] == 'pr-launch-712'][0]
+        self._call('respond_approval_request', {
+            'ticket_id': ticket_712,
+            'approve': True,
+            'maintainer': 'wjwwood',
+        })
+
+        # Second call via CLI handle_git_push with approved ticket (and auto-detected repo_path=None) -> exit 0
+        gp_args_2 = argparse.Namespace(
+            workspace=str(self.ws_root),
+            session='pr-launch-712',
+            repo_path=None,
+            branch='rolling',
+            remote='fork',
+            force_with_lease=False,
+            force=False,
+            reason='Push conflict resolution to contributor fork rolling branch',
+            approval_ticket_id=ticket_712,
+            dry_run=False,
+            json=True,
+        )
+        rc2 = handle_git_push(gp_args_2)
+        self.assertEqual(rc2, 0)
+
+        # Also test CLI ci launch --dry-run
+        ci_args = argparse.Namespace(
+            workspace=str(self.ws_root),
+            ci_action='launch',
+            pr_target=None,
+            pr_opt=None,
+            session='pr-launch-712',
+            distro='rolling',
+            job_type=None,
+            only_fixes_test=False,
+            packages=['launch,launch_testing'],
+            colcon_build_args=None,
+            colcon_test_args=None,
+            cmake_args=None,
+            extra_repos=None,
+            comment=False,
+            reason='Run CI for ros2/launch#712 via CLI',
+            approval_ticket_id=None,
+            dry_run=True,
+            json=True,
+        )
+        self.assertEqual(handle_ci(ci_args), 0)
+
     def test_launch_jenkins_ci_and_cooldown(self):
         # 1. Launch CI
         res = self._call('launch_jenkins_ci', {

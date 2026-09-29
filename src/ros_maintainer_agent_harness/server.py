@@ -64,6 +64,377 @@ from .workspace import WorkspaceLayout
 from .worktree import SessionManager
 
 
+def resolve_session_repo_path(session_dir: Path, repo_path: Optional[str] = None) -> Path:
+    """
+    Resolve a repository path that may be a container path (`/workspace/...`),
+    a path relative to `session_dir`, an absolute host path, or omitted (auto-detecting
+    a single repository worktree under `session_dir / 'src'`).
+    """
+    if not repo_path or not repo_path.strip():
+        src_dir = session_dir / 'src'
+        if src_dir.is_dir():
+            candidates = [
+                p for p in sorted(src_dir.iterdir())
+                if p.is_dir() and (p / '.git').exists()
+            ]
+            if len(candidates) == 1:
+                return candidates[0].resolve()
+        return session_dir.resolve()
+
+    cleaned = repo_path.strip()
+    if cleaned == '/workspace':
+        return session_dir.resolve()
+    if cleaned.startswith('/workspace/'):
+        rel_part = cleaned[len('/workspace/'):]
+        return (session_dir / rel_part).resolve()
+
+    cand = Path(cleaned).expanduser()
+    if not cand.is_absolute() and (session_dir / cand).exists():
+        return (session_dir / cand).resolve()
+    return cand.resolve()
+
+
+def perform_git_push(
+    workspace: WorkspaceLayout,
+    session_id: str,
+    repo_path: Optional[str],
+    branch: str,
+    remote: str = 'origin',
+    force_with_lease: bool = False,
+    force: bool = False,
+    reason: str = '',
+    approval_ticket_id: Optional[str] = None,
+    dry_run: bool = False,
+    approval_mgr: Optional[ApprovalManager] = None,
+) -> Dict[str, Any]:
+    """Execute policy-validated git push with approval ticket gating and timeline/audit logging."""
+    if not reason or not reason.strip():
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': 'Mandatory parameter `reason` must not be empty.',
+        }
+
+    session_dir = workspace.sessions_dir / session_id
+    repo_dir = resolve_session_repo_path(session_dir, repo_path)
+    timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
+    policy = workspace.get_policy()
+    approval_mgr = approval_mgr or ApprovalManager(workspace.audit_dir / 'approvals.json')
+
+    meta = read_session_metadata(session_dir)
+    if meta.get('is_fork') and meta.get('head_repo_url'):
+        if remote == 'origin' and branch == meta.get('head_ref'):
+            remote = 'fork'
+        if get_repo_remote_url(repo_dir, remote) is None and remote in ('fork', meta.get('head_repo_owner')):
+            import subprocess as _sp
+            _sp.run(
+                ['git', 'remote', 'add', '--', remote, meta['head_repo_url']],
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+    remote_url = get_repo_remote_url(repo_dir, remote)
+    repo_full_name = extract_repo_full_name(remote_url)
+    target_label = f"{repo_full_name or str(repo_dir)}:{branch}"
+
+    # Policy validation
+    allowed, msg, requires_approval = policy.validate_git_push(
+        branch_name=branch,
+        repo_full_name=repo_full_name,
+        force_with_lease=force_with_lease,
+        force=force,
+    )
+
+    if not allowed:
+        timeline.log_action(
+            action='git_push',
+            target=target_label,
+            reason=reason,
+            status='DENIED',
+            details={'error': msg, 'force_with_lease': force_with_lease},
+        )
+        return {
+            'success': False,
+            'status': 'DENIED',
+            'error': msg,
+        }
+
+    # Check approval if required (e.g. external contributor fork)
+    if requires_approval:
+        if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
+            req = approval_mgr.create_request(
+                session_id=session_id,
+                action='git_push',
+                target=target_label,
+                reason=reason,
+                details={'remote': remote, 'force_with_lease': force_with_lease},
+            )
+            timeline.log_action(
+                action='git_push',
+                target=target_label,
+                reason=reason,
+                status='PENDING_APPROVAL',
+                details={'ticket_id': req.ticket_id, 'info': msg},
+            )
+            return {
+                'success': False,
+                'status': 'PENDING_APPROVAL',
+                'ticket_id': req.ticket_id,
+                'message': f"{msg} Created approval ticket '{req.ticket_id}'.",
+            }
+
+    # Execute push
+    success, out = execute_git_push(
+        repo_dir=repo_dir,
+        branch=branch,
+        remote=remote,
+        force_with_lease=force_with_lease,
+        dry_run=dry_run,
+    )
+
+    status_str = 'APPROVED' if success else 'FAILED'
+    timeline.log_action(
+        action='git_push',
+        target=target_label,
+        reason=reason,
+        status=status_str,
+        details={'output': out, 'force_with_lease': force_with_lease, 'dry_run': dry_run},
+    )
+
+    return {
+        'success': success,
+        'status': status_str,
+        'target': target_label,
+        'output': out,
+        'dry_run': dry_run,
+    }
+
+
+def perform_launch_jenkins_ci(
+    workspace: WorkspaceLayout,
+    session_id: str,
+    pr_url: str,
+    target_distro: Optional[str] = None,
+    job_type: Optional[str] = None,
+    only_fixes_test: bool = False,
+    packages: Optional[List[str]] = None,
+    colcon_build_args: Optional[str] = None,
+    colcon_test_args: Optional[str] = None,
+    cmake_args: Optional[str] = None,
+    extra_repos: Optional[List[str]] = None,
+    comment: bool = False,
+    reason: str = '',
+    approval_ticket_id: Optional[str] = None,
+    dry_run: bool = False,
+    approval_mgr: Optional[ApprovalManager] = None,
+    ci_tracker: Optional[CITracker] = None,
+) -> Dict[str, Any]:
+    """Launch a Jenkins CI run on ci.ros2.org with rate-limiting, cooldown, and audit logging."""
+    if not reason or not reason.strip():
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': 'Mandatory parameter `reason` must not be empty.',
+        }
+
+    session_dir = workspace.sessions_dir / session_id
+    timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
+    policy = workspace.get_policy()
+    approval_mgr = approval_mgr or ApprovalManager(workspace.audit_dir / 'approvals.json')
+    ci_tracker = ci_tracker or CITracker(workspace.audit_dir / 'ci_runs.json')
+
+    active_count = ci_tracker.get_active_runs_count(pr_url)
+    since_last = ci_tracker.get_seconds_since_last_run(pr_url)
+
+    allowed, msg, _ = policy.validate_jenkins_ci(
+        pr_url=pr_url,
+        active_runs_count=active_count,
+        seconds_since_last_run=since_last,
+    )
+
+    if not allowed:
+        if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
+            req = approval_mgr.create_request(
+                session_id=session_id,
+                action='launch_jenkins_ci',
+                target=pr_url,
+                reason=reason,
+                details={'active_count': active_count, 'cooldown_info': msg},
+            )
+            timeline.log_action(
+                action='launch_jenkins_ci',
+                target=pr_url,
+                reason=reason,
+                status='RATE_LIMITED',
+                details={'ticket_id': req.ticket_id, 'error': msg},
+            )
+            return {
+                'success': False,
+                'status': 'RATE_LIMITED',
+                'error': msg,
+                'ticket_id': req.ticket_id,
+            }
+
+    jenkins_mgr = JenkinsManager(ci_server=policy.jenkins_ci.ci_server, tracker=ci_tracker)
+    res = jenkins_mgr.launch_ci(
+        session_id=session_id,
+        pr_url=pr_url,
+        target_distro=target_distro,
+        job_type=job_type,
+        only_fixes_test=only_fixes_test,
+        packages=packages,
+        colcon_build_args=colcon_build_args,
+        colcon_test_args=colcon_test_args,
+        cmake_args=cmake_args,
+        extra_repos=extra_repos,
+        comment=comment,
+        dry_run=dry_run,
+    )
+
+    timeline.log_action(
+        action='launch_jenkins_ci',
+        target=pr_url,
+        reason=reason,
+        status='APPROVED',
+        details=res,
+    )
+
+    return {
+        'success': True,
+        'status': 'APPROVED',
+        'job_url': res.get('job_url'),
+        'build_num': res.get('build_num'),
+        'gist_url': res.get('gist_url'),
+        'child_jobs': res.get('child_jobs'),
+        'comment_markdown': res.get('comment_markdown'),
+        'comment_url': res.get('comment_url'),
+        'details': res,
+    }
+
+
+def perform_find_restarted_ci(
+    workspace: WorkspaceLayout,
+    session_id: str,
+    pr_or_comment_url: str,
+    update_comment: bool = False,
+    reason: Optional[str] = None,
+    dry_run: bool = False,
+    ci_tracker: Optional[CITracker] = None,
+) -> Dict[str, Any]:
+    """Check for rescheduled or restarted Jenkins builds and optionally update PR comment markdown."""
+    session_dir = workspace.sessions_dir / session_id
+    timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
+    policy = workspace.get_policy()
+    ci_tracker = ci_tracker or CITracker(workspace.audit_dir / 'ci_runs.json')
+
+    jenkins_mgr = JenkinsManager(ci_server=policy.jenkins_ci.ci_server, tracker=ci_tracker)
+    res = jenkins_mgr.find_restarted_ci(
+        pr_or_comment_url=pr_or_comment_url,
+        update_comment=update_comment,
+        dry_run=dry_run,
+    )
+
+    if update_comment:
+        timeline.log_action(
+            action='find_restarted_ci',
+            target=pr_or_comment_url,
+            reason=reason or 'Discovered rescheduled Jenkins build; updated PR comment.',
+            status='APPROVED',
+            details=res,
+        )
+    else:
+        timeline.log_status(f"Inspected restarted CI for `{pr_or_comment_url}`.")
+
+    return res
+
+
+def perform_create_pull_request(
+    workspace: WorkspaceLayout,
+    session_id: str,
+    repo: str,
+    title: str,
+    body: str,
+    head: str,
+    base: str = 'rolling',
+    reason: str = '',
+    approval_ticket_id: Optional[str] = None,
+    dry_run: bool = False,
+    approval_mgr: Optional[ApprovalManager] = None,
+) -> Dict[str, Any]:
+    """Create a GitHub Pull Request with policy validation and maintainer approval ticket gating."""
+    if not reason or not reason.strip():
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': 'Mandatory parameter `reason` must not be empty.',
+        }
+
+    session_dir = workspace.sessions_dir / session_id
+    timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
+    policy = workspace.get_policy()
+    approval_mgr = approval_mgr or ApprovalManager(workspace.audit_dir / 'approvals.json')
+
+    allowed, msg, requires_approval = policy.validate_pull_request_creation(
+        repo_full_name=repo,
+        base_branch=base,
+    )
+
+    if not allowed:
+        timeline.log_action(
+            action='create_pull_request',
+            target=f"{repo}:{head}->{base}",
+            reason=reason,
+            status='DENIED',
+            details={'error': msg},
+        )
+        return {'success': False, 'status': 'DENIED', 'error': msg}
+
+    if requires_approval:
+        if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
+            req = approval_mgr.create_request(
+                session_id=session_id,
+                action='create_pull_request',
+                target=f"{repo}:{head}->{base}",
+                reason=reason,
+                details={'title': title, 'body': body, 'head': head, 'base': base},
+            )
+            timeline.log_action(
+                action='create_pull_request',
+                target=f"{repo}:{head}->{base}",
+                reason=reason,
+                status='PENDING_APPROVAL',
+                details={'ticket_id': req.ticket_id},
+            )
+            return {
+                'success': False,
+                'status': 'PENDING_APPROVAL',
+                'ticket_id': req.ticket_id,
+                'message': f"{msg} Created approval ticket '{req.ticket_id}'.",
+            }
+
+    # Approved or simulation
+    pr_number = 9999
+    pr_html_url = f"https://github.com/{repo}/pull/{pr_number}"
+    timeline.log_action(
+        action='create_pull_request',
+        target=f"{repo}:{head}->{base}",
+        reason=reason,
+        status='APPROVED',
+        details={'pr_url': pr_html_url, 'dry_run': dry_run},
+    )
+
+    return {
+        'success': True,
+        'status': 'APPROVED',
+        'pr_url': pr_html_url,
+        'repo': repo,
+        'title': title,
+        'dry_run': dry_run,
+    }
+
+
 def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
     """Create and configure the Host MCP Server Gateway with safety rules and tools."""
     if not workspace.is_initialized():
@@ -118,106 +489,19 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             approval_ticket_id: Ticket ID if this action required prior maintainer approval.
             dry_run: If True, validate policy without executing network git push.
         """
-        if not reason or not reason.strip():
-            return {
-                'success': False,
-                'status': 'REJECTED',
-                'error': 'Mandatory parameter `reason` must not be empty.',
-            }
-
-        repo_dir = Path(repo_path).resolve()
-        session_dir = workspace.sessions_dir / session_id
-        timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
-        policy = workspace.get_policy()
-
-        meta = read_session_metadata(session_dir)
-        if meta.get('is_fork') and meta.get('head_repo_url'):
-            if remote == 'origin' and branch == meta.get('head_ref'):
-                remote = 'fork'
-            if get_repo_remote_url(repo_dir, remote) is None and remote in ('fork', meta.get('head_repo_owner')):
-                import subprocess as _sp
-                _sp.run(
-                    ['git', 'remote', 'add', '--', remote, meta['head_repo_url']],
-                    cwd=str(repo_dir),
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-
-        remote_url = get_repo_remote_url(repo_dir, remote)
-        repo_full_name = extract_repo_full_name(remote_url)
-
-        # Policy validation
-        allowed, msg, requires_approval = policy.validate_git_push(
-            branch_name=branch,
-            repo_full_name=repo_full_name,
-            force_with_lease=force_with_lease,
-            force=force,
-        )
-
-        if not allowed:
-            timeline.log_action(
-                action='git_push',
-                target=f"{repo_full_name or repo_path}:{branch}",
-                reason=reason,
-                status='DENIED',
-                details={'error': msg, 'force_with_lease': force_with_lease},
-            )
-            return {
-                'success': False,
-                'status': 'DENIED',
-                'error': msg,
-            }
-
-        # Check approval if required (e.g. external contributor fork)
-        if requires_approval:
-            if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
-                req = approval_mgr.create_request(
-                    session_id=session_id,
-                    action='git_push',
-                    target=f"{repo_full_name or repo_path}:{branch}",
-                    reason=reason,
-                    details={'remote': remote, 'force_with_lease': force_with_lease},
-                )
-                timeline.log_action(
-                    action='git_push',
-                    target=f"{repo_full_name or repo_path}:{branch}",
-                    reason=reason,
-                    status='PENDING_APPROVAL',
-                    details={'ticket_id': req.ticket_id, 'info': msg},
-                )
-                return {
-                    'success': False,
-                    'status': 'PENDING_APPROVAL',
-                    'ticket_id': req.ticket_id,
-                    'message': f"{msg} Created approval ticket '{req.ticket_id}'.",
-                }
-
-        # Execute push
-        success, out = execute_git_push(
-            repo_dir=repo_dir,
+        return perform_git_push(
+            workspace=workspace,
+            session_id=session_id,
+            repo_path=repo_path,
             branch=branch,
             remote=remote,
             force_with_lease=force_with_lease,
-            dry_run=dry_run,
-        )
-
-        status_str = 'APPROVED' if success else 'FAILED'
-        timeline.log_action(
-            action='git_push',
-            target=f"{repo_full_name or repo_path}:{branch}",
+            force=force,
             reason=reason,
-            status=status_str,
-            details={'output': out, 'force_with_lease': force_with_lease, 'dry_run': dry_run},
+            approval_ticket_id=approval_ticket_id,
+            dry_run=dry_run,
+            approval_mgr=approval_mgr,
         )
-
-        return {
-            'success': success,
-            'status': status_str,
-            'target': f"{repo_full_name or repo_path}:{branch}",
-            'output': out,
-            'dry_run': dry_run,
-        }
 
     # 3. launch_jenkins_ci
     @server.tool()
@@ -256,52 +540,8 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             approval_ticket_id: Ticket ID if rate-limit override was approved.
             dry_run: If True, validate policy and generate launcher parameters without calling Jenkins.
         """
-        if not reason or not reason.strip():
-            return {
-                'success': False,
-                'status': 'REJECTED',
-                'error': 'Mandatory parameter `reason` must not be empty.',
-            }
-
-        session_dir = workspace.sessions_dir / session_id
-        timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
-        policy = workspace.get_policy()
-
-        active_count = ci_tracker.get_active_runs_count(pr_url)
-        since_last = ci_tracker.get_seconds_since_last_run(pr_url)
-
-        allowed, msg, _ = policy.validate_jenkins_ci(
-            pr_url=pr_url,
-            active_runs_count=active_count,
-            seconds_since_last_run=since_last,
-        )
-
-        if not allowed:
-            # Check if override ticket was provided
-            if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
-                req = approval_mgr.create_request(
-                    session_id=session_id,
-                    action='launch_jenkins_ci',
-                    target=pr_url,
-                    reason=reason,
-                    details={'active_count': active_count, 'cooldown_info': msg},
-                )
-                timeline.log_action(
-                    action='launch_jenkins_ci',
-                    target=pr_url,
-                    reason=reason,
-                    status='RATE_LIMITED',
-                    details={'ticket_id': req.ticket_id, 'error': msg},
-                )
-                return {
-                    'success': False,
-                    'status': 'RATE_LIMITED',
-                    'error': msg,
-                    'ticket_id': req.ticket_id,
-                }
-
-        jenkins_mgr = JenkinsManager(ci_server=policy.jenkins_ci.ci_server, tracker=ci_tracker)
-        res = jenkins_mgr.launch_ci(
+        return perform_launch_jenkins_ci(
+            workspace=workspace,
             session_id=session_id,
             pr_url=pr_url,
             target_distro=target_distro,
@@ -313,28 +553,12 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             cmake_args=cmake_args,
             extra_repos=extra_repos,
             comment=comment,
-            dry_run=dry_run,
-        )
-
-        timeline.log_action(
-            action='launch_jenkins_ci',
-            target=pr_url,
             reason=reason,
-            status='APPROVED',
-            details=res,
+            approval_ticket_id=approval_ticket_id,
+            dry_run=dry_run,
+            approval_mgr=approval_mgr,
+            ci_tracker=ci_tracker,
         )
-
-        return {
-            'success': True,
-            'status': 'APPROVED',
-            'job_url': res.get('job_url'),
-            'build_num': res.get('build_num'),
-            'gist_url': res.get('gist_url'),
-            'child_jobs': res.get('child_jobs'),
-            'comment_markdown': res.get('comment_markdown'),
-            'comment_url': res.get('comment_url'),
-            'details': res,
-        }
 
     # 4. find_restarted_ci
     @server.tool()
@@ -355,29 +579,15 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             reason: Optional explanation if updating comment.
             dry_run: If True, perform dry-run discovery without mutating comments.
         """
-        session_dir = workspace.sessions_dir / session_id
-        timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
-        policy = workspace.get_policy()
-
-        jenkins_mgr = JenkinsManager(ci_server=policy.jenkins_ci.ci_server, tracker=ci_tracker)
-        res = jenkins_mgr.find_restarted_ci(
+        return perform_find_restarted_ci(
+            workspace=workspace,
+            session_id=session_id,
             pr_or_comment_url=pr_or_comment_url,
             update_comment=update_comment,
+            reason=reason,
             dry_run=dry_run,
+            ci_tracker=ci_tracker,
         )
-
-        if update_comment:
-            timeline.log_action(
-                action='find_restarted_ci',
-                target=pr_or_comment_url,
-                reason=reason or 'Discovered rescheduled Jenkins build; updated PR comment.',
-                status='APPROVED',
-                details=res,
-            )
-        else:
-            timeline.log_status(f"Inspected restarted CI for `{pr_or_comment_url}`.")
-
-        return res
 
     # 5. create_pull_request
     @server.tool()
@@ -406,74 +616,19 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             approval_ticket_id: Ticket ID approved by maintainer.
             dry_run: If True, simulate creation without GitHub API call.
         """
-        if not reason or not reason.strip():
-            return {
-                'success': False,
-                'status': 'REJECTED',
-                'error': 'Mandatory parameter `reason` must not be empty.',
-            }
-
-        session_dir = workspace.sessions_dir / session_id
-        timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
-        policy = workspace.get_policy()
-
-        allowed, msg, requires_approval = policy.validate_pull_request_creation(
-            repo_full_name=repo,
-            base_branch=base,
-        )
-
-        if not allowed:
-            timeline.log_action(
-                action='create_pull_request',
-                target=f"{repo}:{head}->{base}",
-                reason=reason,
-                status='DENIED',
-                details={'error': msg},
-            )
-            return {'success': False, 'status': 'DENIED', 'error': msg}
-
-        if requires_approval:
-            if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
-                req = approval_mgr.create_request(
-                    session_id=session_id,
-                    action='create_pull_request',
-                    target=f"{repo}:{head}->{base}",
-                    reason=reason,
-                    details={'title': title, 'body': body, 'head': head, 'base': base},
-                )
-                timeline.log_action(
-                    action='create_pull_request',
-                    target=f"{repo}:{head}->{base}",
-                    reason=reason,
-                    status='PENDING_APPROVAL',
-                    details={'ticket_id': req.ticket_id},
-                )
-                return {
-                    'success': False,
-                    'status': 'PENDING_APPROVAL',
-                    'ticket_id': req.ticket_id,
-                    'message': f"{msg} Created approval ticket '{req.ticket_id}'.",
-                }
-
-        # Approved or simulation
-        pr_number = 9999
-        pr_html_url = f"https://github.com/{repo}/pull/{pr_number}"
-        timeline.log_action(
-            action='create_pull_request',
-            target=f"{repo}:{head}->{base}",
+        return perform_create_pull_request(
+            workspace=workspace,
+            session_id=session_id,
+            repo=repo,
+            title=title,
+            body=body,
+            head=head,
+            base=base,
             reason=reason,
-            status='APPROVED',
-            details={'pr_url': pr_html_url, 'dry_run': dry_run},
+            approval_ticket_id=approval_ticket_id,
+            dry_run=dry_run,
+            approval_mgr=approval_mgr,
         )
-
-        return {
-            'success': True,
-            'status': 'APPROVED',
-            'pr_url': pr_html_url,
-            'repo': repo,
-            'title': title,
-            'dry_run': dry_run,
-        }
 
     # 6. check_policy
     @server.tool()

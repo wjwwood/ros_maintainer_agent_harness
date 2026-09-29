@@ -52,7 +52,13 @@ from .mcp_config import (
 )
 from .rules import MaintainerRules
 from .scaffolder import scaffold_session_from_pr
-from .server import run_server
+from .server import (
+    perform_create_pull_request,
+    perform_find_restarted_ci,
+    perform_git_push,
+    perform_launch_jenkins_ci,
+    run_server,
+)
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
 from .worktree import SessionManager
@@ -919,7 +925,156 @@ def handle_ci(args: argparse.Namespace) -> int:
             print(f"Error cancelling CI build: {res.get('error')}", file=sys.stderr)
             return 1
 
+    elif args.ci_action == 'launch':
+        pr_url = args.pr_opt or args.pr_target
+        if not pr_url and args.session:
+            session_dir = layout.sessions_dir / args.session
+            meta = read_session_metadata(session_dir)
+            pr_url = meta.get('pr_url') or meta.get('pr_ref')
+        if not pr_url:
+            print("Error: PR URL or shorthand must be provided (via positional arg or --pr).", file=sys.stderr)
+            return 1
+
+        packages = None
+        if args.packages:
+            packages = []
+            for p in args.packages:
+                packages.extend([item.strip() for item in p.split(',') if item.strip()])
+
+        extra_repos = None
+        if args.extra_repos:
+            extra_repos = []
+            for er in args.extra_repos:
+                extra_repos.extend([item.strip() for item in er.split(',') if item.strip()])
+
+        res = perform_launch_jenkins_ci(
+            workspace=layout,
+            session_id=args.session,
+            pr_url=pr_url,
+            target_distro=args.distro,
+            job_type=args.job_type,
+            only_fixes_test=args.only_fixes_test,
+            packages=packages,
+            colcon_build_args=args.colcon_build_args,
+            colcon_test_args=args.colcon_test_args,
+            cmake_args=args.cmake_args,
+            extra_repos=extra_repos,
+            comment=args.comment,
+            reason=args.reason,
+            approval_ticket_id=args.approval_ticket_id,
+            dry_run=args.dry_run,
+            ci_tracker=ci_tracker,
+        )
+        if getattr(args, 'json', False):
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get('success'):
+                print(f"✅ Launched Jenkins CI ({res.get('status')}): {res.get('job_url')}")
+                if res.get('gist_url'):
+                    print(f"  - Gist:    {res.get('gist_url')}")
+                if res.get('comment_url'):
+                    print(f"  - Comment: {res.get('comment_url')}")
+            elif res.get('status') == 'RATE_LIMITED':
+                print(
+                    f"⏳ CI launch rate-limited: {res.get('error')} "
+                    f"(Created approval ticket: {res.get('ticket_id')})",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"❌ CI launch failed ({res.get('status')}): {res.get('error')}", file=sys.stderr)
+        return 0 if res.get('success') else 1
+
+    elif args.ci_action == 'find-restarted':
+        target_url = args.pr_opt or args.target
+        if not target_url and args.session:
+            session_dir = layout.sessions_dir / args.session
+            meta = read_session_metadata(session_dir)
+            target_url = meta.get('pr_url') or meta.get('pr_ref')
+        if not target_url:
+            print("Error: PR or comment URL must be provided.", file=sys.stderr)
+            return 1
+
+        res = perform_find_restarted_ci(
+            workspace=layout,
+            session_id=args.session,
+            pr_or_comment_url=target_url,
+            update_comment=args.update_comment,
+            reason=args.reason,
+            dry_run=args.dry_run,
+            ci_tracker=ci_tracker,
+        )
+        if getattr(args, 'json', False):
+            print(json.dumps(res, indent=2))
+        else:
+            print(json.dumps(res, indent=2))
+        return 0 if res.get('success', True) else 1
+
     return 0
+
+
+def handle_git_push(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    res = perform_git_push(
+        workspace=layout,
+        session_id=args.session,
+        repo_path=args.repo_path,
+        branch=args.branch,
+        remote=args.remote or 'origin',
+        force_with_lease=args.force_with_lease,
+        force=args.force,
+        reason=args.reason,
+        approval_ticket_id=args.approval_ticket_id,
+        dry_run=args.dry_run,
+    )
+    if getattr(args, 'json', False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get('success'):
+            print(f"✅ Git push succeeded ({res.get('status')}) -> {res.get('target')}")
+            if res.get('output'):
+                print(res['output'])
+        elif res.get('status') == 'PENDING_APPROVAL':
+            print(
+                f"🎟️  PENDING_APPROVAL: {res.get('message')}\n"
+                f"   Approve with: ros-maintainer-harness -w {layout.root} approval approve {res.get('ticket_id')}\n"
+                f"   Then re-run with: --approval-ticket-id {res.get('ticket_id')}"
+            )
+        else:
+            err_msg = res.get('error') or res.get('output') or res.get('message')
+            print(f"❌ Git push {res.get('status')}: {err_msg}", file=sys.stderr)
+    return 0 if res.get('success') else 1
+
+
+def handle_create_pr(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    res = perform_create_pull_request(
+        workspace=layout,
+        session_id=args.session,
+        repo=args.repo,
+        title=args.title,
+        body=args.body or '',
+        head=args.head,
+        base=args.base or 'rolling',
+        reason=args.reason,
+        approval_ticket_id=args.approval_ticket_id,
+        dry_run=args.dry_run,
+    )
+    if getattr(args, 'json', False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get('success'):
+            print(f"✅ Created Pull Request ({res.get('status')}): {res.get('pr_url')}")
+        elif res.get('status') == 'PENDING_APPROVAL':
+            print(
+                f"🎟️  PENDING_APPROVAL: {res.get('message')}\n"
+                f"   Approve with: ros-maintainer-harness -w {layout.root} approval approve {res.get('ticket_id')}\n"
+                f"   Then re-run with: --approval-ticket-id {res.get('ticket_id')}"
+            )
+        else:
+            print(f"❌ Create PR {res.get('status')}: {res.get('error')}", file=sys.stderr)
+    return 0 if res.get('success') else 1
 
 
 def parse_args():
@@ -1132,6 +1287,45 @@ def parse_args():
     s_stat.add_argument('--milestone', type=str, default=None, help='Log milestone to timeline.md')
     s_stat.add_argument('--message', type=str, default=None, help='Log status message to timeline.md')
 
+    # git-push (policy-guarded remote push)
+    gp_parser = subparsers.add_parser(
+        'git-push', help='Push a branch to a Git remote with safety policy validation and audit logging'
+    )
+    gp_parser.add_argument('-s', '--session', type=str, required=True, help='Active session ID')
+    gp_parser.add_argument(
+        '-C', '--repo-path', '--repo', dest='repo_path', type=str, default=None,
+        help='Path to repository worktree (defaults to the single worktree in sessions/<id>/src/)',
+    )
+    gp_parser.add_argument('-b', '--branch', type=str, required=True, help='Branch name to push')
+    gp_parser.add_argument('--remote', type=str, default='origin', help='Remote name (default: origin)')
+    gp_parser.add_argument('--force-with-lease', action='store_true', help='Use --force-with-lease')
+    gp_parser.add_argument('--force', action='store_true', help='Request force push')
+    gp_parser.add_argument('-m', '--reason', type=str, required=True, help='Mandatory explanation for the push')
+    gp_parser.add_argument(
+        '--approval-ticket-id', '--ticket', dest='approval_ticket_id', type=str, default=None,
+        help='Approved ticket ID if pushing to an external contributor fork',
+    )
+    gp_parser.add_argument('--dry-run', action='store_true', help='Validate policy without network git push')
+    gp_parser.add_argument('--json', action='store_true', help='Output result as JSON')
+
+    # create-pr (policy-guarded PR creation)
+    cpr_parser = subparsers.add_parser(
+        'create-pr', help='Create a GitHub Pull Request with policy validation and maintainer approval gating'
+    )
+    cpr_parser.add_argument('-s', '--session', type=str, required=True, help='Active session ID')
+    cpr_parser.add_argument('--repo', type=str, required=True, help='Target repository full name (e.g. ros2/rclcpp)')
+    cpr_parser.add_argument('--title', type=str, required=True, help='Pull request title')
+    cpr_parser.add_argument('--body', type=str, default='', help='Pull request description')
+    cpr_parser.add_argument('--head', type=str, required=True, help='Head branch (e.g. wjwwood:feature_branch)')
+    cpr_parser.add_argument('--base', type=str, default='rolling', help='Base branch (default: rolling)')
+    cpr_parser.add_argument('-m', '--reason', type=str, required=True, help='Mandatory explanation for opening PR')
+    cpr_parser.add_argument(
+        '--approval-ticket-id', '--ticket', dest='approval_ticket_id', type=str, default=None,
+        help='Approved ticket ID',
+    )
+    cpr_parser.add_argument('--dry-run', action='store_true', help='Simulate creation without GitHub API call')
+    cpr_parser.add_argument('--json', action='store_true', help='Output result as JSON')
+
     # rules
     rules_parser = subparsers.add_parser('rules', help='View or update maintainer style & preferences')
     rules_subparsers = rules_parser.add_subparsers(dest='rules_action')
@@ -1176,7 +1370,7 @@ def parse_args():
     appr_no.add_argument('--comment', type=str, default=None, help='Rejection comment')
 
     # ci
-    ci_parser = subparsers.add_parser('ci', help='Query and monitor Jenkins CI runs')
+    ci_parser = subparsers.add_parser('ci', help='Launch, query, and monitor Jenkins CI runs')
     ci_subparsers = ci_parser.add_subparsers(dest='ci_action')
 
     ci_list = ci_subparsers.add_parser('list', help='List tracked CI runs')
@@ -1198,6 +1392,40 @@ def parse_args():
     ci_cancel = ci_subparsers.add_parser('cancel', help='Abort a running Jenkins CI job')
     ci_cancel.add_argument('target', type=str, help='Jenkins job URL or build number to cancel')
     ci_cancel.add_argument('--reason', type=str, required=True, help='Reason for aborting the build')
+
+    ci_launch = ci_subparsers.add_parser(
+        'launch', help='Launch a Jenkins CI run on ci.ros2.org with rate-limiting & cooldown checks'
+    )
+    ci_launch.add_argument('pr_target', nargs='?', default=None, help='PR URL or shorthand (e.g. ros2/launch#712)')
+    ci_launch.add_argument('--pr', '--pr-url', dest='pr_opt', type=str, default=None, help='PR URL or shorthand')
+    ci_launch.add_argument('-s', '--session', type=str, required=True, help='Active session ID')
+    ci_launch.add_argument('--distro', '--target-distro', dest='distro', type=str, default=None, help='Target distro')
+    ci_launch.add_argument('--job-type', type=str, default=None, help='Jenkins job type (default: ci_launcher)')
+    ci_launch.add_argument('--only-fixes-test', action='store_true', help='Only run tests affected by PR')
+    ci_launch.add_argument('--packages', nargs='*', default=None, help='ROS package names to build/test')
+    ci_launch.add_argument('--colcon-build-args', type=str, default=None, help='Additional colcon build args')
+    ci_launch.add_argument('--colcon-test-args', type=str, default=None, help='Additional colcon test args')
+    ci_launch.add_argument('--cmake-args', type=str, default=None, help='Additional CMake args')
+    ci_launch.add_argument('--extra-repos', nargs='*', default=None, help='Extra owner/repo:branch entries')
+    ci_launch.add_argument('--comment', action='store_true', help='Post CI build badge comment on the GitHub PR')
+    ci_launch.add_argument('-m', '--reason', type=str, required=True, help='Mandatory explanation for launching CI')
+    ci_launch.add_argument(
+        '--approval-ticket-id', '--ticket', dest='approval_ticket_id', type=str, default=None,
+        help='Approved ticket ID if overriding rate-limit cooldown',
+    )
+    ci_launch.add_argument('--dry-run', action='store_true', help='Validate policy without calling Jenkins')
+    ci_launch.add_argument('--json', action='store_true', help='Output result as JSON')
+
+    ci_restart = ci_subparsers.add_parser(
+        'find-restarted', help='Check for rescheduled/restarted Jenkins builds and optionally update PR comment'
+    )
+    ci_restart.add_argument('target', nargs='?', default=None, help='PR or comment URL to inspect')
+    ci_restart.add_argument('--pr', '--url', dest='pr_opt', type=str, default=None, help='PR or comment URL')
+    ci_restart.add_argument('-s', '--session', type=str, required=True, help='Active session ID')
+    ci_restart.add_argument('--update-comment', action='store_true', help='Update GitHub PR comment in-place')
+    ci_restart.add_argument('-m', '--reason', type=str, default=None, help='Explanation if updating comment')
+    ci_restart.add_argument('--dry-run', action='store_true', help='Perform dry-run discovery without mutating')
+    ci_restart.add_argument('--json', action='store_true', help='Output result as JSON')
 
     # hook
     hook_parser = subparsers.add_parser('hook', help='Lifecycle hook handlers for automatic container routing')
@@ -1307,6 +1535,10 @@ def main():
         else:
             print("Run `ros-maintainer-harness session --help` for session commands.")
             return 0
+    elif args.command == 'git-push':
+        return handle_git_push(args)
+    elif args.command == 'create-pr':
+        return handle_create_pr(args)
     elif args.command == 'rules':
         return handle_rules(args)
     elif args.command == 'policy':

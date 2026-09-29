@@ -75,20 +75,25 @@ class HarnessPolicy:
     jenkins_ci: JenkinsCIPolicy = dataclasses.field(default_factory=JenkinsCIPolicy)
     server: ServerConfig = dataclasses.field(default_factory=ServerConfig)
 
-    def is_branch_push_allowed(self, branch_name: str) -> bool:
+    def is_branch_push_allowed(
+        self,
+        branch_name: str,
+        allow_distro_branch: bool = False,
+    ) -> bool:
         """Check if branch name matches allowed patterns and does not match blocked base branches."""
         if not branch_name or '..' in branch_name or '//' in branch_name:
             return False
 
-        # 1. Built-in hard invariant check: Never push to base distro branches
-        for blocked_pat in DEFAULT_BLOCKED_BRANCH_PATTERNS:
-            if re.match(blocked_pat, branch_name):
-                return False
+        if not allow_distro_branch:
+            # 1. Built-in hard invariant check: Never push to base distro branches on upstream/own repos
+            for blocked_pat in DEFAULT_BLOCKED_BRANCH_PATTERNS:
+                if re.match(blocked_pat, branch_name):
+                    return False
 
-        # 2. Check user-configured blocked patterns
-        for blocked_pat in self.git_push.blocked_branch_patterns:
-            if re.match(blocked_pat, branch_name):
-                return False
+            # 2. Check user-configured blocked patterns
+            for blocked_pat in self.git_push.blocked_branch_patterns:
+                if re.match(blocked_pat, branch_name):
+                    return False
 
         # 3. Check allowed branch patterns
         for allowed_pat in self.git_push.allowed_branch_patterns:
@@ -133,25 +138,30 @@ class HarnessPolicy:
         Returns:
             (is_allowed: bool, reason: str, requires_approval: bool)
         """
-        # 1. Invariant: Check base and blocked branch patterns
-        for blocked_pat in DEFAULT_BLOCKED_BRANCH_PATTERNS:
-            if re.match(blocked_pat, branch_name):
-                return (
-                    False,
-                    f"Direct push to protected base branch '{branch_name}' is forbidden by safety policy.",
-                    False,
-                )
+        is_ext_fork = bool(repo_full_name and self.is_external_fork(repo_full_name))
 
-        for blocked_pat in self.git_push.blocked_branch_patterns:
-            if re.match(blocked_pat, branch_name):
-                return (
-                    False,
-                    f"Push to branch '{branch_name}' is blocked by configured policy.",
-                    False,
-                )
+        # 1. Invariant: Check base and blocked branch patterns on non-external-fork repositories.
+        # External contributors often open PRs directly from their fork's 'rolling' or 'main' branch;
+        # pushing to an external contributor fork is gated by maintainer approval in step 4.
+        if not is_ext_fork:
+            for blocked_pat in DEFAULT_BLOCKED_BRANCH_PATTERNS:
+                if re.match(blocked_pat, branch_name):
+                    return (
+                        False,
+                        f"Direct push to protected base branch '{branch_name}' is forbidden by safety policy.",
+                        False,
+                    )
+
+            for blocked_pat in self.git_push.blocked_branch_patterns:
+                if re.match(blocked_pat, branch_name):
+                    return (
+                        False,
+                        f"Push to branch '{branch_name}' is blocked by configured policy.",
+                        False,
+                    )
 
         # 2. Check branch allowed patterns
-        if not self.is_branch_push_allowed(branch_name):
+        if not self.is_branch_push_allowed(branch_name, allow_distro_branch=is_ext_fork):
             return (
                 False,
                 f"Branch '{branch_name}' does not match allowed branch naming patterns.",

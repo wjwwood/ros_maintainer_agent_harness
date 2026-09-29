@@ -580,11 +580,16 @@ def build_task_conversation_prompt(
    - *(Fallback if running in an agent without `PreToolUse` hooks)*: Use the MCP tool
      `exec_in_session(session_id="{session_id}", command="...")` or
      `ros-maintainer-harness -w {ws_str} session exec {session_id} -- "..."`.
-4. **Log Milestones & Session Status**:
+4. **Log Milestones, Session Status, Git Push & CI**:
    - Record progress milestones to `timeline.md` using `log_status(session_id="{session_id}", ...)`
      (or `ros-session-status -m "Milestone" "Details"` inside the container).
    - Update the session state using `update_session_status(session_id="{session_id}", status="...")`
+     or `ros-maintainer-harness -w {ws_str} session status {session_id} --set-status <status>`
      (`investigating`, `local_tests_passing`, `waiting_for_ci`, `needs_review`, `ready_to_merge`, `blocked`, `done`).
+   - For policy-guarded remote pushes and Jenkins CI runs, use the MCP tools (`git_push`, `launch_jenkins_ci`,
+     `get_ci_status`, `get_ci_summary`, `find_restarted_ci`) or their host CLI equivalents:
+     - `ros-maintainer-harness -w {ws_str} git-push -s {session_id} -b <branch> --remote <remote> -m "<reason>"`
+     - `ros-maintainer-harness -w {ws_str} ci launch -s {session_id} --pr <pr_url> --packages <pkgs> --comment -m "..."`
 {hub_section}{extra_section}"""
 
 

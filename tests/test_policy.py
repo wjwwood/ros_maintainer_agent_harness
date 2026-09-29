@@ -129,6 +129,28 @@ class TestPolicyValidation(unittest.TestCase):
         self.assertTrue(requires_approval)
         self.assertIn("requires maintainer approval", msg)
 
+        # External fork where contributor opened PR from their fork's 'rolling' or 'main' branch
+        for distro_branch in ('rolling', 'jazzy', 'main'):
+            allowed_fork, msg_fork, req_appr_fork = self.policy.validate_git_push(
+                branch_name=distro_branch, repo_full_name='ciandonovan/launch'
+            )
+            self.assertTrue(allowed_fork)
+            self.assertTrue(req_appr_fork)
+            self.assertIn("requires maintainer approval", msg_fork)
+
+            # Still strictly blocked on maintainer's own fork or official upstream repos
+            allowed_own, msg_own, _ = self.policy.validate_git_push(
+                branch_name=distro_branch, repo_full_name='wjwwood/launch'
+            )
+            self.assertFalse(allowed_own)
+            self.assertIn("forbidden by safety policy", msg_own)
+
+        # Malformed branch names are still rejected even on external contributor forks
+        allowed_bad, _, _ = self.policy.validate_git_push(
+            branch_name='-option-injection', repo_full_name='ciandonovan/launch'
+        )
+        self.assertFalse(allowed_bad)
+
     def test_force_push_without_lease_blocked(self):
         allowed, msg, _ = self.policy.validate_git_push(
             branch_name='wjwwood/fix',
