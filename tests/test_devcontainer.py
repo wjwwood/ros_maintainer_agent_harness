@@ -16,11 +16,18 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 from ros_maintainer_agent_harness.devcontainer import (
+    check_token_and_environment,
     DEFAULT_DISTRO_IMAGES,
+    exec_in_session_container,
     generate_devcontainer_config,
     get_image_for_distro,
+    load_workspace_env,
+    save_workspace_env_var,
+    start_session_container,
+    stop_session_container,
     write_devcontainer_config,
 )
 from ros_maintainer_agent_harness.workspace import WorkspaceLayout
@@ -60,10 +67,12 @@ class TestDevcontainer(unittest.TestCase):
             self.assertEqual(config['containerEnv']['ROS_MAINTAINER_SESSION_ID'], 'session-pr-160')
             self.assertIn('--add-host=host.docker.internal:host-gateway', config['runArgs'])
 
-            # Verify mount of maintainer_rules.md
+            # Verify mount of maintainer_rules.md and shared_repos
             mounts = config['mounts']
             rules_mount = any('MAINTAINER_RULES.md' in m for m in mounts)
+            shared_mount = any('shared_repos' in m for m in mounts)
             self.assertTrue(rules_mount)
+            self.assertTrue(shared_mount)
 
     def test_write_devcontainer_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -89,3 +98,84 @@ class TestDevcontainer(unittest.TestCase):
 
             self.assertEqual(data['containerEnv']['ROS_MAINTAINER_GATEWAY_URL'], 'http://192.168.1.5:8765')
             self.assertEqual(data['containerEnv']['ROS_DISTRO'], 'rolling')
+
+    def test_env_and_doctor_checks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = Path(temp_dir)
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+
+            with patch.dict('os.environ', {}, clear=True):
+                report = check_token_and_environment(ws_root)
+                self.assertFalse(report['container_token_configured'])
+                self.assertEqual(report['container_token_mode'], 'unconfigured')
+
+                # Save explicit no-token mode
+                save_workspace_env_var(ws_root, 'ROS_CONTAINER_GITHUB_TOKEN', 'none')
+                loaded = load_workspace_env(ws_root)
+                self.assertEqual(loaded.get('ROS_CONTAINER_GITHUB_TOKEN'), 'none')
+
+                report2 = check_token_and_environment(ws_root)
+                self.assertTrue(report2['container_token_configured'])
+                self.assertEqual(report2['container_token_mode'], 'none')
+
+                # Save a read-only token
+                save_workspace_env_var(ws_root, 'ROS_CONTAINER_GITHUB_TOKEN', 'github_pat_readonly123')
+                report3 = check_token_and_environment(ws_root)
+                self.assertTrue(report3['container_token_configured'])
+                self.assertEqual(report3['container_token_mode'], 'token')
+
+    def test_container_lifecycle_helpers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = Path(temp_dir)
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+            session_dir = ws_root / 'sessions' / 'session-pr-10'
+            session_dir.mkdir(parents=True, exist_ok=True)
+            save_workspace_env_var(ws_root, 'ROS_CONTAINER_GITHUB_TOKEN', 'github_pat_ro')
+
+            def fake_run(cmd, **kwargs):
+                res = MagicMock()
+                res.returncode = 0
+                if 'inspect' in cmd:
+                    res.stdout = 'false\n'
+                else:
+                    res.stdout = 'ok\n'
+                res.stderr = ''
+                return res
+
+            with patch('subprocess.run', side_effect=fake_run) as mock_run:
+                res = start_session_container(
+                    session_id='session-pr-10',
+                    session_dir=session_dir,
+                    workspace_root=ws_root,
+                    distro='rolling',
+                    runtime='docker',
+                )
+                self.assertTrue(res['success'])
+                self.assertEqual(res['status'], 'started')
+                self.assertEqual(res['container_name'], 'ros-harness-session-pr-10')
+                self.assertTrue(mock_run.called)
+
+            def fake_running(cmd, **kwargs):
+                res = MagicMock()
+                res.returncode = 0
+                if 'inspect' in cmd:
+                    res.stdout = 'true\n'
+                else:
+                    res.stdout = 'build output\n'
+                res.stderr = ''
+                return res
+
+            with patch('subprocess.run', side_effect=fake_running):
+                exec_res = exec_in_session_container(
+                    session_id='session-pr-10',
+                    command='colcon build',
+                    runtime='docker',
+                    auto_start=False,
+                )
+                self.assertTrue(exec_res['success'])
+                self.assertIn('build output', exec_res['stdout'])
+
+                stop_res = stop_session_container('session-pr-10', runtime='docker')
+                self.assertTrue(stop_res['success'])

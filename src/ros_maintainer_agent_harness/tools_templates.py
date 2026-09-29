@@ -204,6 +204,9 @@ def main():
 
     args = parse_args()
     timeline_path = Path(args.timeline_file)
+    if not timeline_path.exists() and not timeline_path.parent.exists():
+        if Path("timeline.md").exists():
+            timeline_path = Path("timeline.md")
     time_str = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S")
 
     if args.milestone:

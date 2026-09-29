@@ -15,6 +15,7 @@
 from pathlib import Path
 
 from .config import dump_default_policy_yaml, load_policy, HarnessPolicy
+from .instructions import write_workspace_agent_instructions
 from .rules import dump_default_rules_md
 from .tools_templates import (
     dump_tool_ci_for_pr,
@@ -120,6 +121,10 @@ class WorkspaceLayout:
                 with open(script_path, 'w', encoding='utf-8') as f:
                     f.write(content)
                 script_path.chmod(0o755)
+
+        # Write workspace-level agent instructions if not present
+        if not (self.root / 'AGENTS.md').exists():
+            write_workspace_agent_instructions(self.root)
 
     def get_policy(self) -> HarnessPolicy:
         """Load and return the parsed policy."""

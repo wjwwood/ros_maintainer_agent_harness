@@ -90,40 +90,43 @@ We strongly recommend creating a **Fine-Grained Personal Access Token (PAT)** wi
 
 ## 4. Providing the Read-Only Token to Containers
 
-Once generated, you can supply the read-only token to your session containers:
+Once generated, configure the token in your maintainer workspace using `token-setup`:
 
-### Method A: Host Environment Variable (Recommended)
-Add the token to your shell profile (e.g. `~/.bashrc` or `~/.zshrc`) under a distinct name:
-
-```bash
-export ROS_MAINTAINER_CONTAINER_GITHUB_TOKEN="github_pat_yourReadOnlyTokenHere"
-```
-
-When generating or editing `.devcontainer/devcontainer.json`, forward this variable into the container environment:
-
-```json
-"containerEnv": {
-  "GITHUB_TOKEN": "${localEnv:ROS_MAINTAINER_CONTAINER_GITHUB_TOKEN}"
-}
-```
-
-### Method B: Session `.env` File
-You can also place a `.env` file in the session directory (`sessions/<session_id>/.env`):
+### Method A: Workspace `.env` via `token-setup` (Recommended)
+Run the built-in `token-setup` command to store the token in `<workspace>/.env` with `0600` permissions:
 
 ```bash
-GITHUB_TOKEN=github_pat_yourReadOnlyTokenHere
+ros-maintainer-harness -w ~/maintainer_ws token-setup --container-token "github_pat_yourReadOnlyTokenHere"
 ```
 
-Docker and devcontainer runners will automatically load variables from `.env`.
+Or if you want to explicitly run containers without a GitHub token (unauthenticated mode):
+
+```bash
+ros-maintainer-harness -w ~/maintainer_ws token-setup --no-token
+```
+
+You can verify your token configuration at any time (and check that your container token does not accidentally match your host `gh auth token`) by running:
+
+```bash
+ros-maintainer-harness -w ~/maintainer_ws doctor
+```
+
+### Method B: Host Environment Variable
+You can also export `ROS_CONTAINER_GITHUB_TOKEN` in your shell profile (`~/.bashrc` or `~/.zshrc`):
+
+```bash
+export ROS_CONTAINER_GITHUB_TOKEN="github_pat_yourReadOnlyTokenHere"
+```
+
+When `ros-maintainer-harness session up <session_id>` starts a session container, it automatically reads `ROS_CONTAINER_GITHUB_TOKEN` from the environment or `<workspace>/.env` and injects it into the container as `GITHUB_TOKEN`.
 
 ---
 
 ## 5. What if No Token is Provided?
 
-If you do not provide a token to the container:
-- The agent can still clone and fetch public GitHub repositories via unauthenticated HTTPS (`https://github.com/ros2/rclcpp.git`).
-- However, GitHub limits unauthenticated REST API requests to **60 requests per hour per IP address**.
-- If the agent runs multiple API queries or inspects several PRs, it may hit rate-limiting errors (`403 API rate limit exceeded`).
+If `ROS_CONTAINER_GITHUB_TOKEN` is not configured:
+- AI agents following the workspace `AGENTS.md` / `GEMINI.md` rules will **stop and prompt you** during pre-flight checks (`doctor` / `check_environment`) rather than silently passing your host `gh` token into the container.
+- If you opt into unauthenticated mode (`token-setup --no-token`), the container can still clone and fetch public GitHub repositories via HTTPS (`https://github.com/ros2/rclcpp.git`), but GitHub limits unauthenticated REST API requests to **60 requests per hour per IP address**.
 
 Supplying a read-only fine-grained token increases this limit to **5,000 requests per hour** (see the [GitHub REST API rate limits documentation](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#primary-rate-limit-for-authenticated-users)) while keeping write operations blocked.
 
@@ -133,5 +136,5 @@ Supplying a read-only fine-grained token increases this limit to **5,000 request
 
 - **Never mount `~/.config/gh` or `~/.git-credentials`** into the container.
 - **Never mount host SSH private keys (`~/.ssh`)** into the container.
-- **Use short expirations** (30–90 days) for container tokens and rotate them periodically.
+- **Use short expirations** (30 to 90 days) for container tokens and rotate them periodically.
 - **Review audit logs**: Periodically inspect `audit/audit.jsonl` on the host to review what actions the gateway performed on behalf of the agent.

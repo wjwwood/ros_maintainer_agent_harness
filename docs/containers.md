@@ -87,7 +87,8 @@ The harness uses **Linked Git Worktrees** and volume bind mounts to keep session
 HOST DIRECTORY                                      CONTAINER MOUNT
 ~/ros_maintainer_ws/
 ├── config/maintainer_rules.md ─────────────────►  /workspace/MAINTAINER_RULES.md (ro)
-├── tools/ ─────────────────────────────────────►  /workspace/tools/ (ro)
+├── tools/ ─────────────────────────────────────►  /workspace/tools/
+├── shared_repos/ ──────────────────────────────►  ~/ros_maintainer_ws/shared_repos/
 └── sessions/pr-rclcpp-160/ ────────────────────►  /workspace/
     ├── src/                                       /workspace/src/
     ├── build/                                     /workspace/build/
@@ -97,13 +98,28 @@ HOST DIRECTORY                                      CONTAINER MOUNT
     └── timeline.md                                /workspace/timeline.md
 ```
 
-### Why Linked Git Worktrees?
+### Why Linked Git Worktrees & the `shared_repos/` Mount?
 Instead of making a full `git clone` for each session (which duplicates gigabytes of `.git/objects` history for large repositories like `ros2/rclcpp`), the harness maintains a central repository clone in `shared_repos/`.
 
 When a session is created:
-1. The harness fetches the PR ref into `shared_repos/<org>/<repo>`.
+1. The harness fetches the PR ref into `shared_repos/<repo>`.
 2. It links a new git worktree into `sessions/<id>/src/<repo>`.
-3. The worktree shares the underlying git object database while having an independent checkout branch and index.
+3. Because a git worktree's `.git` file points to the absolute host path of `shared_repos/<repo>/.git/worktrees/...`, the container also bind-mounts `shared_repos/` at its exact host path so `git status`, `git diff`, and `git commit` work seamlessly inside the container.
+
+### Managing Session Containers from the CLI or MCP
+You can start, execute commands in, and stop a session's container directly from the host CLI (or via the corresponding MCP tools `start_session_container`, `exec_in_session`, and `stop_session_container`):
+
+```bash
+# Start the detached session container (ros-harness-<session_id>)
+ros-maintainer-harness session up pr-rclcpp-160
+
+# Execute build and test commands inside the container
+ros-maintainer-harness session exec pr-rclcpp-160 -- "colcon build --symlink-install"
+ros-maintainer-harness session exec pr-rclcpp-160 -- "colcon test --event-handlers console_direct+"
+
+# Stop and remove the session container when finished
+ros-maintainer-harness session down pr-rclcpp-160
+```
 
 ---
 

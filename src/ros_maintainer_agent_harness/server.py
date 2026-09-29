@@ -35,6 +35,12 @@ except ImportError:
 
 from .approval import ApprovalManager
 from .ci import CIMonitorService, CITracker, JenkinsManager
+from .devcontainer import (
+    check_token_and_environment,
+    exec_in_session_container as do_exec_in_session_container,
+    start_session_container as do_start_session_container,
+    stop_session_container as do_stop_session_container,
+)
 from .git_ops import (
     execute_git_push,
     extract_repo_full_name,
@@ -929,10 +935,118 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
                 clone_if_missing=clone_if_missing,
             )
             data = result.to_dict()
+            env_check = check_token_and_environment(workspace.root)
+            data['environment_ready'] = env_check['ready']
+            data['container_token_configured'] = env_check['container_token_configured']
+            if env_check['warnings']:
+                data['environment_warnings'] = env_check['warnings']
             data['success'] = True
             return data
         except Exception as e:
             return {'success': False, 'error': str(e)}
+
+    # 21. check_environment
+    @server.tool()
+    def check_environment() -> Dict[str, Any]:
+        """
+        Check workspace readiness: initialization, container runtime (docker/podman),
+        GitHub token setup (ROS_CONTAINER_GITHUB_TOKEN), and global MCP registration.
+
+        Call this tool FIRST before scaffolding sessions or starting containers.
+        If `container_token_configured` is False, prompt the user to configure their token
+        with `ros-maintainer-harness token-setup` before proceeding.
+        """
+        return check_token_and_environment(workspace.root)
+
+    # 22. start_session_container
+    @server.tool()
+    def start_session_container(
+        session_id: str,
+        distro: Optional[str] = None,
+        custom_image: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Start a detached sandbox container (`ros-harness-<session_id>`) for the given session
+        so builds and tests can run in isolation rather than on the host OS.
+
+        Args:
+            session_id: Session identifier.
+            distro: Optional ROS distro override (defaults to session's configured distro).
+            custom_image: Optional custom container image override.
+        """
+        if not session_mgr.session_exists(session_id):
+            return {'success': False, 'error': f"Session '{session_id}' not found."}
+
+        session_dir = session_mgr.get_session_dir(session_id)
+        info = session_mgr.get_session_info(session_id)
+        target_distro = distro or (info.distro if info and info.distro else 'rolling')
+
+        res = do_start_session_container(
+            session_id=session_id,
+            session_dir=session_dir,
+            workspace_root=workspace.root,
+            distro=target_distro,
+            custom_image=custom_image,
+        )
+        if res.get('success'):
+            timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
+            timeline.log_status(
+                f"Started session sandbox container `{res.get('container_name')}` (distro: `{target_distro}`)."
+            )
+        return res
+
+    # 23. exec_in_session
+    @server.tool()
+    def exec_in_session(
+        session_id: str,
+        command: str,
+        workdir: str = '/workspace',
+        timeout_seconds: int = 600,
+        auto_start: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Execute a shell command (such as `colcon build` or `colcon test`) inside the session's
+        isolated sandbox container (`ros-harness-<session_id>`), with the ROS 2 environment
+        and `/workspace/install/setup.bash` automatically sourced.
+
+        Host-based agents and subagents MUST use this tool (or `ros-maintainer-harness session exec`)
+        for all compilation and test execution instead of running commands directly on the host OS.
+
+        Args:
+            session_id: Session identifier.
+            command: Shell command string to execute inside the container.
+            workdir: Working directory inside the container (default: '/workspace').
+            timeout_seconds: Command timeout in seconds (default: 600).
+            auto_start: Automatically start the session container if it is not already running.
+        """
+        if not session_mgr.session_exists(session_id):
+            return {'success': False, 'error': f"Session '{session_id}' not found."}
+
+        session_dir = session_mgr.get_session_dir(session_id)
+        info = session_mgr.get_session_info(session_id)
+        target_distro = info.distro if info and info.distro else 'rolling'
+
+        return do_exec_in_session_container(
+            session_id=session_id,
+            command=command,
+            workdir=workdir,
+            timeout=timeout_seconds,
+            auto_start=auto_start,
+            session_dir=session_dir,
+            workspace_root=workspace.root,
+            distro=target_distro,
+        )
+
+    # 24. stop_session_container
+    @server.tool()
+    def stop_session_container(session_id: str) -> Dict[str, Any]:
+        """
+        Stop and remove the sandbox container (`ros-harness-<session_id>`) for a session.
+
+        Args:
+            session_id: Session identifier.
+        """
+        return do_stop_session_container(session_id=session_id)
 
     return server
 
