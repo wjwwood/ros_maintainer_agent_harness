@@ -346,8 +346,9 @@ class TestCLI(unittest.TestCase):
 
             sess_dir = Path(ws_root) / 'sessions' / 'sess-1'
             self.assertTrue((sess_dir / 'AGENTS.md').is_file())
-            self.assertTrue((sess_dir / 'GEMINI.md').is_file())
+            self.assertFalse((sess_dir / 'GEMINI.md').exists())
             self.assertTrue((sess_dir / 'CLAUDE.md').is_file())
+            self.assertEqual((sess_dir / 'CLAUDE.md').read_text(encoding='utf-8').strip(), '@AGENTS.md')
 
             with patch('ros_maintainer_agent_harness.cli.start_session_container') as mock_up:
                 mock_up.return_value = {

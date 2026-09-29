@@ -1,6 +1,6 @@
 # Using Antigravity & Gemini with the Harness
 
-Antigravity and Gemini CLI provide agentic workflows that integrate natively with the Model Context Protocol (MCP) and automatically discover workspace rule files (`GEMINI.md` and `AGENTS.md`).
+Antigravity and Gemini CLI provide agentic workflows that integrate natively with the Model Context Protocol (MCP) and automatically discover workspace rule files (`AGENTS.md`).
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ Antigravity and Gemini CLI provide agentic workflows that integrate natively wit
 Before starting a conversation in Antigravity or Gemini, initialize your maintainer workspace, configure your container token, and register the MCP server globally:
 
 ```bash
-# 1. Initialize workspace (writes config/, tools/, AGENTS.md, GEMINI.md, CLAUDE.md)
+# 1. Initialize workspace (writes config/, tools/, AGENTS.md, CLAUDE.md)
 ros-maintainer-harness -w ~/maintainer_ws init
 
 # 2. Configure container GitHub token (or pass --no-token for unauthenticated mode)
@@ -43,17 +43,17 @@ You can start an Antigravity or Gemini conversation in either of two ways:
    ```bash
    ros-maintainer-harness -w ~/maintainer_ws session launch pr-rclcpp-160 --agent antigravity
    ```
-   Because `sessions/pr-rclcpp-160/` contains auto-generated `GEMINI.md`, `AGENTS.md`, and `TASK.md` files, Antigravity automatically loads the session rules on startup.
+   Because `sessions/pr-rclcpp-160/` contains auto-generated `AGENTS.md` and `TASK.md` files, Antigravity automatically loads the session rules on startup.
 
 ### Option B: Open the Maintainer Workspace Root (Multi-PR Coordinator & Subagents)
 
 1. Open `~/maintainer_ws` (or this repository) as your workspace in Antigravity.
-2. Antigravity automatically discovers `GEMINI.md` and `AGENTS.md` at the workspace root.
+2. Antigravity automatically discovers `AGENTS.md` at the workspace root.
 3. Prompt the agent naturally, for example:
    ```text
    Use the maintainer harness in ~/maintainer_ws to review and test PR ros2/rclcpp#160.
    ```
-4. Following the rules in `GEMINI.md` and `AGENTS.md`, the agent will:
+4. Following the rules in `AGENTS.md`, the agent will:
    - Run `check_environment` / `ros-maintainer-harness doctor` first (and prompt you if `ROS_CONTAINER_GITHUB_TOKEN` has not been configured yet).
    - Scaffold the session via `scaffold_session_from_pr`.
    - Inspect the PR diff in `sessions/<id>/src/<repo>` for security issues before building.

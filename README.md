@@ -63,7 +63,7 @@ Prerequisites:
 Initialize the maintainer directory structure, configure your container GitHub token (see [GitHub Token Setup](docs/github_tokens.md)), and register the MCP server with your host agent:
 
 ```bash
-# 1. Initialize workspace (generates config/, tools/, AGENTS.md, GEMINI.md, CLAUDE.md)
+# 1. Initialize workspace (generates config/, tools/, AGENTS.md, CLAUDE.md)
 ros-maintainer-harness -w ~/maintainer_ws init
 
 # 2. Configure a read-only fine-grained PAT for containers (or pass --no-token)
@@ -90,7 +90,7 @@ This single command:
 - Clones the target repository into `shared_repos/` if not already present.
 - Creates a new linked git worktree in `sessions/pr-rclcpp-160/src/rclcpp`.
 - Generates `.devcontainer/devcontainer.json` configured for that ROS distribution (including mounting `shared_repos/` so worktree git pointers resolve inside the container).
-- Writes editor/agent MCP configs (`mcp.json`, `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/mcp_config.json`) and auto-discovered agent rule files (`AGENTS.md`, `GEMINI.md`, `CLAUDE.md`).
+- Writes editor/agent MCP configs (`mcp.json`, `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/mcp_config.json`) and auto-discovered agent rule files (`AGENTS.md` and `CLAUDE.md`).
 - Pre-populates `timeline.md` and generates a structured `TASK.md` goal prompt for the agent.
 
 #### 3. Run builds & tests in the session container or launch an agent

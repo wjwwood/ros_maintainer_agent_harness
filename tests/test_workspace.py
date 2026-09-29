@@ -43,8 +43,9 @@ class TestWorkspaceLayout(unittest.TestCase):
             self.assertTrue(layout.tools_readme_path.is_file())
             self.assertTrue(layout.tools_requirements_path.is_file())
             self.assertTrue((ws_root / 'AGENTS.md').is_file())
-            self.assertTrue((ws_root / 'GEMINI.md').is_file())
+            self.assertFalse((ws_root / 'GEMINI.md').exists())
             self.assertTrue((ws_root / 'CLAUDE.md').is_file())
+            self.assertEqual((ws_root / 'CLAUDE.md').read_text(encoding='utf-8').strip(), '@AGENTS.md')
 
             # Verify policy loading
             policy = layout.get_policy()

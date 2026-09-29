@@ -76,7 +76,7 @@ def handle_init(args: argparse.Namespace) -> int:
     print(f"  - Repos:     {layout.shared_repos_dir}")
     print(f"  - Sessions:  {layout.sessions_dir}")
     print(f"  - Audit log: {layout.audit_dir}")
-    print(f"  - Agent instructions: {ws_path / 'AGENTS.md'} (+ GEMINI.md, CLAUDE.md)")
+    print(f"  - Agent instructions: {ws_path / 'AGENTS.md'} (+ CLAUDE.md)")
     return 0
 
 

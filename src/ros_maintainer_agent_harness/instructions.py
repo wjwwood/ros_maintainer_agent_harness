@@ -275,15 +275,14 @@ def get_session_agent_instructions(
 
 
 def write_workspace_agent_instructions(workspace_root: Path) -> Dict[str, Path]:
-    """Write AGENTS.md, GEMINI.md, and CLAUDE.md in the workspace root directory."""
+    """Write AGENTS.md and CLAUDE.md (@AGENTS.md) in the workspace root directory."""
     ws_root = workspace_root.resolve()
     content = get_workspace_coordinator_instructions(ws_root)
-    written: Dict[str, Path] = {}
-    for filename in ('AGENTS.md', 'GEMINI.md', 'CLAUDE.md'):
-        target = ws_root / filename
-        target.write_text(content, encoding='utf-8')
-        written[filename] = target
-    return written
+    agents_file = ws_root / 'AGENTS.md'
+    agents_file.write_text(content, encoding='utf-8')
+    claude_file = ws_root / 'CLAUDE.md'
+    claude_file.write_text('@AGENTS.md\n', encoding='utf-8')
+    return {'AGENTS.md': agents_file, 'CLAUDE.md': claude_file}
 
 
 def write_session_agent_instructions(
@@ -292,7 +291,7 @@ def write_session_agent_instructions(
     workspace_root: Path,
     distro: str = 'rolling',
 ) -> Dict[str, Path]:
-    """Write AGENTS.md, GEMINI.md, and CLAUDE.md in a session directory."""
+    """Write AGENTS.md and CLAUDE.md (@AGENTS.md) in a session directory."""
     sess_dir = session_dir.resolve()
     content = get_session_agent_instructions(
         session_id=session_id,
@@ -300,9 +299,9 @@ def write_session_agent_instructions(
         workspace_root=workspace_root.resolve(),
         distro=distro,
     )
-    written: Dict[str, Path] = {}
-    for filename in ('AGENTS.md', 'GEMINI.md', 'CLAUDE.md'):
-        target = sess_dir / filename
-        target.write_text(content, encoding='utf-8')
-        written[filename] = target
-    return written
+    agents_file = sess_dir / 'AGENTS.md'
+    agents_file.write_text(content, encoding='utf-8')
+    claude_file = sess_dir / 'CLAUDE.md'
+    claude_file.write_text('@AGENTS.md\n', encoding='utf-8')
+    return {'AGENTS.md': agents_file, 'CLAUDE.md': claude_file}
+
