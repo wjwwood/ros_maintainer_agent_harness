@@ -186,20 +186,6 @@ class TestContainerHooks(unittest.TestCase):
         }
         self.assertEqual(evaluate_pre_tool_use(win_payload, workspace_root=self.ws_root), {})
 
-        # Multiline docker exec command should also be recognized as passthrough
-        docker_multiline_payload = {
-            'conversationId': 'spoke-conv-1234',
-            'workspacePaths': [str(self.ws_root)],
-            'toolCall': {
-                'name': 'run_command',
-                'arguments': {
-                    'CommandLine': 'docker exec ros-harness-pr-rclcpp-160 python3 -c "import sys\nprint(sys.version)"',
-                    'Cwd': str(self.session.session_dir),
-                },
-            },
-        }
-        self.assertEqual(evaluate_pre_tool_use(docker_multiline_payload, workspace_root=self.ws_root), {})
-
         env_payload = {
             'conversationId': 'spoke-conv-1234',
             'workspacePaths': [str(self.ws_root)],
@@ -212,6 +198,104 @@ class TestContainerHooks(unittest.TestCase):
             },
         }
         self.assertEqual(evaluate_pre_tool_use(env_payload, workspace_root=self.ws_root), {})
+
+    def test_session_guardrails_block_circumvention_and_debugging(self):
+        # 1. Direct docker command in session is denied
+        docker_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': 'docker exec ros-harness-pr-rclcpp-160 python3 -c "print(1)"',
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        res_docker = evaluate_pre_tool_use(docker_payload, workspace_root=self.ws_root)
+        self.assertEqual(res_docker['decision'], 'deny')
+        self.assertIn("Direct 'docker' invocation is disabled", res_docker['reason'])
+
+        # 2. Subshell command substitution attempting to piggyback on docker or harness is denied/not passthrough
+        subshell_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': 'docker --version >/dev/null && echo "$(/usr/bin/python3 -c \'import os\')"',
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        res_sub = evaluate_pre_tool_use(subshell_payload, workspace_root=self.ws_root)
+        self.assertEqual(res_sub['decision'], 'deny')
+
+        # 3. Direct ci_for_pr.py or gh auth token in session is denied
+        ci_script_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': 'python3 /home/user/ros-github-scripts/ci_for_pr.py 160',
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        res_ci = evaluate_pre_tool_use(ci_script_payload, workspace_root=self.ws_root)
+        self.assertEqual(res_ci['decision'], 'deny')
+        self.assertIn('ci_for_pr.py', res_ci['reason'])
+
+        gh_tok_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': 'gh auth token',
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        res_tok = evaluate_pre_tool_use(gh_tok_payload, workspace_root=self.ws_root)
+        self.assertEqual(res_tok['decision'], 'deny')
+        self.assertIn('gh auth token', res_tok['reason'])
+
+        # 4. Reading harness source files, mcp_config.json, hooks.json, or transcripts in session is denied
+        for blocked_path in (
+            '/home/user/ros-maintainer-agent-harness/src/ros_maintainer_agent_harness/ci.py',
+            '/home/user/ros-github-scripts/ros_github_scripts/ci_for_pr.py',
+            '/home/user/.gemini/config/mcp_config.json',
+            '/home/user/.gemini/config/hooks.json',
+            '/home/user/.gemini/brain/1234/transcript.jsonl',
+        ):
+            view_payload = {
+                'conversationId': 'spoke-conv-1234',
+                'workspacePaths': [str(self.ws_root)],
+                'toolCall': {
+                    'name': 'view_file',
+                    'arguments': {
+                        'AbsolutePath': blocked_path,
+                    },
+                },
+            }
+            res_view = evaluate_pre_tool_use(view_payload, workspace_root=self.ws_root)
+            self.assertEqual(res_view.get('decision'), 'deny', f"Expected deny for {blocked_path}")
+            self.assertIn('STOP immediately and ask the user for help', res_view.get('reason', ''))
+
+        # 5. Reading legitimate session repository files is allowed
+        allowed_view_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'view_file',
+                'arguments': {
+                    'AbsolutePath': str(self.session.src_dir / 'rclcpp' / 'CMakeLists.txt'),
+                },
+            },
+        }
+        self.assertEqual(evaluate_pre_tool_use(allowed_view_payload, workspace_root=self.ws_root), {})
 
     def test_uncontainerized_host_colcon_denied_outside_session(self):
         payload = {

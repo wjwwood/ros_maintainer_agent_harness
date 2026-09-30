@@ -215,7 +215,7 @@ def perform_git_push(
 def perform_launch_jenkins_ci(
     workspace: WorkspaceLayout,
     session_id: str,
-    pr_url: str,
+    pr_url: str = '',
     target_distro: Optional[str] = None,
     job_type: Optional[str] = None,
     only_fixes_test: bool = False,
@@ -240,6 +240,23 @@ def perform_launch_jenkins_ci(
         }
 
     session_dir = workspace.sessions_dir / session_id
+    meta = read_session_metadata(session_dir) if session_dir.is_dir() else {}
+    if not pr_url or not pr_url.strip():
+        pr_url = str(meta.get('pr_url') or meta.get('pr_ref') or '').strip()
+    if not pr_url:
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': 'PR URL or shorthand could not be resolved from session metadata; please pass `pr_url`.',
+        }
+    if not target_distro and meta.get('distro'):
+        target_distro = str(meta['distro'])
+    if not packages and session_dir.is_dir():
+        from .ci import detect_session_packages
+        detected_pkgs = detect_session_packages(session_dir)
+        if detected_pkgs:
+            packages = detected_pkgs
+
     timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
     policy = workspace.get_policy()
     approval_mgr = approval_mgr or ApprovalManager(workspace.audit_dir / 'approvals.json')
@@ -310,6 +327,7 @@ def perform_launch_jenkins_ci(
         'child_jobs': res.get('child_jobs'),
         'comment_markdown': res.get('comment_markdown'),
         'comment_url': res.get('comment_url'),
+        'packages': res.get('packages'),
         'details': res,
     }
 
@@ -507,7 +525,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
     @server.tool()
     def launch_jenkins_ci(
         session_id: str,
-        pr_url: str,
+        pr_url: str = '',
         target_distro: Optional[str] = None,
         job_type: Optional[str] = None,
         only_fixes_test: bool = False,
@@ -526,11 +544,11 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
 
         Args:
             session_id: Active session identifier.
-            pr_url: GitHub PR URL or shorthand (e.g. 'ros2/rclcpp#160').
-            target_distro: Target ROS 2 distro (e.g. 'rolling', 'jazzy').
+            pr_url: Optional GitHub PR URL or shorthand (auto-detected from session metadata if omitted).
+            target_distro: Optional target ROS 2 distro (auto-detected from session metadata if omitted).
             job_type: Jenkins launcher job type (default: 'ci_launcher').
             only_fixes_test: Whether to run only tests affected by the PR.
-            packages: Optional list of ROS package names to build/test (e.g. ['launch']).
+            packages: Optional list of ROS package names to build/test (auto-detected from session worktree if omitted).
             colcon_build_args: Additional colcon build arguments.
             colcon_test_args: Additional colcon test arguments.
             cmake_args: Additional CMake arguments passed to colcon build.

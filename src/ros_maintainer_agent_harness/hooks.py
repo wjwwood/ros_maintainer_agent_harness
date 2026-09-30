@@ -24,12 +24,9 @@ from .worktree import read_session_metadata
 HOST_PASSTHROUGH_BINARIES = {
     'ros-maintainer-harness',
     'agentapi',
-    'docker',
-    'podman',
     'export',
     'true',
     'false',
-    'echo',
 }
 
 
@@ -233,10 +230,46 @@ def _split_top_level_segments(command_line: str, include_pipe: bool = False) -> 
     return segments
 
 
+def _contains_shell_substitution(command_line: str) -> bool:
+    """Return True if `command_line` contains `$(`, backticks, or process substitution outside single quotes."""
+    in_single = False
+    in_double = False
+    escaped = False
+    i = 0
+    n = len(command_line)
+    while i < n:
+        ch = command_line[i]
+        if escaped:
+            escaped = False
+            i += 1
+            continue
+        if ch == '\\' and not in_single:
+            escaped = True
+            i += 1
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_single and not in_double
+            i += 1
+            continue
+        if not in_single:
+            if ch == '`':
+                return True
+            if command_line.startswith('$(', i):
+                return True
+            if not in_double and (command_line.startswith('<(', i) or command_line.startswith('>(', i)):
+                return True
+        i += 1
+    return False
+
+
 def is_host_passthrough_command(command_line: str) -> bool:
     """
     Return True if `command_line` is purely a host-control command
-    (`ros-maintainer-harness`, `agentapi`, `docker`, `podman`) that should run on the host
+    (`ros-maintainer-harness`, `agentapi`) that should run on the host
     without being wrapped into `session exec`.
     """
     stripped = (command_line or '').strip()
@@ -247,7 +280,10 @@ def is_host_passthrough_command(command_line: str) -> bool:
     if first_exe == 'ros-maintainer-harness' and 'session exec' in stripped:
         return True
 
-    segments = _split_top_level_segments(stripped, include_pipe=False)
+    if _contains_shell_substitution(stripped):
+        return False
+
+    segments = _split_top_level_segments(stripped, include_pipe=True)
     if not segments:
         return True
 
@@ -258,10 +294,85 @@ def is_host_passthrough_command(command_line: str) -> bool:
             continue
         if exe not in HOST_PASSTHROUGH_BINARIES:
             return False
-        if exe in ('ros-maintainer-harness', 'agentapi', 'docker', 'podman'):
+        if exe in ('ros-maintainer-harness', 'agentapi'):
             saw_control_bin = True
 
     return saw_control_bin
+
+
+def is_forbidden_session_command(command_line: str, session_id: str) -> Optional[str]:
+    """
+    Check if a command inside a maintainer session is attempting to invoke `docker`/`podman` directly,
+    extract host credentials (`gh auth token`), or bypass the harness (`ci_for_pr.py`).
+    """
+    stripped = (command_line or '').strip()
+    if not stripped:
+        return None
+
+    first_exe = _first_executable_in_segment(stripped)
+    if first_exe == 'ros-maintainer-harness' and 'session exec' in stripped:
+        return None
+
+    segments = _split_top_level_segments(stripped, include_pipe=True)
+    for seg in segments:
+        exe = _first_executable_in_segment(seg)
+        if exe in ('docker', 'podman'):
+            return (
+                f"Direct '{exe}' invocation is disabled in session '{session_id}'. "
+                f"Your shell commands are automatically routed into container 'ros-harness-{session_id}' "
+                "by the PreToolUse hook. Run 'colcon', 'pytest', 'git', or 'gh' directly without 'docker', "
+                "or use 'ros-maintainer-harness' CLI / MCP tools. If a tool or container fails, "
+                "STOP immediately and ask the user for help instead of trying to bypass or debug it."
+            )
+
+    lower_cmd = stripped.lower()
+    if 'ci_for_pr.py' in lower_cmd or 'ros-github-scripts' in lower_cmd:
+        return (
+            f"Direct invocation of 'ci_for_pr.py' or external scripts is disabled in session '{session_id}'. "
+            f"Use 'ros-maintainer-harness ci launch -s {session_id} --comment -m \"Run CI\"' or the "
+            "'launch_jenkins_ci' MCP tool. If CI launch fails, STOP immediately and ask the user for help."
+        )
+    if 'gh auth token' in lower_cmd:
+        return (
+            f"Reading host 'gh auth token' is prohibited in session '{session_id}'. "
+            "Use the MCP gateway tools ('launch_jenkins_ci', 'git_push', 'create_pull_request') for "
+            "authenticated host operations. If an MCP tool or CLI command fails, STOP immediately "
+            "and ask the user for help."
+        )
+
+    return None
+
+
+def is_forbidden_session_file_read(file_path: str, session_id: str) -> Optional[str]:
+    """
+    Check if a session agent is attempting to read harness source code, MCP/hook configs,
+    external CI scripts, or conversation transcripts to debug or circumvent the harness.
+    """
+    if not file_path:
+        return None
+    norm = file_path.replace('\\', '/')
+    basename = Path(norm).name
+
+    forbidden_Substrings = (
+        'ros_maintainer_agent_harness',
+        'ros-maintainer-agent-harness',
+        'ros-github-scripts',
+        'ci_for_pr.py',
+        'transcript.jsonl',
+        'transcript_full.jsonl',
+    )
+    forbidden_basenames = (
+        'mcp_config.json',
+        'hooks.json',
+    )
+    if any(sub in norm for sub in forbidden_Substrings) or basename in forbidden_basenames:
+        return (
+            f"Access to '{basename}' is disabled in maintainer session '{session_id}'. "
+            "Do NOT read or debug harness source code, MCP server internals, hook configurations, "
+            "or conversation transcripts. If an MCP tool or CLI command returned an error, "
+            "STOP immediately and ask the user for help with the error message."
+        )
+    return None
 
 
 def is_forbidden_uncontainerized_host_command(command_line: str) -> Optional[str]:
@@ -374,37 +485,67 @@ def evaluate_pre_tool_use(
 ) -> Dict[str, Any]:
     """
     Evaluate a `PreToolUse` hook event and transparently rewrite session shell commands
-    to execute inside the session's Docker/Podman sandbox container via `session exec`.
+    to execute inside the session's Docker/Podman sandbox container via `session exec`,
+    while blocking session attempts to circumvent the container or debug harness internals.
     """
     is_claude_format = 'tool_name' in payload and 'toolCall' not in payload
 
     if is_running_in_container():
         return {}
 
+    ws_root = workspace_root.resolve()
+
     if is_claude_format:
         tool_name = payload.get('tool_name', '')
-        if tool_name.lower() != 'bash':
-            return {}
         tool_input = payload.get('tool_input') or {}
-        command_line = tool_input.get('command', '')
         cwd = payload.get('cwd', '')
         conversation_id = payload.get('session_id', '')
         workspace_paths: List[str] = [cwd] if cwd else []
+        if tool_name.lower() == 'read':
+            file_path = tool_input.get('file_path', '')
+            session_match = resolve_session_for_hook(
+                workspace_root=ws_root,
+                conversation_id=conversation_id,
+                cwd=cwd,
+                workspace_paths=workspace_paths,
+                explicit_session_id=explicit_session_id,
+            )
+            if session_match is not None:
+                deny_msg = is_forbidden_session_file_read(file_path, session_match[0])
+                if deny_msg:
+                    return _format_deny(is_claude_format, deny_msg)
+            return {}
+        if tool_name.lower() != 'bash':
+            return {}
+        command_line = tool_input.get('command', '')
     else:
         tool_call = payload.get('toolCall') or {}
         tool_name = tool_call.get('name', '')
-        if tool_name != 'run_command':
-            return {}
         args = tool_call.get('args') or tool_call.get('arguments') or {}
-        command_line = args.get('CommandLine', '')
-        cwd = args.get('Cwd', '')
         conversation_id = payload.get('conversationId', '')
         workspace_paths = payload.get('workspacePaths') or []
+        if tool_name == 'view_file':
+            file_path = args.get('AbsolutePath', '')
+            session_match = resolve_session_for_hook(
+                workspace_root=ws_root,
+                conversation_id=conversation_id,
+                cwd='',
+                workspace_paths=workspace_paths,
+                explicit_session_id=explicit_session_id,
+            )
+            if session_match is not None:
+                deny_msg = is_forbidden_session_file_read(file_path, session_match[0])
+                if deny_msg:
+                    return _format_deny(is_claude_format, deny_msg)
+            return {}
+        if tool_name != 'run_command':
+            return {}
+        command_line = args.get('CommandLine', '')
+        cwd = args.get('Cwd', '')
 
     if not command_line:
         return {}
 
-    ws_root = workspace_root.resolve()
     session_match = resolve_session_for_hook(
         workspace_root=ws_root,
         conversation_id=conversation_id,
@@ -414,7 +555,12 @@ def evaluate_pre_tool_use(
         explicit_session_id=explicit_session_id,
     )
 
-    # Allow host-control commands (`ros-maintainer-harness`, `agentapi`, `docker`) to pass through
+    if session_match is not None:
+        session_deny = is_forbidden_session_command(command_line, session_match[0])
+        if session_deny:
+            return _format_deny(is_claude_format, session_deny)
+
+    # Allow host-control commands (`ros-maintainer-harness`, `agentapi`) to pass through
     if is_host_passthrough_command(command_line):
         rewritten_cwd = None
         if cwd and (cwd == '/workspace' or cwd.startswith('/workspace/')):
@@ -472,7 +618,7 @@ def _merge_hooks_json(hooks_path: Path, hook_cmd: str) -> Path:
             data = {}
 
     entry = {
-        'matcher': 'run_command',
+        'matcher': 'run_command|view_file',
         'hooks': [
             {
                 'type': 'command',
@@ -491,7 +637,7 @@ def _merge_hooks_json(hooks_path: Path, hook_cmd: str) -> Path:
 
 
 def _merge_claude_settings_hooks(settings_path: Path, hook_cmd: str) -> Path:
-    """Create or update `.claude/settings.json` with the PreToolUse Bash container hook."""
+    """Create or update `.claude/settings.json` with the PreToolUse Bash/Read container hook."""
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     data: Dict[str, Any] = {}
     if settings_path.exists():
@@ -523,7 +669,7 @@ def _merge_claude_settings_hooks(settings_path: Path, hook_cmd: str) -> Path:
         )
     ]
     filtered.append({
-        'matcher': 'Bash',
+        'matcher': 'Bash|Read',
         'hooks': [
             {
                 'type': 'command',
