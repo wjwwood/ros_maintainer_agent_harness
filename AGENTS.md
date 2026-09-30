@@ -119,7 +119,16 @@ When modifying the harness source code or documentation in this repository:
   ```bash
   flake8 src/ tests/ --max-line-length=120 --statistics
   ```
-- **Unit Tests**: Run `pytest -v` to verify all unit tests pass.
+- **Unit Tests**: Run `pytest -v` to verify all unit tests pass (`pyproject.toml` sets `pythonpath = ["src"]` so
+  `pytest` tests the local working tree directly).
+- **Non-Editable Host Installation (Isolate Live Sessions from In-Progress Edits)**:
+  - **NEVER** install this repository in editable mode (`pip install -e .`) when live maintainer sessions exist,
+    because `PreToolUse` hooks invoke `~/.local/bin/ros-maintainer-harness` on every tool call.
+  - Only install a non-editable snapshot into `~/.local` after `pytest` and `flake8` pass (or after merging to `main`):
+    ```bash
+    pip install --user --no-build-isolation --no-deps --force-reinstall .
+    ```
 - **Commits**: Include DCO sign-off (`git commit -s`) on all commits.
 - **Documentation Tone**: Keep documentation direct, technical, and concise. Avoid em-dashes (`--` or unicode
   em-dash); use commas, colons, or parentheticals instead.
+

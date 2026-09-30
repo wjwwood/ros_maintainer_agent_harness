@@ -896,6 +896,37 @@ class JenkinsManager:
             'dry_run': dry_run,
         }
 
+    def _get_with_auth_retry(self, url: str, timeout: int) -> requests.Response:
+        """Perform a GET request and retry once with GitHub OAuth credentials if Jenkins returns 401/403."""
+        resp = self.session.get(url, timeout=timeout)
+        if resp.status_code in (401, 403) and not self.auth:
+            if self._resolve_github_auth():
+                resp = self.session.get(url, timeout=timeout)
+        return resp
+
+    def _post_with_auth_retry(self, url: str, timeout: int) -> requests.Response:
+        """Perform a POST request and retry once with GitHub OAuth and CSRF crumb if Jenkins returns 401/403."""
+        resp = self.session.post(url, timeout=timeout)
+        if resp.status_code in (401, 403) and not self.auth:
+            auth_pair = self._resolve_github_auth()
+            if auth_pair:
+                crumb_headers: Dict[str, str] = {}
+                try:
+                    crumb_resp = self.session.get(
+                        f'{self.ci_server}/crumbIssuer/api/json',
+                        timeout=10,
+                    )
+                    if crumb_resp.status_code == 200:
+                        c_data = crumb_resp.json()
+                        c_field = c_data.get('crumbRequestField') or 'Jenkins-Crumb'
+                        c_val = c_data.get('crumb')
+                        if c_val:
+                            crumb_headers[c_field] = c_val
+                except Exception:
+                    pass
+                resp = self.session.post(url, headers=crumb_headers, timeout=timeout)
+        return resp
+
     def fetch_build_status(self, job_url: str, timeout: int = 15) -> Dict[str, Any]:
         """
         Fetch build status and details from Jenkins API (<job_url>/api/json).
@@ -904,7 +935,7 @@ class JenkinsManager:
         api_url = f"{cleaned_url}/api/json"
 
         try:
-            resp = self.session.get(api_url, timeout=timeout)
+            resp = self._get_with_auth_retry(api_url, timeout=timeout)
             if resp.status_code == 200:
                 data = resp.json()
                 building = data.get('building', False)
@@ -962,7 +993,7 @@ class JenkinsManager:
         api_url = f"{cleaned_url}/testReport/api/json"
 
         try:
-            resp = self.session.get(api_url, timeout=timeout)
+            resp = self._get_with_auth_retry(api_url, timeout=timeout)
             if resp.status_code == 200:
                 data = resp.json()
                 fail_count = data.get('failCount', 0)
@@ -1033,7 +1064,7 @@ class JenkinsManager:
         log_url = f"{cleaned_url}/consoleText"
 
         try:
-            resp = self.session.get(log_url, timeout=timeout)
+            resp = self._get_with_auth_retry(log_url, timeout=timeout)
             if resp.status_code == 200:
                 lines = resp.text.splitlines()
                 # Scan for compiler and test error patterns
@@ -1096,7 +1127,7 @@ class JenkinsManager:
         cleaned_url = job_url.rstrip('/')
         stop_url = f"{cleaned_url}/stop"
         try:
-            resp = self.session.post(stop_url, timeout=timeout)
+            resp = self._post_with_auth_retry(stop_url, timeout=timeout)
             if resp.status_code in (200, 302):
                 if self.tracker:
                     self.tracker.update_run_status(job_url, 'CANCELLED')

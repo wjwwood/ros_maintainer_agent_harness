@@ -25,7 +25,7 @@ import subprocess
 from typing import Any, Dict, List, Optional
 
 from .approval import ApprovalManager
-from .ci import CITracker
+from .ci import CIMonitorService, CITracker, JenkinsManager
 from .devcontainer import (
     check_token_and_environment,
     get_container_status,
@@ -154,6 +154,18 @@ def get_workspace_status(
     session_mgr = SessionManager(workspace)
     approval_mgr = ApprovalManager(workspace.audit_dir / 'approvals.json')
     ci_tracker = CITracker(workspace.audit_dir / 'ci_runs.json')
+
+    if check_containers and ci_tracker.get_active_runs():
+        try:
+            monitor = CIMonitorService(
+                tracker=ci_tracker,
+                jenkins_mgr=JenkinsManager(tracker=ci_tracker),
+                sessions_dir=workspace.sessions_dir,
+                audit_log_path=workspace.audit_log_path,
+            )
+            monitor.poll_active_runs_once()
+        except Exception:
+            pass
 
     pending_approvals = [r.to_dict() for r in approval_mgr.list_requests(status='PENDING')]
     all_ci_runs = [r.to_dict() for r in ci_tracker.list_runs(limit=50)]
@@ -538,11 +550,13 @@ def build_task_conversation_prompt(
     hub_section = ""
     if hub_conversation_id:
         hub_section = f"""
-5. **Report Back to the Maintainer Hub Conversation**:
+6. **Report Back to the Maintainer Hub Conversation**:
    - This task was spawned from the Maintainer Hub conversation (`{hub_conversation_id}`).
    - When you finish your initial diff review, build, and test run (or if you encounter a blocker or need approval),
      send a concise status update back to the Hub conversation using `send_message`
-     (`Recipient="{hub_conversation_id}"`) or `agentapi send-message "{hub_conversation_id}" "<summary>"`
+     (`Recipient="{hub_conversation_id}"`) or:
+     `env -u ANTIGRAVITY_SOURCE_METADATA -u ANTIGRAVITY_PROJECT_ID `
+     `agentapi send-message "{hub_conversation_id}" "<summary>"`
      (if available in your agent environment).
 """
 
@@ -703,7 +717,16 @@ def start_session_conversation(
             cmd.append(f'--model={model}')
         cmd.append(task_prompt)
 
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        clean_env = dict(os.environ)
+        for key in (
+            'ANTIGRAVITY_SOURCE_METADATA',
+            'ANTIGRAVITY_PROJECT_ID',
+            'ANTIGRAVITY_CONVERSATION_ID',
+            'ANTIGRAVITY_TRAJECTORY_ID',
+        ):
+            clean_env.pop(key, None)
+
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=clean_env)
         combined_out = (res.stdout or '') + '\n' + (res.stderr or '')
         agentapi_output = combined_out.strip()
         if res.returncode == 0:

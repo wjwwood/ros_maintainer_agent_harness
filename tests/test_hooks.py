@@ -284,18 +284,53 @@ class TestContainerHooks(unittest.TestCase):
             self.assertEqual(res_view.get('decision'), 'deny', f"Expected deny for {blocked_path}")
             self.assertIn('STOP immediately and ask the user for help', res_view.get('reason', ''))
 
-        # 5. Reading legitimate session repository files is allowed
-        allowed_view_payload = {
+        # 5. Reading legitimate session repository files and /memory/ files is allowed
+        for allowed_path in (
+            str(self.session.src_dir / 'rclcpp' / 'CMakeLists.txt'),
+            '/home/user/memory/default/projects/ros-maintainer-agent-harness.md',
+        ):
+            allowed_view_payload = {
+                'conversationId': 'spoke-conv-1234',
+                'workspacePaths': [str(self.ws_root)],
+                'toolCall': {
+                    'name': 'view_file',
+                    'arguments': {
+                        'AbsolutePath': allowed_path,
+                    },
+                },
+            }
+            self.assertEqual(
+                evaluate_pre_tool_use(allowed_view_payload, workspace_root=self.ws_root),
+                {},
+                f"Expected allow for {allowed_path}",
+            )
+
+        # 6. Bare ros-maintainer-harness host command gets ~/.local/bin injected when missing from PATH
+        bare_harness_payload = {
             'conversationId': 'spoke-conv-1234',
             'workspacePaths': [str(self.ws_root)],
             'toolCall': {
-                'name': 'view_file',
+                'name': 'run_command',
                 'arguments': {
-                    'AbsolutePath': str(self.session.src_dir / 'rclcpp' / 'CMakeLists.txt'),
+                    'CommandLine': (
+                        f'ros-maintainer-harness -w {self.ws_root} '
+                        'ci launch -s pr-rclcpp-160 --comment -m "Run CI"'
+                    ),
+                    'Cwd': str(self.session.session_dir),
                 },
             },
         }
-        self.assertEqual(evaluate_pre_tool_use(allowed_view_payload, workspace_root=self.ws_root), {})
+        with patch('shutil.which', return_value=None):
+            with patch(
+                'ros_maintainer_agent_harness.hooks.get_harness_executable',
+                return_value='/home/user/.local/bin/ros-maintainer-harness',
+            ):
+                res_bare = evaluate_pre_tool_use(bare_harness_payload, workspace_root=self.ws_root)
+                self.assertEqual(res_bare['decision'], 'allow')
+                self.assertIn(
+                    'export PATH="$HOME/.local/bin:$PATH"; ros-maintainer-harness',
+                    res_bare['overwrite']['CommandLine'],
+                )
 
     def test_uncontainerized_host_colcon_denied_outside_session(self):
         payload = {
