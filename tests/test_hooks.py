@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from ros_maintainer_agent_harness.cli import main
+from ros_maintainer_agent_harness.cli import main, session_exec_main
 from ros_maintainer_agent_harness.hooks import (
     evaluate_pre_tool_use,
     install_hooks_config,
@@ -81,9 +81,9 @@ class TestContainerHooks(unittest.TestCase):
         res = evaluate_pre_tool_use(payload, workspace_root=self.ws_root)
         self.assertEqual(res['decision'], 'allow')
         self.assertIn('overwrite', res)
-        self.assertIn('session exec -d /workspace/src/rclcpp pr-rclcpp-160', res['overwrite']['CommandLine'])
-        self.assertIn('colcon build --symlink-install', res['overwrite']['CommandLine'])
-        self.assertEqual(res['overwrite']['Cwd'], str(self.session.session_dir.resolve()))
+        self.assertIn('rmah-session-exec', res['overwrite']['CommandLine'])
+        self.assertIn("'colcon build --symlink-install'", res['overwrite']['CommandLine'])
+        self.assertEqual(res['overwrite']['Cwd'], str(src_repo.resolve()))
 
     def test_antigravity_hook_rewrites_command_by_linked_conversation_id(self):
         payload = {
@@ -100,8 +100,9 @@ class TestContainerHooks(unittest.TestCase):
         res = evaluate_pre_tool_use(payload, workspace_root=self.ws_root)
         self.assertEqual(res['decision'], 'allow')
         self.assertIn('overwrite', res)
-        self.assertIn('session exec -d /workspace pr-rclcpp-160', res['overwrite']['CommandLine'])
-        self.assertIn('gh pr view 160 --repo ros2/rclcpp', res['overwrite']['CommandLine'])
+        self.assertIn('rmah-session-exec', res['overwrite']['CommandLine'])
+        self.assertIn("'gh pr view 160 --repo ros2/rclcpp'", res['overwrite']['CommandLine'])
+        self.assertEqual(res['overwrite']['Cwd'], str(self.session.session_dir.resolve()))
 
     def test_hub_conversation_commands_not_rewritten_when_outside_session(self):
         payload = {
@@ -362,8 +363,8 @@ class TestContainerHooks(unittest.TestCase):
         self.assertIn('hookSpecificOutput', res)
         out = res['hookSpecificOutput']
         self.assertEqual(out['permissionDecision'], 'allow')
-        self.assertIn('session exec -d /workspace pr-rclcpp-160', out['updatedInput']['command'])
-        self.assertIn('pytest -v', out['updatedInput']['command'])
+        self.assertIn('rmah-session-exec', out['updatedInput']['command'])
+        self.assertIn("'pytest -v'", out['updatedInput']['command'])
 
     def test_cli_hook_pre_tool_use(self):
         payload = {
@@ -384,7 +385,55 @@ class TestContainerHooks(unittest.TestCase):
                 self.assertEqual(rc, 0)
         out = json.loads(stdout_buf.getvalue())
         self.assertEqual(out['decision'], 'allow')
-        self.assertIn('session exec -d /workspace pr-rclcpp-160', out['overwrite']['CommandLine'])
+        self.assertIn('rmah-session-exec', out['overwrite']['CommandLine'])
+        self.assertIn("'colcon test'", out['overwrite']['CommandLine'])
+
+    def test_rmah_session_exec_heredoc_and_cwd_inference(self):
+        src_repo = self.session.src_dir / 'rclcpp'
+        src_repo.mkdir(parents=True, exist_ok=True)
+        # Command with single quotes or newlines should use heredoc <<'EOF'
+        payload = {
+            'conversationId': 'spoke-conv-1234',
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': "python3 -c 'import sys; print(sys.version)'",
+                    'Cwd': str(src_repo),
+                },
+            },
+        }
+        res = evaluate_pre_tool_use(payload, workspace_root=self.ws_root)
+        self.assertEqual(res['decision'], 'allow')
+        self.assertIn("rmah-session-exec <<'EOF'\npython3 -c 'import sys; print(sys.version)'\nEOF",
+                      res['overwrite']['CommandLine'])
+        self.assertEqual(res['overwrite']['Cwd'], str(src_repo.resolve()))
+
+        # Test session_exec_main inferring workspace, session_id, and container workdir from Path.cwd()
+        with patch('pathlib.Path.cwd', return_value=src_repo.resolve()):
+            with patch('ros_maintainer_agent_harness.cli.exec_in_session_container') as mock_exec:
+                mock_exec.return_value = {'success': True, 'returncode': 0, 'stdout': 'ok\n', 'stderr': ''}
+                rc = session_exec_main(['colcon build --packages-select rclcpp'])
+                self.assertEqual(rc, 0)
+                mock_exec.assert_called_once()
+                kwargs = mock_exec.call_args.kwargs
+                self.assertEqual(kwargs['session_id'], 'pr-rclcpp-160')
+                self.assertEqual(kwargs['workdir'], '/workspace/src/rclcpp')
+                self.assertEqual(kwargs['workspace_root'], self.ws_root.resolve())
+                self.assertEqual(kwargs['command'], 'colcon build --packages-select rclcpp')
+
+        # Test session_exec_main reading heredoc from stdin
+        stdin_cmd = io.StringIO("python3 -c 'print(42)'\n")
+        stdin_cmd.isatty = lambda: False
+        with patch('pathlib.Path.cwd', return_value=self.session.session_dir.resolve()):
+            with patch('sys.stdin', stdin_cmd):
+                with patch('ros_maintainer_agent_harness.cli.exec_in_session_container') as mock_exec:
+                    mock_exec.return_value = {'success': True, 'returncode': 0, 'stdout': '42\n', 'stderr': ''}
+                    rc = session_exec_main([])
+                    self.assertEqual(rc, 0)
+                    kwargs = mock_exec.call_args.kwargs
+                    self.assertEqual(kwargs['session_id'], 'pr-rclcpp-160')
+                    self.assertEqual(kwargs['workdir'], '/workspace')
+                    self.assertEqual(kwargs['command'], "python3 -c 'print(42)'")
 
     def test_install_hooks_merges_existing_config_without_duplicating(self):
         first = install_hooks_config(target_dir=self.ws_root, workspace_root=self.ws_root)

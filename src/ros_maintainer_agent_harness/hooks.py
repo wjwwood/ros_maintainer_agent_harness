@@ -23,6 +23,7 @@ from .worktree import read_session_metadata
 
 HOST_PASSTHROUGH_BINARIES = {
     'ros-maintainer-harness',
+    'rmah-session-exec',
     'agentapi',
     'export',
     'true',
@@ -46,6 +47,51 @@ def get_harness_executable() -> str:
     if local_bin.exists():
         return str(local_bin)
     return 'ros-maintainer-harness'
+
+
+def get_session_exec_executable() -> str:
+    """Return the shortest valid command to invoke `rmah-session-exec` on the host."""
+    if shutil.which('rmah-session-exec'):
+        return 'rmah-session-exec'
+    local_bin = Path.home() / '.local' / 'bin' / 'rmah-session-exec'
+    if local_bin.exists():
+        return '~/.local/bin/rmah-session-exec'
+    return 'rmah-session-exec'
+
+
+def ensure_agent_bin_symlinks() -> Dict[str, Path]:
+    """
+    Symlink `ros-maintainer-harness` and `rmah-session-exec` into any existing
+    `~/.gemini/*/bin` directory so they are on the default non-interactive agent `$PATH`.
+    """
+    created: Dict[str, Path] = {}
+    try:
+        gemini_dir = Path.home() / '.gemini'
+        if not gemini_dir.is_dir():
+            return created
+        local_bin_dir = Path.home() / '.local' / 'bin'
+        for bin_dir in sorted(gemini_dir.glob('*/bin')):
+            if not bin_dir.is_dir() or not os.access(bin_dir, os.W_OK):
+                continue
+            for exe_name in ('ros-maintainer-harness', 'rmah-session-exec'):
+                src_exe = local_bin_dir / exe_name
+                if not src_exe.exists():
+                    which_path = shutil.which(exe_name)
+                    if which_path:
+                        src_exe = Path(which_path).resolve()
+                if not src_exe.exists():
+                    continue
+                dest_link = bin_dir / exe_name
+                if dest_link.resolve() == src_exe.resolve() and dest_link.exists():
+                    created[f"{bin_dir.parent.name}:{exe_name}"] = dest_link
+                    continue
+                if dest_link.exists() or dest_link.is_symlink():
+                    dest_link.unlink()
+                dest_link.symlink_to(src_exe)
+                created[f"{bin_dir.parent.name}:{exe_name}"] = dest_link
+    except Exception:
+        pass
+    return created
 
 
 def _extract_session_from_path(
@@ -269,14 +315,16 @@ def _contains_shell_substitution(command_line: str) -> bool:
 def is_host_passthrough_command(command_line: str) -> bool:
     """
     Return True if `command_line` is purely a host-control command
-    (`ros-maintainer-harness`, `agentapi`) that should run on the host
-    without being wrapped into `session exec`.
+    (`ros-maintainer-harness`, `rmah-session-exec`, `agentapi`) that should run on the host
+    without being wrapped into `rmah-session-exec`.
     """
     stripped = (command_line or '').strip()
     if not stripped:
         return True
 
     first_exe = _first_executable_in_segment(stripped)
+    if first_exe == 'rmah-session-exec':
+        return True
     if first_exe == 'ros-maintainer-harness' and 'session exec' in stripped:
         return True
 
@@ -294,7 +342,7 @@ def is_host_passthrough_command(command_line: str) -> bool:
             continue
         if exe not in HOST_PASSTHROUGH_BINARIES:
             return False
-        if exe in ('ros-maintainer-harness', 'agentapi'):
+        if exe in ('ros-maintainer-harness', 'rmah-session-exec', 'agentapi'):
             saw_control_bin = True
 
     return saw_control_bin
@@ -310,6 +358,8 @@ def is_forbidden_session_command(command_line: str, session_id: str) -> Optional
         return None
 
     first_exe = _first_executable_in_segment(stripped)
+    if first_exe == 'rmah-session-exec':
+        return None
     if first_exe == 'ros-maintainer-harness' and 'session exec' in stripped:
         return None
 
@@ -383,7 +433,7 @@ def _rewrite_bare_harness_passthrough(command_line: str) -> Optional[str]:
     prepend `export PATH="$HOME/.local/bin:$PATH"; ` to bare `ros-maintainer-harness` host
     commands so non-interactive agent shells do not fail with exit code 127.
     """
-    if 'session exec' in command_line or '.local/bin' in command_line:
+    if 'session exec' in command_line or 'rmah-session-exec' in command_line or '.local/bin' in command_line:
         return None
     if shutil.which('ros-maintainer-harness') is not None:
         return None
@@ -434,20 +484,71 @@ def compute_container_workdir(cwd: str, session_dir: Path) -> str:
         return '/workspace'
 
 
+def compute_host_session_cwd(cwd: str, session_dir: Path) -> Tuple[str, bool]:
+    """
+    Map a tool call's `cwd` to a valid existing directory on the host inside `session_dir`.
+    Returns `(host_cwd, needs_explicit_workdir_flag)`.
+    """
+    resolved_session = session_dir.resolve()
+    if not cwd:
+        return str(resolved_session), False
+
+    if cwd == '/workspace' or cwd.startswith('/workspace/'):
+        rel_str = cwd[len('/workspace'):].lstrip('/')
+        if not rel_str:
+            return str(resolved_session), False
+        candidate = (resolved_session / rel_str).resolve()
+        if candidate.is_dir() and (candidate == resolved_session or resolved_session in candidate.parents):
+            return str(candidate), False
+        return str(resolved_session), True
+
+    try:
+        resolved_cwd = Path(cwd).expanduser().resolve()
+        if resolved_cwd == resolved_session or resolved_session in resolved_cwd.parents:
+            if resolved_cwd.is_dir():
+                return str(resolved_cwd), False
+            return str(resolved_session), True
+    except Exception:
+        pass
+
+    return str(resolved_session), False
+
+
+def _choose_heredoc_delimiter(command_line: str) -> str:
+    """Choose a heredoc delimiter that does not collide with any line in `command_line`."""
+    lines = {line.strip() for line in command_line.splitlines()}
+    for candidate in ('EOF', '__EOF__', '__RMAH_EOF__'):
+        if candidate not in lines:
+            return candidate
+    idx = 1
+    while f'__RMAH_EOF_{idx}__' in lines:
+        idx += 1
+    return f'__RMAH_EOF_{idx}__'
+
+
 def build_session_exec_command(
     workspace_root: Path,
     session_id: str,
     container_workdir: str,
     command_line: str,
+    explicit_workdir: bool = False,
 ) -> str:
-    """Wrap `command_line` in `ros-maintainer-harness -w <ws_root> session exec -d <workdir> <session_id>`."""
-    harness_bin = get_harness_executable()
-    ws_str = str(workspace_root.resolve())
-    return (
-        f"{shlex.quote(harness_bin)} -w {shlex.quote(ws_str)} "
-        f"session exec -d {shlex.quote(container_workdir)} "
-        f"{shlex.quote(session_id)} -- {shlex.quote(command_line)}"
-    )
+    """
+    Wrap `command_line` in a concise `rmah-session-exec` invocation.
+    Because the host process `Cwd` is already inside `sessions/<session_id>[/<subdir>]`,
+    `rmah-session-exec` infers workspace root, session ID, and container workdir automatically.
+    """
+    exec_bin = get_session_exec_executable()
+    prefix = exec_bin
+    if explicit_workdir and container_workdir and container_workdir != '/workspace':
+        prefix += f" -d {shlex.quote(container_workdir)}"
+
+    if '\n' in command_line or "'" in command_line:
+        delim = _choose_heredoc_delimiter(command_line)
+        body = command_line if command_line.endswith('\n') else command_line + '\n'
+        return f"{prefix} <<'{delim}'\n{body}{delim}"
+
+    return f"{prefix} {shlex.quote(command_line)}"
 
 
 def _format_allow(
@@ -506,7 +607,7 @@ def evaluate_pre_tool_use(
 ) -> Dict[str, Any]:
     """
     Evaluate a `PreToolUse` hook event and transparently rewrite session shell commands
-    to execute inside the session's Docker/Podman sandbox container via `session exec`,
+    to execute inside the session's Docker/Podman sandbox container via `rmah-session-exec`,
     while blocking session attempts to circumvent the container or debug harness internals.
     """
     is_claude_format = 'tool_name' in payload and 'toolCall' not in payload
@@ -581,7 +682,7 @@ def evaluate_pre_tool_use(
         if session_deny:
             return _format_deny(is_claude_format, session_deny)
 
-    # Allow host-control commands (`ros-maintainer-harness`, `agentapi`) to pass through
+    # Allow host-control commands (`ros-maintainer-harness`, `rmah-session-exec`, `agentapi`) to pass through
     if is_host_passthrough_command(command_line):
         rewritten_cmd = _rewrite_bare_harness_passthrough(command_line)
         rewritten_cwd = None
@@ -601,13 +702,20 @@ def evaluate_pre_tool_use(
 
     session_id, session_dir, _ = session_match
     container_workdir = compute_container_workdir(cwd, session_dir)
+    rewritten_cwd, needs_explicit_workdir = compute_host_session_cwd(cwd, session_dir)
+    if is_claude_format and container_workdir != '/workspace':
+        # Claude Code PreToolUse updatedInput only rewrites `command`, not `cwd`,
+        # so include `-d` when `cwd` is not already inside `session_dir`
+        if not cwd or Path(cwd).expanduser().resolve() != Path(rewritten_cwd):
+            needs_explicit_workdir = True
+
     rewritten_cmd = build_session_exec_command(
         workspace_root=ws_root,
         session_id=session_id,
         container_workdir=container_workdir,
         command_line=command_line,
+        explicit_workdir=needs_explicit_workdir,
     )
-    rewritten_cwd = str(session_dir.resolve())
 
     return _format_allow(
         is_claude_format,
@@ -722,6 +830,8 @@ def install_hooks_config(
     """
     ws_root = workspace_root.resolve()
     base_dir = (target_dir or ws_root).resolve()
+    if include_global:
+        ensure_agent_bin_symlinks()
     hook_cmd = get_harness_hook_command(ws_root, session_id=session_id)
 
     # Remove duplicate _agents/hooks.json if present so hooks do not fire twice per directory
