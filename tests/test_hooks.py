@@ -50,11 +50,11 @@ class TestContainerHooks(unittest.TestCase):
 
     def test_install_hooks_config_on_init_and_create_session(self):
         self.assertTrue((self.ws_root / '.agents' / 'hooks.json').exists())
-        self.assertTrue((self.ws_root / '_agents' / 'hooks.json').exists())
+        self.assertFalse((self.ws_root / '_agents' / 'hooks.json').exists())
         self.assertTrue((self.ws_root / '.claude' / 'settings.json').exists())
 
         self.assertTrue((self.session.session_dir / '.agents' / 'hooks.json').exists())
-        self.assertTrue((self.session.session_dir / '_agents' / 'hooks.json').exists())
+        self.assertFalse((self.session.session_dir / '_agents' / 'hooks.json').exists())
         self.assertTrue((self.session.session_dir / '.claude' / 'settings.json').exists())
 
         hooks_data = json.loads((self.session.session_dir / '.agents' / 'hooks.json').read_text(encoding='utf-8'))
@@ -136,6 +136,69 @@ class TestContainerHooks(unittest.TestCase):
         }
         res = evaluate_pre_tool_use(payload, workspace_root=self.ws_root)
         self.assertEqual(res, {})
+
+        # Simulate Hook #1 rewriting a compound/multiline command, followed by Hook #2 running on the output
+        compound_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': 'git status && git diff origin/rolling\npython3 -c "import os\nprint(1)"',
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        first_res = evaluate_pre_tool_use(compound_payload, workspace_root=self.ws_root)
+        self.assertIn('overwrite', first_res)
+        second_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': first_res['overwrite']['CommandLine'],
+                    'Cwd': first_res['overwrite']['Cwd'],
+                },
+            },
+        }
+        second_res = evaluate_pre_tool_use(
+            second_payload,
+            workspace_root=self.ws_root,
+            explicit_session_id='pr-rclcpp-160',
+        )
+        self.assertEqual(second_res, {})
+
+        # Windows-style .EXE path should also be recognized as passthrough
+        win_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': (
+                        "'D:\\a\\Scripts\\ros-maintainer-harness.EXE' -w 'D:\\ws' "
+                        "session exec -d /workspace pr-rclcpp-160 -- 'git status && git diff'"
+                    ),
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        self.assertEqual(evaluate_pre_tool_use(win_payload, workspace_root=self.ws_root), {})
+
+        # Multiline docker exec command should also be recognized as passthrough
+        docker_multiline_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': 'docker exec ros-harness-pr-rclcpp-160 python3 -c "import sys\nprint(sys.version)"',
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        self.assertEqual(evaluate_pre_tool_use(docker_multiline_payload, workspace_root=self.ws_root), {})
 
         env_payload = {
             'conversationId': 'spoke-conv-1234',
