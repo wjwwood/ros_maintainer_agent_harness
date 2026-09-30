@@ -351,6 +351,8 @@ def is_forbidden_session_file_read(file_path: str, session_id: str) -> Optional[
     if not file_path:
         return None
     norm = file_path.replace('\\', '/')
+    if '/memory/' in norm:
+        return None
     basename = Path(norm).name
 
     forbidden_Substrings = (
@@ -372,6 +374,25 @@ def is_forbidden_session_file_read(file_path: str, session_id: str) -> Optional[
             "or conversation transcripts. If an MCP tool or CLI command returned an error, "
             "STOP immediately and ask the user for help with the error message."
         )
+    return None
+
+
+def _rewrite_bare_harness_passthrough(command_line: str) -> Optional[str]:
+    """
+    If `ros-maintainer-harness` is not on the current `$PATH` but exists in `~/.local/bin`,
+    prepend `export PATH="$HOME/.local/bin:$PATH"; ` to bare `ros-maintainer-harness` host
+    commands so non-interactive agent shells do not fail with exit code 127.
+    """
+    if 'session exec' in command_line or '.local/bin' in command_line:
+        return None
+    if shutil.which('ros-maintainer-harness') is not None:
+        return None
+    if get_harness_executable() == 'ros-maintainer-harness':
+        return None
+    segments = _split_top_level_segments(command_line, include_pipe=True)
+    for seg in segments:
+        if _first_executable_in_segment(seg) == 'ros-maintainer-harness':
+            return f'export PATH="$HOME/.local/bin:$PATH"; {command_line}'
     return None
 
 
@@ -562,10 +583,15 @@ def evaluate_pre_tool_use(
 
     # Allow host-control commands (`ros-maintainer-harness`, `agentapi`) to pass through
     if is_host_passthrough_command(command_line):
+        rewritten_cmd = _rewrite_bare_harness_passthrough(command_line)
         rewritten_cwd = None
         if cwd and (cwd == '/workspace' or cwd.startswith('/workspace/')):
             rewritten_cwd = str(session_match[1].resolve()) if session_match else str(ws_root)
-        return _format_allow(is_claude_format, rewritten_cwd=rewritten_cwd)
+        return _format_allow(
+            is_claude_format,
+            rewritten_cmd=rewritten_cmd,
+            rewritten_cwd=rewritten_cwd,
+        )
 
     if session_match is None:
         deny_reason = is_forbidden_uncontainerized_host_command(command_line)

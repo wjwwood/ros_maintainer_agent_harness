@@ -318,7 +318,8 @@ def get_session_agent_instructions(
     `ros-maintainer-harness -w {ws_str} session status {session_id} --set-status local_tests_passing`
   - CLI (inside container): `ros-session-status -m "Milestone" "Message"`
   - If `hub_conversation_id` is set in `session.json`, notify the Hub conversation via `send_message` or
-    `agentapi send-message` when your investigation/build/test completes or if you are blocked.
+    `env -u ANTIGRAVITY_SOURCE_METADATA -u ANTIGRAVITY_PROJECT_ID agentapi send-message` when your
+    investigation/build/test completes or if you are blocked.
 - **Remote Mutations & CI (MCP Tools or Host CLI Equivalents)**:
   Use the `ros-maintainer-harness` MCP tools (or the equivalent `ros-maintainer-harness` CLI subcommands, which the
   `PreToolUse` hook automatically passes through to the host):

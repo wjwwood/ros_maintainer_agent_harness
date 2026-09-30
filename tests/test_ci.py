@@ -411,6 +411,36 @@ class TestCI(unittest.TestCase):
             self.assertEqual(res['packages'], ['launch'])
             self.assertEqual(res['details']['target_distro'], 'rolling')
 
+    def test_jenkins_manager_auth_retry_on_403(self):
+        mgr = JenkinsManager(ci_server='https://ci.ros2.org')
+        resp_403 = MagicMock()
+        resp_403.status_code = 403
+        resp_403.text = 'Authentication required'
+
+        resp_200 = MagicMock()
+        resp_200.status_code = 200
+        resp_200.json.return_value = {
+            'building': False,
+            'result': 'SUCCESS',
+            'duration': 12000,
+            'estimatedDuration': 15000,
+            'artifacts': [],
+            'fullDisplayName': 'ci_linux #30675',
+        }
+
+        def fake_resolve():
+            mgr.auth = ('testuser', 'testtoken')
+            mgr.session.auth = mgr.auth
+            return mgr.auth
+
+        with patch.object(mgr, '_resolve_github_auth', side_effect=fake_resolve) as mock_resolve:
+            with patch.object(mgr.session, 'get', side_effect=[resp_403, resp_200]) as mock_get:
+                status = mgr.fetch_build_status('https://ci.ros2.org/job/ci_linux/30675/')
+                self.assertTrue(status['success'])
+                self.assertEqual(status['status'], 'SUCCESS')
+                self.assertEqual(mock_resolve.call_count, 1)
+                self.assertEqual(mock_get.call_count, 2)
+
 
 if __name__ == '__main__':
     unittest.main()
