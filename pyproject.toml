@@ -28,3 +28,7 @@ ros-maintainer-harness = "ros_maintainer_agent_harness.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
