@@ -88,9 +88,9 @@ def generate_task_prompt(meta: PRMetadata, distro: str) -> str:
      network calls or command execution). If anything suspicious is found, halt and notify the maintainer.
 
 2. **Containerized Build & Local Testing (Never Build Directly on Host)**:
-   - If you are running on the host OS (or as a spawned subagent on the host), execute all builds and tests
-     inside the session's isolated container using the MCP tool `exec_in_session` or
-     `ros-maintainer-harness session exec`:
+   - Keep your working directory (`Cwd`) inside this session directory so the `PreToolUse` hook automatically
+     executes `colcon`, `pytest`, `git`, and `gh` commands inside the session container (`ros-harness-<session_id>`).
+     Do **not** run `docker` or `docker exec` directly.
    - Build packages with colcon:
      ```bash
      colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -101,7 +101,10 @@ def generate_task_prompt(meta: PRMetadata, distro: str) -> str:
      colcon test-result --verbose
      ```
 
-3. **CI Status & Token Conservation**:
+3. **CI Launch, Status & Token Conservation**:
+   - Launch Jenkins CI using a single MCP tool call (`launch_jenkins_ci`) or CLI command
+     (`ros-maintainer-harness ci launch -s <session_id> --comment -m "Run CI"`). Target PR URL, distro, and affected
+     packages are auto-detected from the session when omitted.
    - Check existing CI job runs with `ros-ci-status` or the MCP `get_ci_status` tool.
    - If CI failed, retrieve concise error diagnostics with `get_ci_summary` instead of raw logs.
 
@@ -110,6 +113,14 @@ def generate_task_prompt(meta: PRMetadata, distro: str) -> str:
      ```bash
      ros-session-status -m "Reproduced failure in test_timer" "Details here..."
      ```
+
+5. **Mandatory Escalation Rule (Never Debug or Circumvent the Harness)**:
+   - If an MCP tool, `ros-maintainer-harness` CLI command, or `PreToolUse` hook fails or returns an unexpected error,
+     **STOP immediately and ask the user for help**.
+   - **NEVER** read or debug `ros_maintainer_agent_harness` source files (`ci.py`, `server.py`, `hooks.py`),
+     `ci_for_pr.py`, `mcp_config.json`, `hooks.json`, or conversation transcripts (`transcript.jsonl`).
+   - **NEVER** invoke `docker`, `podman`, `gh auth token`, or subshell workarounds to bypass the container or MCP
+     gateway.
 """
 
 
@@ -318,6 +329,7 @@ def scaffold_session_from_pr(
             'head_repo_owner': meta.head_repo_owner,
             'head_repo_url': meta.head_repo_url,
             'is_fork': meta.is_fork,
+            'changed_files': meta.changed_files,
             'status': 'investigating',
         },
     )

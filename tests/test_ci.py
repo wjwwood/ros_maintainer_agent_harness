@@ -307,7 +307,10 @@ class TestCI(unittest.TestCase):
                     )
                 return resp
 
+            captured_posts = []
+
             def fake_post(url, **kwargs):
+                captured_posts.append((url, kwargs))
                 resp = MagicMock()
                 resp.status_code = 201
                 if 'api.github.com/gists' in url:
@@ -319,6 +322,8 @@ class TestCI(unittest.TestCase):
                             },
                         },
                     }
+                elif 'buildWithParameters' in url:
+                    resp.status_code = 302
                 elif '/issues/1002/comments' in url:
                     resp.json.return_value = {
                         'html_url': 'https://github.com/ros2/launch/pull/1002#issuecomment-999',
@@ -348,12 +353,63 @@ class TestCI(unittest.TestCase):
             self.assertEqual(res['child_jobs'][0]['build_num'], 25001)
             self.assertIn('--packages-up-to launch', res['parameters']['CI_BUILD_ARGS'])
             self.assertIn('--packages-select launch', res['parameters']['CI_TEST_ARGS'])
+            self.assertEqual(res['parameters']['CI_EL_RELEASE'], '10')
+            self.assertEqual(res['parameters']['CI_SCRIPTS_BRANCH'], 'master')
+
+            # Verify Jenkins buildWithParameters POST used form `data` with `json` field
+            jenkins_posts = [kw for url, kw in captured_posts if 'buildWithParameters' in url]
+            self.assertEqual(len(jenkins_posts), 1)
+            self.assertIn('data', jenkins_posts[0])
+            self.assertIn('json', jenkins_posts[0]['data'])
+            self.assertFalse(jenkins_posts[0].get('allow_redirects', True))
+
             self.assertEqual(
                 res['comment_url'],
                 'https://github.com/ros2/launch/pull/1002#issuecomment-999',
             )
             runs = tracker.list_runs(session_id='pr-launch-1002')
             self.assertEqual(len(runs), 3)
+
+    def test_detect_session_packages_and_auto_launch(self):
+        import json
+        from ros_maintainer_agent_harness.ci import detect_session_packages
+        from ros_maintainer_agent_harness.server import perform_launch_jenkins_ci
+        from ros_maintainer_agent_harness.workspace import WorkspaceLayout
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws = WorkspaceLayout(Path(temp_dir))
+            ws.initialize()
+            session_dir = ws.sessions_dir / 'pr-launch-712'
+            pkg_dir = session_dir / 'src' / 'launch' / 'launch'
+            (pkg_dir / 'actions').mkdir(parents=True)
+            (session_dir / 'src' / 'launch' / '.git').mkdir(parents=True)
+            (pkg_dir / 'package.xml').write_text(
+                '<?xml version="1.0"?>\n<package format="3">\n  <name>launch</name>\n</package>\n',
+                encoding='utf-8',
+            )
+            (session_dir / 'session.json').write_text(
+                json.dumps({
+                    'session_id': 'pr-launch-712',
+                    'pr_ref': 'ros2/launch#712',
+                    'pr_url': 'https://github.com/ros2/launch/pull/712',
+                    'distro': 'rolling',
+                    'changed_files': ['launch/actions/include_launch_description.py'],
+                }),
+                encoding='utf-8',
+            )
+
+            detected = detect_session_packages(session_dir)
+            self.assertEqual(detected, ['launch'])
+
+            res = perform_launch_jenkins_ci(
+                workspace=ws,
+                session_id='pr-launch-712',
+                reason='Test auto-detected PR URL and packages',
+                dry_run=True,
+            )
+            self.assertTrue(res['success'])
+            self.assertEqual(res['packages'], ['launch'])
+            self.assertEqual(res['details']['target_distro'], 'rolling')
 
 
 if __name__ == '__main__':

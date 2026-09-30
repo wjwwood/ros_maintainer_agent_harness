@@ -118,11 +118,26 @@ Host MCP Gateway:
 ## 5. CI Monitoring & Token Efficiency
 
 To conserve tokens and context window:
+- **One-Step CI Launch**:
+  - Launch Jenkins CI using the MCP `launch_jenkins_ci(session_id="<id>", comment=True, reason="...")` tool or CLI
+    `ros-maintainer-harness ci launch -s <id> --comment -m "Run CI"`. The PR URL, target distro, and affected ROS 2
+    packages are auto-detected from the session when omitted.
 - **Do not poll Jenkins in a manual loop**:
   - Use the host gateway tool `get_ci_status(wait_for_completion=True)` or run `ros-ci-status <job_url> --wait`.
 - **Concise Error Summaries**:
   - If a build fails, use `get_ci_summary` to inspect failed test names, error messages,
     and extracted compiler error excerpts rather than fetching massive raw console logs.
+
+---
+
+## 6. Mandatory Escalation Rule (Never Debug or Circumvent the Harness)
+
+If any `ros-maintainer-harness` MCP tool, CLI command, container, or `PreToolUse` hook returns an unexpected error:
+1. **STOP immediately and ask the user for help** with the exact error message.
+2. **NEVER** inspect, read, or debug `ros_maintainer_agent_harness` source files (`ci.py`, `server.py`, `hooks.py`),
+   external scripts (`ci_for_pr.py`), `mcp_config.json`, `hooks.json`, or conversation transcripts (`transcript.jsonl`).
+3. **NEVER** invoke `docker`, `podman`, `gh auth token`, or command-substitution workarounds (`$(...)`) to bypass the
+   session container or MCP gateway.
 """
 
 
@@ -312,17 +327,32 @@ def get_session_agent_instructions(
     - CLI: `ros-maintainer-harness -w {ws_str} git-push -s {session_id} -b <branch> --remote <remote> -m "<reason>"`
       *(If pushing to an external contributor fork returns `PENDING_APPROVAL` with a `ticket_id`, ask the maintainer or
       Hub conversation for approval, then re-run with `--approval-ticket-id <ticket_id>`).*
-  - **Launch Jenkins CI**:
-    - MCP: `launch_jenkins_ci(session_id="{session_id}", pr_url="...", packages=[...], comment=True, reason="...")`
+  - **Launch Jenkins CI (One-Step)**:
+    - MCP: `launch_jenkins_ci(session_id="{session_id}", comment=True, reason="...")`
     - CLI:
-      `ros-maintainer-harness -w {ws_str} ci launch -s {session_id} --pr <pr_url> --packages <pkgs> --comment -m "..."`
+      `ros-maintainer-harness -w {ws_str} ci launch -s {session_id} --comment -m "Run CI"`
+      *(Note: `--pr`, `--distro`, and `--packages` are automatically detected from `{session_id}` when omitted; pass
+      `--only-fixes-test` if the PR only modifies tests).*
   - **Monitor & Summarize CI**:
     - MCP: `get_ci_status(session_id="{session_id}", wait_for_completion=True)` / `get_ci_summary(job_url_or_id="...")`
     - CLI: `ros-maintainer-harness -w {ws_str} ci status <job_url> --wait` or
       `ros-maintainer-harness -w {ws_str} ci summary <job_url>`
   - **Find Restarted CI**:
     - MCP: `find_restarted_ci(session_id="{session_id}", pr_or_comment_url="...", update_comment=True)`
-    - CLI: `ros-maintainer-harness -w {ws_str} ci find-restarted <pr_or_comment_url> -s {session_id} --update-comment`
+    - CLI: `ros-maintainer-harness -w {ws_str} ci find-restarted -s {session_id} --update-comment`
+
+---
+
+## 4. Mandatory Escalation Rule (Never Debug or Circumvent the Harness)
+
+If any `ros-maintainer-harness` MCP tool, CLI command, container, or `PreToolUse` hook returns an error or fails:
+1. **STOP immediately and ask the user for help** (or message the Hub conversation if applicable), reporting the exact
+   command/tool call and error message.
+2. **NEVER** read, search, or debug `ros_maintainer_agent_harness` source files (`ci.py`, `server.py`, `hooks.py`),
+   `ros-github-scripts` (`ci_for_pr.py`), `mcp_config.json`, `hooks.json`, or conversation transcripts
+   (`transcript.jsonl`).
+3. **NEVER** run `docker`, `podman`, `gh auth token`, or subshell substitutions (`$(...)`) to bypass the container
+   sandbox or MCP policy gateway.
 """
 
 

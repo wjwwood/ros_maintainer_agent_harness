@@ -970,6 +970,8 @@ def handle_ci(args: argparse.Namespace) -> int:
         else:
             if res.get('success'):
                 print(f"✅ Launched Jenkins CI ({res.get('status')}): {res.get('job_url')}")
+                if res.get('packages'):
+                    print(f"  - Packages: {', '.join(res['packages'])}")
                 if res.get('gist_url'):
                     print(f"  - Gist:    {res.get('gist_url')}")
                 if res.get('comment_url'):

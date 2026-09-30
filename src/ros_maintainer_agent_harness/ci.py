@@ -50,6 +50,146 @@ ROS_DISTRO_TO_RHEL_DISTRO = {
     'rolling': '',
 }
 
+DEFAULT_CI_LAUNCHER_PARAMS: Dict[str, Any] = {
+    'CI_BRANCH_TO_TEST': '',
+    'CI_SCRIPTS_BRANCH': 'master',
+    'CI_ROS2_REPOS_URL': '',
+    'CI_ROS2_SUPPLEMENTAL_REPOS_URL': '',
+    'CI_PIXI_TOML_URL': '',
+    'CI_COLCON_BRANCH': '',
+    'CI_UBUNTU_DISTRO': 'resolute',
+    'CI_EL_RELEASE': '10',
+    'CI_ROS_DISTRO': 'rolling',
+    'CI_COLCON_MIXIN_URL': 'https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml',
+    'CI_CMAKE_BUILD_TYPE': 'None',
+    'CI_BUILD_ARGS': (
+        '--event-handlers console_cohesion+ console_package_list+ '
+        '--cmake-args -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON'
+    ),
+    'CI_ISOLATED': True,
+    'CI_USE_WHITESPACE_IN_PATHS': False,
+    'CI_USE_CONNEXTDDS': True,
+    'CI_USE_CONNEXT_DEBS': False,
+    'CI_USE_CYCLONEDDS': True,
+    'CI_USE_FASTRTPS_STATIC': True,
+    'CI_USE_FASTRTPS_DYNAMIC': False,
+    'CI_COMPILE_WITH_CLANG': False,
+    'CI_ENABLE_COVERAGE': False,
+    'CI_TEST_ARGS': (
+        '--event-handlers console_cohesion+ --retest-until-pass 2 '
+        '--ctest-args -LE xfail --pytest-args -m "not xfail" --executor sequential'
+    ),
+}
+
+
+def extract_default_job_params(job_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Extract default parameter values from Jenkins job metadata, falling back to DEFAULT_CI_LAUNCHER_PARAMS."""
+    params = dict(DEFAULT_CI_LAUNCHER_PARAMS)
+    if not isinstance(job_info, dict):
+        return params
+    containers = list(job_info.get('property') or []) + list(job_info.get('actions') or [])
+    for prop in containers:
+        if not isinstance(prop, dict):
+            continue
+        for pdef in prop.get('parameterDefinitions') or []:
+            if not isinstance(pdef, dict):
+                continue
+            name = pdef.get('name')
+            default_obj = pdef.get('defaultParameterValue')
+            if name and isinstance(default_obj, dict) and 'value' in default_obj:
+                params[name] = default_obj['value']
+    return params
+
+
+def _extract_package_name(package_xml: Path) -> Optional[str]:
+    """Extract the <name> tag from a ROS package.xml file."""
+    try:
+        content = package_xml.read_text(encoding='utf-8', errors='replace')
+        m = re.search(r'<name>\s*([^<\s]+)\s*</name>', content)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    return None
+
+
+def detect_session_packages(session_dir: Path) -> List[str]:
+    """
+    Auto-detect affected ROS 2 package names from a session directory by inspecting
+    changed files in the session metadata or git worktree and locating enclosing package.xml files.
+    """
+    if not session_dir.is_dir():
+        return []
+
+    meta: Dict[str, Any] = {}
+    meta_file = session_dir / 'session.json'
+    if meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text(encoding='utf-8'))
+        except Exception:
+            meta = {}
+
+    src_dir = session_dir / 'src'
+    repo_dirs: List[Path] = []
+    if src_dir.is_dir():
+        repo_dirs = [
+            p for p in sorted(src_dir.iterdir())
+            if p.is_dir() and (p / '.git').exists()
+        ]
+        if not repo_dirs:
+            repo_dirs = [p for p in sorted(src_dir.iterdir()) if p.is_dir()]
+
+    packages: List[str] = []
+    seen: set[str] = set()
+
+    for repo_dir in repo_dirs:
+        changed_files: List[str] = []
+        if isinstance(meta.get('changed_files'), list) and len(repo_dirs) == 1:
+            changed_files.extend([str(f) for f in meta['changed_files'] if f])
+
+        if not changed_files and (repo_dir / '.git').exists():
+            base_ref = meta.get('base_ref') or 'rolling'
+            for diff_range in (f'origin/{base_ref}...HEAD', f'{base_ref}...HEAD', 'HEAD~1...HEAD'):
+                try:
+                    res = subprocess.run(
+                        ['git', 'diff', '--name-only', diff_range],
+                        cwd=str(repo_dir),
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if res.returncode == 0 and res.stdout.strip():
+                        changed_files.extend(
+                            [line.strip() for line in res.stdout.splitlines() if line.strip()]
+                        )
+                        break
+                except Exception:
+                    pass
+
+        for rel_path in changed_files:
+            curr = (repo_dir / rel_path).parent
+            while True:
+                pkg_xml = curr / 'package.xml'
+                if pkg_xml.is_file():
+                    pkg_name = _extract_package_name(pkg_xml)
+                    if pkg_name and pkg_name not in seen:
+                        seen.add(pkg_name)
+                        packages.append(pkg_name)
+                    break
+                if curr == repo_dir or curr.parent == curr or not str(curr).startswith(str(repo_dir)):
+                    break
+                curr = curr.parent
+
+        if not packages:
+            pkg_xml = repo_dir / 'package.xml'
+            if pkg_xml.is_file():
+                pkg_name = _extract_package_name(pkg_xml)
+                if pkg_name and pkg_name not in seen:
+                    seen.add(pkg_name)
+                    packages.append(pkg_name)
+
+    return packages
+
 
 @dataclasses.dataclass
 class CIRunRecord:
@@ -318,7 +458,7 @@ class JenkinsManager:
         return [str(p).strip() for p in packages if str(p).strip()]
 
     @classmethod
-    def build_ci_args(
+    def build_extra_ci_args(
         cls,
         packages: Optional[Union[List[str], str]] = None,
         only_fixes_test: bool = False,
@@ -327,22 +467,42 @@ class JenkinsManager:
         cmake_args: Optional[str] = None,
     ) -> Tuple[str, str]:
         pkg_list = cls.normalize_packages(packages)
-        build_args = '--event-handlers console_cohesion+ console_package_list+'
-        test_args = '--event-handlers console_direct+'
+        extra_build_args = ''
+        extra_test_args = ''
         if pkg_list:
             pkg_str = ' '.join(pkg_list)
             if only_fixes_test:
-                build_args += f' --packages-up-to {pkg_str}'
-                test_args += f' --packages-select {pkg_str}'
+                extra_build_args += f' --packages-up-to {pkg_str}'
+                extra_test_args += f' --packages-select {pkg_str}'
             else:
-                build_args += f' --packages-above-and-dependencies {pkg_str}'
-                test_args += f' --packages-above {pkg_str}'
+                extra_build_args += f' --packages-above-and-dependencies {pkg_str}'
+                extra_test_args += f' --packages-above {pkg_str}'
         if colcon_build_args and colcon_build_args.strip():
-            build_args += f' {colcon_build_args.strip()}'
+            extra_build_args += f' {colcon_build_args.strip()}'
         if colcon_test_args and colcon_test_args.strip():
-            test_args += f' {colcon_test_args.strip()}'
+            extra_test_args += f' {colcon_test_args.strip()}'
         if cmake_args and cmake_args.strip():
-            build_args += f' --cmake-args {cmake_args.strip()}'
+            extra_build_args += f' --cmake-args {cmake_args.strip()}'
+        return (extra_build_args, extra_test_args)
+
+    @classmethod
+    def build_ci_args(
+        cls,
+        packages: Optional[Union[List[str], str]] = None,
+        only_fixes_test: bool = False,
+        colcon_build_args: Optional[str] = None,
+        colcon_test_args: Optional[str] = None,
+        cmake_args: Optional[str] = None,
+    ) -> Tuple[str, str]:
+        extra_build, extra_test = cls.build_extra_ci_args(
+            packages=packages,
+            only_fixes_test=only_fixes_test,
+            colcon_build_args=colcon_build_args,
+            colcon_test_args=colcon_test_args,
+            cmake_args=cmake_args,
+        )
+        build_args = f"{DEFAULT_CI_LAUNCHER_PARAMS['CI_BUILD_ARGS']}{extra_build}"
+        test_args = f"{DEFAULT_CI_LAUNCHER_PARAMS['CI_TEST_ARGS']}{extra_test}"
         return (build_args, test_args)
 
     def _resolve_github_auth(self) -> Optional[Tuple[str, str]]:
@@ -502,6 +662,13 @@ class JenkinsManager:
         distro = target_distro or 'rolling'
         job_name = job_type or 'ci_launcher'
         pkg_list = self.normalize_packages(packages)
+        extra_build_args, extra_test_args = self.build_extra_ci_args(
+            packages=pkg_list,
+            only_fixes_test=only_fixes_test,
+            colcon_build_args=colcon_build_args,
+            colcon_test_args=colcon_test_args,
+            cmake_args=cmake_args,
+        )
         build_args, test_args = self.build_ci_args(
             packages=pkg_list,
             only_fixes_test=only_fixes_test,
@@ -527,19 +694,8 @@ class JenkinsManager:
                     token=token,
                     extra_repos=extra_repos,
                 )
-                job_params = {
-                    'CI_BRANCH_TO_TEST': '',
-                    'CI_ROS2_REPOS_URL': gist_info['raw_url'],
-                    'CI_COLCON_BRANCH': '',
-                    'CI_SCRIPTS_BRANCH': '',
-                    'CI_UBUNTU_DISTRO': ROS_DISTRO_TO_UBUNTU_DISTRO.get(distro, ''),
-                    'CI_RHEL_DISTRO': ROS_DISTRO_TO_RHEL_DISTRO.get(distro, ''),
-                    'CI_ROS_DISTRO': '' if distro == 'rolling' else distro,
-                    'CI_BUILD_ARGS': build_args,
-                    'CI_TEST_ARGS': test_args,
-                }
 
-                # 1. Fetch CSRF crumb and nextBuildNumber from Jenkins
+                # 1. Fetch CSRF crumb and job definition/nextBuildNumber from Jenkins
                 crumb_headers: Dict[str, str] = {}
                 try:
                     crumb_resp = self.session.get(
@@ -565,17 +721,39 @@ class JenkinsManager:
                     raise RuntimeError(
                         f"Failed to query Jenkins job '{job_name}' (HTTP {job_info_resp.status_code})."
                     )
-                build_num = int(job_info_resp.json().get('nextBuildNumber', 1))
+                job_info_data = job_info_resp.json() or {}
+                build_num = int(job_info_data.get('nextBuildNumber', 1))
                 job_url = f'{self.ci_server}/job/{job_name}/{build_num}/'
+
+                job_params = extract_default_job_params(job_info_data)
+                job_params['CI_ROS2_REPOS_URL'] = gist_info['raw_url']
+                job_params['CI_ROS_DISTRO'] = distro
+                ubuntu_distro = ROS_DISTRO_TO_UBUNTU_DISTRO.get(distro, '')
+                if ubuntu_distro:
+                    job_params['CI_UBUNTU_DISTRO'] = ubuntu_distro
+                el_release = ROS_DISTRO_TO_RHEL_DISTRO.get(distro, '')
+                if el_release:
+                    job_params['CI_EL_RELEASE'] = el_release
+                job_params['CI_BUILD_ARGS'] = f"{job_params.get('CI_BUILD_ARGS', '').rstrip()}{extra_build_args}"
+                job_params['CI_TEST_ARGS'] = f"{job_params.get('CI_TEST_ARGS', '').rstrip()}{extra_test_args}"
+
+                build_p = [{'name': k, 'value': v} for k, v in sorted(job_params.items())]
+                json_payload = json.dumps({
+                    'parameter': build_p[0] if len(build_p) == 1 else build_p,
+                    'statusCode': '303',
+                    'redirectTo': '.',
+                })
+                post_data = {'json': json_payload, **job_params}
 
                 trigger_resp = self.session.post(
                     f'{self.ci_server}/job/{job_name}/buildWithParameters',
-                    params=job_params,
+                    data=post_data,
                     headers=crumb_headers,
                     auth=(username, token),
+                    allow_redirects=False,
                     timeout=20,
                 )
-                if trigger_resp.status_code not in (200, 201, 302):
+                if trigger_resp.status_code not in (200, 201, 302, 303):
                     raise RuntimeError(
                         f"Jenkins buildWithParameters failed (HTTP {trigger_resp.status_code}): "
                         f"{trigger_resp.text[:200]}"
@@ -643,8 +821,8 @@ class JenkinsManager:
                 comment_md = (
                     f"Pull Requests:\n* {gist_info['base_repo']}#{pr_num}\n\n"
                     f"Gist: {gist_info['raw_url']}\n"
-                    f"BUILD args: {build_args}\n"
-                    f"TEST args: {test_args}\n"
+                    f"BUILD args: {extra_build_args.strip()}\n"
+                    f"TEST args: {extra_test_args.strip()}\n"
                     f"ROS Distro: {distro}\n"
                     f"Job: {job_name}\n"
                     f"{job_name} ran: {job_url}\n"

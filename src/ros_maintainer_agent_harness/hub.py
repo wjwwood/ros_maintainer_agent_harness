@@ -589,7 +589,14 @@ def build_task_conversation_prompt(
    - For policy-guarded remote pushes and Jenkins CI runs, use the MCP tools (`git_push`, `launch_jenkins_ci`,
      `get_ci_status`, `get_ci_summary`, `find_restarted_ci`) or their host CLI equivalents:
      - `ros-maintainer-harness -w {ws_str} git-push -s {session_id} -b <branch> --remote <remote> -m "<reason>"`
-     - `ros-maintainer-harness -w {ws_str} ci launch -s {session_id} --pr <pr_url> --packages <pkgs> --comment -m "..."`
+     - `ros-maintainer-harness -w {ws_str} ci launch -s {session_id} --comment -m "Run CI"`
+       *(PR URL, distro, and affected ROS 2 packages are auto-detected from `{session_id}` when omitted).*
+5. **Mandatory Escalation Rule (Never Debug or Circumvent the Harness)**:
+   - Do **NOT** invoke `docker` or `podman` directly; the `PreToolUse` hook routes session commands into the container.
+   - Do **NOT** read or debug `ros_maintainer_agent_harness` source files (`ci.py`, `server.py`, `hooks.py`),
+     `ci_for_pr.py`, `mcp_config.json`, `hooks.json`, or conversation transcripts (`transcript.jsonl`).
+   - Do **NOT** extract host credentials (`gh auth token`) or use subshell workarounds (`$(...)`).
+   - If any MCP tool, CLI command, or hook fails, **STOP immediately and ask the user for help**.
 {hub_section}{extra_section}"""
 
 
