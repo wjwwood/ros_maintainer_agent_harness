@@ -356,7 +356,7 @@ class TestMCPServer(unittest.TestCase):
         })
         self.assertEqual(resp_res['status'], 'APPROVED')
 
-        # 4. Call create_pull_request with approved ticket
+        # 4. Call create_pull_request with approved ticket (dry_run=True)
         res_approved = self._call('create_pull_request', {
             'session_id': 'session-1',
             'repo': 'ros2/rclcpp',
@@ -370,6 +370,38 @@ class TestMCPServer(unittest.TestCase):
         })
         self.assertTrue(res_approved['success'])
         self.assertEqual(res_approved['status'], 'APPROVED')
+
+        # 5. Call create_pull_request with body_file and dry_run=False (mocked GitHub API)
+        session_dir = self.workspace.sessions_dir / 'session-1'
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / 'pr_body.md').write_text('Fixes #123 with `SIGINT` handling\n', encoding='utf-8')
+        with patch('ros_maintainer_agent_harness.server._execute_github_create_pr') as mock_gh_pr:
+            mock_gh_pr.return_value = {
+                'success': True,
+                'pr_url': 'https://github.com/ros2/rclcpp/pull/1003',
+                'pr_number': 1003,
+            }
+            res_live = self._call('create_pull_request', {
+                'session_id': 'session-1',
+                'repo': 'ros2/rclcpp',
+                'title': 'Fix memory leak',
+                'body_file': '/workspace/pr_body.md',
+                'head': 'wjwwood:fix_leak',
+                'base': 'rolling',
+                'reason': 'Open PR for maintainer review',
+                'approval_ticket_id': ticket_id,
+                'dry_run': False,
+            })
+            self.assertTrue(res_live['success'])
+            self.assertEqual(res_live['pr_url'], 'https://github.com/ros2/rclcpp/pull/1003')
+            self.assertEqual(res_live['pr_number'], 1003)
+            mock_gh_pr.assert_called_once_with(
+                repo='ros2/rclcpp',
+                title='Fix memory leak',
+                body='Fixes #123 with `SIGINT` handling\n',
+                head='wjwwood:fix_leak',
+                base='rolling',
+            )
 
     def test_session_lifecycle_tools(self):
         # Create session

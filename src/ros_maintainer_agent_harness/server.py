@@ -368,18 +368,125 @@ def perform_find_restarted_ci(
     return res
 
 
+def resolve_session_file_path(session_dir: Path, file_path: str) -> Path:
+    """
+    Resolve a file path that may be a container path (`/workspace/...`),
+    a path relative to `session_dir` (or the single worktree in `session_dir/src`),
+    or an absolute host path.
+    """
+    cleaned = file_path.strip()
+    if cleaned == '/workspace':
+        return session_dir.resolve()
+    if cleaned.startswith('/workspace/'):
+        rel_part = cleaned[len('/workspace/'):]
+        return (session_dir / rel_part).resolve()
+
+    cand = Path(cleaned).expanduser()
+    if not cand.is_absolute():
+        if (session_dir / cand).exists():
+            return (session_dir / cand).resolve()
+        repo_dir = resolve_session_repo_path(session_dir)
+        if (repo_dir / cand).exists():
+            return (repo_dir / cand).resolve()
+        return (session_dir / cand).resolve()
+    return cand.resolve()
+
+
+def _execute_github_create_pr(
+    repo: str,
+    title: str,
+    body: str,
+    head: str,
+    base: str,
+) -> Dict[str, Any]:
+    """Create a Pull Request on GitHub via the REST API (or `gh api` fallback) on the host."""
+    import os
+    import subprocess
+    import requests
+
+    token = (
+        os.environ.get('ROS_HOST_GITHUB_TOKEN')
+        or os.environ.get('ROS_CI_GITHUB_TOKEN')
+        or os.environ.get('GITHUB_ACCESS_TOKEN')
+        or os.environ.get('GITHUB_TOKEN')
+        or os.environ.get('GH_TOKEN')
+        or ''
+    ).strip()
+
+    if not token:
+        try:
+            res = subprocess.run(
+                ['gh', 'auth', 'token'],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                token = res.stdout.strip()
+        except Exception:
+            pass
+
+    if not token:
+        return {
+            'success': False,
+            'error': 'No host GitHub authentication token available to create Pull Request.',
+        }
+
+    url = f'https://api.github.com/repos/{repo}/pulls'
+    try:
+        resp = requests.post(
+            url,
+            headers={
+                'Authorization': f'token {token}',
+                'Accept': 'application/vnd.github+json',
+            },
+            json={
+                'title': title,
+                'body': body or '',
+                'head': head,
+                'base': base,
+            },
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            return {
+                'success': True,
+                'pr_url': data.get('html_url', f'https://github.com/{repo}/pull/{data.get("number")}'),
+                'pr_number': data.get('number'),
+            }
+        try:
+            err_json = resp.json()
+            msg = err_json.get('message', f'HTTP {resp.status_code}')
+            errors = err_json.get('errors')
+            if errors:
+                msg = f"{msg} ({errors})"
+        except Exception:
+            msg = resp.text[:300] or f'HTTP {resp.status_code}'
+        return {
+            'success': False,
+            'error': f'GitHub API HTTP {resp.status_code}: {msg}',
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'GitHub API request failed: {e}',
+        }
+
+
 def perform_create_pull_request(
     workspace: WorkspaceLayout,
     session_id: str,
     repo: str,
     title: str,
-    body: str,
-    head: str,
+    body: str = '',
+    head: str = '',
     base: str = 'rolling',
     reason: str = '',
     approval_ticket_id: Optional[str] = None,
     dry_run: bool = False,
     approval_mgr: Optional[ApprovalManager] = None,
+    body_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a GitHub Pull Request with policy validation and maintainer approval ticket gating."""
     if not reason or not reason.strip():
@@ -393,6 +500,23 @@ def perform_create_pull_request(
     timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
     policy = workspace.get_policy()
     approval_mgr = approval_mgr or ApprovalManager(workspace.audit_dir / 'approvals.json')
+
+    if body_file and body_file.strip():
+        resolved_file = resolve_session_file_path(session_dir, body_file)
+        if not resolved_file.is_file():
+            return {
+                'success': False,
+                'status': 'REJECTED',
+                'error': f"PR body file not found: '{body_file}' (resolved to '{resolved_file}').",
+            }
+        body = resolved_file.read_text(encoding='utf-8')
+    elif not body and approval_ticket_id:
+        try:
+            existing_req = approval_mgr.get_request(approval_ticket_id)
+            if existing_req and isinstance(existing_req.details, dict) and existing_req.details.get('body'):
+                body = existing_req.details['body']
+        except Exception:
+            pass
 
     allowed, msg, requires_approval = policy.validate_pull_request_creation(
         repo_full_name=repo,
@@ -432,21 +556,47 @@ def perform_create_pull_request(
                 'message': f"{msg} Created approval ticket '{req.ticket_id}'.",
             }
 
-    # Approved or simulation
-    pr_number = 9999
-    pr_html_url = f"https://github.com/{repo}/pull/{pr_number}"
+    if dry_run:
+        pr_number = 9999
+        pr_html_url = f"https://github.com/{repo}/pull/{pr_number}"
+    else:
+        gh_res = _execute_github_create_pr(
+            repo=repo,
+            title=title,
+            body=body,
+            head=head,
+            base=base,
+        )
+        if not gh_res.get('success'):
+            err = gh_res.get('error', 'Failed to create Pull Request on GitHub')
+            timeline.log_action(
+                action='create_pull_request',
+                target=f"{repo}:{head}->{base}",
+                reason=reason,
+                status='FAILED',
+                details={'error': err},
+            )
+            return {
+                'success': False,
+                'status': 'FAILED',
+                'error': err,
+            }
+        pr_html_url = gh_res['pr_url']
+        pr_number = gh_res.get('pr_number')
+
     timeline.log_action(
         action='create_pull_request',
         target=f"{repo}:{head}->{base}",
         reason=reason,
         status='APPROVED',
-        details={'pr_url': pr_html_url, 'dry_run': dry_run},
+        details={'pr_url': pr_html_url, 'pr_number': pr_number, 'dry_run': dry_run},
     )
 
     return {
         'success': True,
         'status': 'APPROVED',
         'pr_url': pr_html_url,
+        'pr_number': pr_number,
         'repo': repo,
         'title': title,
         'dry_run': dry_run,
@@ -613,12 +763,13 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
         session_id: str,
         repo: str,
         title: str,
-        body: str,
-        head: str,
+        body: str = '',
+        head: str = '',
         base: str = 'rolling',
         reason: str = '',
         approval_ticket_id: Optional[str] = None,
         dry_run: bool = False,
+        body_file: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create a GitHub Pull Request (requires maintainer approval).
@@ -633,6 +784,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             reason: MANDATORY explanation for opening this PR.
             approval_ticket_id: Ticket ID approved by maintainer.
             dry_run: If True, simulate creation without GitHub API call.
+            body_file: Optional path to a markdown file containing the PR description.
         """
         return perform_create_pull_request(
             workspace=workspace,
@@ -646,6 +798,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             approval_ticket_id=approval_ticket_id,
             dry_run=dry_run,
             approval_mgr=approval_mgr,
+            body_file=body_file,
         )
 
     # 6. check_policy
