@@ -108,8 +108,13 @@ by the Host MCP Gateway:
 2. **Branch Naming**:
    - Use descriptive topic branches formatted like `<username>/<topic>` or `fix/<topic>`
      (e.g. `wjwwood/fix_timer_drift`).
-3. **Approval Gating**:
-   - Pushing to 3rd-party contributor forks or creating/editing PRs requires maintainer ticket approval.
+3. **Approval Gating & Pre-Filled PR Creation Links**:
+   - Pushing to 3rd-party contributor forks or editing existing PRs requires maintainer ticket approval.
+   - By default, `create_pull_request` (or `ros-maintainer-harness create-pr`) generates a pre-filled GitHub compare URL
+     (`--web-url` / `web_url=True`) so the maintainer can click the link, inspect both the diff and the PR
+     title/description in the browser, and click "Create pull request" themselves (no approval ticket needed).
+   - Only pass `web_url=False` (or `--api`) if the maintainer explicitly asks you to open the PR directly via the
+     GitHub REST API (which requires a maintainer approval ticket).
 4. **Mandatory Audit Reasons**:
    - Every mutating tool call requires an explicit, clear `reason` explaining why the action is performed.
 5. **PR Template & Concise Generative AI Attribution**:
@@ -351,6 +356,12 @@ def get_session_agent_instructions(
       `-F <body_file> --head <head> --base <base> -m "<reason>"`
       `ros-maintainer-harness -w {ws_str} edit-pr -s {session_id} --repo <owner/repo> --number <num>`
       `[--title "<title>"] -F <body_file> -m "<reason>"`
+    - **Default Pre-Filled GitHub Compare URL (`--web-url` / `web_url=True`)**:
+      - By default, `create_pull_request` / `create-pr` generates a pre-filled GitHub `/compare/...` URL
+        (`status: "WEB_URL_READY"`, no approval ticket required) so the maintainer can click the link, review both the
+        diff and the PR title/description in the browser, and click "Create pull request" themselves.
+      - Present the clickable compare link (and a copy-pasteable markdown block of the PR description) to the user.
+      - Only pass `web_url=False` / `--api` if the user explicitly asks you to submit the PR directly via the API.
     - **PR Template & Concise AI Attribution Rule**:
       - Always fill out the target repository/organization PR template (for `ros2` repositories: `## Description`,
         `### Is this user-facing behavior change?`, and `### Did you use Generative AI?`).

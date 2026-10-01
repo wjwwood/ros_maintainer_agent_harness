@@ -330,7 +330,48 @@ class TestMCPServer(unittest.TestCase):
         self.assertIn('ticket_id', res2)
 
     def test_create_and_respond_approval_request(self):
-        # 1. Create PR -> Pending approval
+        # 0. Default create_pull_request (web_url=True by default) -> returns pre-filled GitHub compare URL
+        #    immediately without requiring an approval ticket
+        res_web = self._call('create_pull_request', {
+            'session_id': 'session-1',
+            'repo': 'ros2/rclcpp',
+            'title': 'Fix memory leak',
+            'body': (
+                '## Description\nFix leak.\n\n'
+                '### Is this user-facing behavior change?\nNo.\n\n'
+                '### Did you use Generative AI?\nYes, Gemini\n'
+            ),
+            'head': 'wjwwood:fix_leak',
+            'base': 'rolling',
+            'reason': 'Generate pre-filled PR link for maintainer review',
+        })
+        self.assertTrue(res_web['success'])
+        self.assertEqual(res_web['status'], 'WEB_URL_READY')
+        self.assertEqual(res_web['mode'], 'web_url')
+        self.assertIn(
+            'https://github.com/ros2/rclcpp/compare/rolling...wjwwood:rclcpp:fix_leak?quick_pull=1',
+            res_web['compare_url'],
+        )
+        self.assertIn('title=Fix%20memory%20leak', res_web['compare_url'])
+        self.assertNotIn('template_warnings', res_web)
+
+        # Same-repo branch compare URL (head has no fork prefix or same owner)
+        res_web_same = self._call('create_pull_request', {
+            'session_id': 'session-1',
+            'repo': 'ros2/rclcpp',
+            'title': 'Fix memory leak',
+            'body': 'Fixes #123',
+            'head': 'wjwwood/fix_leak',
+            'base': 'rolling',
+            'reason': 'Generate pre-filled PR link for same-repo branch',
+        })
+        self.assertTrue(res_web_same['success'])
+        self.assertIn(
+            'https://github.com/ros2/rclcpp/compare/rolling...wjwwood/fix_leak?quick_pull=1',
+            res_web_same['compare_url'],
+        )
+
+        # 1. Create PR via direct API (web_url=False) -> Pending approval
         res = self._call('create_pull_request', {
             'session_id': 'session-1',
             'repo': 'ros2/rclcpp',
@@ -339,6 +380,7 @@ class TestMCPServer(unittest.TestCase):
             'head': 'wjwwood:fix_leak',
             'base': 'rolling',
             'reason': 'Open PR for maintainer review',
+            'web_url': False,
         })
         self.assertEqual(res['status'], 'PENDING_APPROVAL')
         ticket_id = res['ticket_id']
@@ -370,6 +412,7 @@ class TestMCPServer(unittest.TestCase):
         })
         self.assertTrue(res_approved['success'])
         self.assertEqual(res_approved['status'], 'APPROVED')
+        self.assertEqual(res_approved['mode'], 'api')
 
         # 5. Call create_pull_request with body_file and dry_run=False (mocked GitHub API)
         session_dir = self.workspace.sessions_dir / 'session-1'

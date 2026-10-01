@@ -61,6 +61,11 @@ class JenkinsCIPolicy:
 
 
 @dataclasses.dataclass
+class PullRequestPolicy:
+    default_creation_mode: str = 'web_url'  # 'web_url' or 'api'
+
+
+@dataclasses.dataclass
 class ServerConfig:
     host: str = '127.0.0.1'
     port: int = 8765
@@ -73,6 +78,7 @@ class HarnessPolicy:
     signing_key_id: Optional[str] = None
     git_push: GitPushPolicy = dataclasses.field(default_factory=GitPushPolicy)
     jenkins_ci: JenkinsCIPolicy = dataclasses.field(default_factory=JenkinsCIPolicy)
+    pull_request: PullRequestPolicy = dataclasses.field(default_factory=PullRequestPolicy)
     server: ServerConfig = dataclasses.field(default_factory=ServerConfig)
 
     def is_branch_push_allowed(
@@ -301,6 +307,11 @@ def load_policy(config_path: Path) -> HarnessPolicy:
         auto_cancel_superseded=jenkins_data.get('auto_cancel_superseded', True),
     )
 
+    pr_data = data.get('policies', {}).get('pull_request', {})
+    pr_policy = PullRequestPolicy(
+        default_creation_mode=pr_data.get('default_creation_mode', 'web_url'),
+    )
+
     server_data = data.get('policies', {}).get('server', {})
     server_config = ServerConfig(
         host=server_data.get('host', '127.0.0.1'),
@@ -314,6 +325,7 @@ def load_policy(config_path: Path) -> HarnessPolicy:
         signing_key_id=identity_data.get('signing_key_id'),
         git_push=git_push_policy,
         jenkins_ci=jenkins_policy,
+        pull_request=pr_policy,
         server=server_config,
     )
 
@@ -347,6 +359,9 @@ policies:
     max_concurrent_runs_per_pr: 1
     cooldown_seconds: 300
     auto_cancel_superseded: true
+
+  pull_request:
+    default_creation_mode: 'web_url'
 
   server:
     host: '127.0.0.1'

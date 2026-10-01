@@ -107,7 +107,11 @@ directly on the host OS.
 - Record progress milestones to `<session_dir>/timeline.md` using the MCP `log_status` tool or `ros-session-status`,
   and update session state via `update_session_status`.
 - Use the MCP gateway tools (`get_ci_status`, `get_ci_summary`, `launch_jenkins_ci`, `find_restarted_ci`,
-  `git_push`, `create_pull_request`) for all CI queries and policy-guarded remote mutations.
+  `git_push`, `create_pull_request`, `edit_pull_request`) for all CI queries and policy-guarded remote mutations.
+- By default, `create_pull_request` (and `ros-maintainer-harness create-pr`) generates a pre-filled GitHub compare URL
+  (`--web-url` / `web_url=True`, status `WEB_URL_READY`, no approval ticket required) so the maintainer can click the
+  link, inspect both the diff and the PR title/description in the browser, and click "Create pull request" themselves.
+  Only pass `web_url=False` (or `--api`) if the user explicitly asks to submit the PR directly via the GitHub API.
 
 ---
 
