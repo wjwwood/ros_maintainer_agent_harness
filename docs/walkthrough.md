@@ -143,6 +143,15 @@ When the agent is ready to push its branch to remote:
 
    *(Note: Currently, the agent relies on user confirmation in chat to know when an approval ticket is granted. A potential future enhancement is an event-driven notification or a blocking `wait_for_approval` tool so the agent can resume automatically).*
 
+### Opening a New Pull Request (Pre-Filled GitHub URL by Default)
+When a task involves opening a new Pull Request (after pushing a topic branch to `origin` or your fork):
+- By default, calling `create_pull_request` (or `ros-maintainer-harness create-pr`) generates a **pre-filled GitHub `/compare/<base>...<head>?quick_pull=1&title=...&body=...` URL** (`status: "WEB_URL_READY"`, no approval ticket required):
+  ```bash
+  ros-maintainer-harness create-pr -s pr-rclcpp-160 --repo ros2/rclcpp --title "Fix timer callback deadlock" -F pr_body.md --head wjwwood/fix_timer_deadlock --base rolling -m "Prepare PR for timer fix"
+  ```
+- Click the returned link to review the commit history, file diff, title, and pre-filled PR template description in your browser before clicking **Create pull request** yourself.
+- If you instead want the agent to open the PR directly via the GitHub REST API, pass `--api` (or `web_url=False` on the MCP tool), which gates creation on a maintainer approval ticket.
+
 ---
 
 ## 6. Cleanup

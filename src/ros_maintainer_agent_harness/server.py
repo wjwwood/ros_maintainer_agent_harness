@@ -252,6 +252,11 @@ def perform_launch_jenkins_ci(
     meta = read_session_metadata(session_dir) if session_dir.is_dir() else {}
     if not pr_url or not pr_url.strip():
         pr_url = str(meta.get('pr_url') or meta.get('pr_ref') or '').strip()
+    if not pr_url and session_dir.is_dir():
+        discovered_pr = _discover_open_pr_for_session(session_dir, meta)
+        if discovered_pr:
+            pr_url = discovered_pr
+            meta = read_session_metadata(session_dir)
     if not pr_url:
         return {
             'success': False,
@@ -584,6 +589,131 @@ def _execute_github_edit_pr(
         }
 
 
+def build_github_compare_pr_url(
+    repo: str,
+    base: str,
+    head: str,
+    title: str,
+    body: str = '',
+    max_url_length: int = 6000,
+) -> Dict[str, Any]:
+    """
+    Build a pre-filled GitHub '/compare/<base>...<head>?quick_pull=1&title=...&body=...' URL
+    so the maintainer can review the diff, title, and description in the browser before clicking
+    'Create pull request'.
+    """
+    from urllib.parse import quote, urlencode
+
+    repo_clean = repo.strip().strip('/')
+    repo_parts = repo_clean.split('/')
+    repo_owner = repo_parts[0] if len(repo_parts) >= 2 else ''
+    repo_name = repo_parts[1] if len(repo_parts) >= 2 else repo_clean
+
+    base_clean = (base or 'rolling').strip()
+    head_clean = (head or '').strip()
+
+    if ':' in head_clean:
+        h_parts = head_clean.split(':')
+        if len(h_parts) == 2:
+            head_owner, head_branch = h_parts[0].strip(), h_parts[1].strip()
+            if repo_owner and head_owner.lower() == repo_owner.lower():
+                head_spec = quote(head_branch, safe='/')
+            else:
+                head_spec = f"{quote(head_owner, safe='')}:{quote(repo_name, safe='')}:{quote(head_branch, safe='/')}"
+        else:
+            head_owner = h_parts[0].strip()
+            head_repo = h_parts[1].strip()
+            head_branch = ':'.join(h_parts[2:]).strip()
+            head_spec = f"{quote(head_owner, safe='')}:{quote(head_repo, safe='')}:{quote(head_branch, safe='/')}"
+    else:
+        head_spec = quote(head_clean, safe='/')
+
+    base_spec = quote(base_clean, safe='/')
+    compare_base_url = f"https://github.com/{repo_clean}/compare/{base_spec}...{head_spec}"
+
+    params_full = {'quick_pull': '1', 'title': title}
+    if body:
+        params_full['body'] = body
+    full_url = f"{compare_base_url}?{urlencode(params_full, quote_via=quote)}"
+
+    if body and len(full_url) > max_url_length:
+        params_short = {'quick_pull': '1', 'title': title}
+        short_url = f"{compare_base_url}?{urlencode(params_short, quote_via=quote)}"
+        return {
+            'compare_url': short_url,
+            'body_truncated_from_url': True,
+        }
+
+    return {
+        'compare_url': full_url,
+        'body_truncated_from_url': False,
+    }
+
+
+def _discover_open_pr_for_session(session_dir: Path, meta: Dict[str, Any]) -> Optional[str]:
+    """
+    Attempt to discover an open GitHub PR for a session whose PR was created by the maintainer
+    in the browser via a pre-filled compare URL.
+    """
+    import requests
+    from .git_ops import get_current_branch
+
+    repo = str(meta.get('pending_pr_repo') or '').strip()
+    head = str(meta.get('pending_pr_head') or '').strip()
+
+    if not repo or not head:
+        repo_dir = resolve_session_repo_path(session_dir)
+        if (repo_dir / '.git').exists():
+            if not repo:
+                repo = extract_repo_full_name(get_repo_remote_url(repo_dir, 'origin')) or ''
+            if not head:
+                head = get_current_branch(repo_dir) or ''
+
+    if not repo or '/' not in repo or not head:
+        return None
+
+    repo_owner = repo.split('/', 1)[0]
+    if ':' in head:
+        h_parts = head.split(':')
+        head_query = f"{h_parts[0]}:{h_parts[-1]}"
+    else:
+        head_query = f"{repo_owner}:{head}"
+
+    token = _resolve_host_github_token()
+    headers = {'Accept': 'application/vnd.github+json'}
+    if token:
+        headers['Authorization'] = f'token {token}'
+
+    try:
+        resp = requests.get(
+            f'https://api.github.com/repos/{repo}/pulls',
+            headers=headers,
+            params={'state': 'open', 'head': head_query},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            pulls = resp.json()
+            if isinstance(pulls, list) and pulls:
+                pr_data = pulls[0]
+                pr_num = pr_data.get('number')
+                pr_html_url = pr_data.get('html_url') or (
+                    f"https://github.com/{repo}/pull/{pr_num}" if pr_num else None
+                )
+                if pr_html_url and pr_num:
+                    write_session_metadata(
+                        session_dir,
+                        {
+                            'pr_url': pr_html_url,
+                            'pr_ref': f"{repo}#{pr_num}",
+                            'pr_title': pr_data.get('title') or meta.get('pending_pr_title'),
+                        },
+                    )
+                    return pr_html_url
+    except Exception:
+        pass
+    return None
+
+
 def perform_create_pull_request(
     workspace: WorkspaceLayout,
     session_id: str,
@@ -597,8 +727,13 @@ def perform_create_pull_request(
     dry_run: bool = False,
     approval_mgr: Optional[ApprovalManager] = None,
     body_file: Optional[str] = None,
+    web_url: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """Create a GitHub Pull Request with policy validation and maintainer approval ticket gating."""
+    """
+    Prepare a pre-filled GitHub compare URL for opening a Pull Request (default, `web_url=True`),
+    or create the Pull Request directly via the GitHub REST API (`web_url=False`, requires
+    maintainer approval ticket).
+    """
     if not reason or not reason.strip():
         return {
             'success': False,
@@ -644,6 +779,75 @@ def perform_create_pull_request(
             details={'error': msg},
         )
         return {'success': False, 'status': 'DENIED', 'error': msg}
+
+    if web_url is not None:
+        use_web_url = bool(web_url)
+    elif approval_ticket_id:
+        use_web_url = False
+    else:
+        use_web_url = (policy.pull_request.default_creation_mode != 'api')
+
+    if use_web_url:
+        url_info = build_github_compare_pr_url(
+            repo=repo,
+            base=base,
+            head=head,
+            title=title,
+            body=body,
+        )
+        compare_url = url_info['compare_url']
+        body_truncated = url_info['body_truncated_from_url']
+        if body_truncated:
+            template_warnings = list(template_warnings) + [
+                "PR description exceeded maximum safe URL query length and was omitted from the URL; "
+                "copy-paste the markdown description block directly into GitHub's PR form."
+            ]
+
+        if session_dir.is_dir():
+            write_session_metadata(
+                session_dir,
+                {
+                    'pending_pr_repo': repo,
+                    'pending_pr_head': head,
+                    'pending_pr_base': base,
+                    'pending_pr_title': title,
+                    'pr_compare_url': compare_url,
+                },
+            )
+
+        timeline.log_action(
+            action='create_pull_request',
+            target=f"{repo}:{head}->{base}",
+            reason=reason,
+            status='WEB_URL_READY',
+            details={
+                'mode': 'web_url',
+                'compare_url': compare_url,
+                'title': title,
+                'body_truncated_from_url': body_truncated,
+            },
+        )
+
+        out_web: Dict[str, Any] = {
+            'success': True,
+            'status': 'WEB_URL_READY',
+            'mode': 'web_url',
+            'pr_url': compare_url,
+            'compare_url': compare_url,
+            'repo': repo,
+            'head': head,
+            'base': base,
+            'title': title,
+            'body': body,
+            'body_truncated_from_url': body_truncated,
+            'message': (
+                "Generated pre-filled GitHub PR creation URL. Open the link in your browser to review "
+                "the diff, title, and description before clicking 'Create pull request'."
+            ),
+        }
+        if template_warnings:
+            out_web['template_warnings'] = template_warnings
+        return out_web
 
     if requires_approval:
         if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
@@ -699,17 +903,28 @@ def perform_create_pull_request(
         pr_html_url = gh_res['pr_url']
         pr_number = gh_res.get('pr_number')
 
+    if session_dir.is_dir() and pr_html_url and pr_number and not dry_run:
+        write_session_metadata(
+            session_dir,
+            {
+                'pr_url': pr_html_url,
+                'pr_ref': f"{repo}#{pr_number}",
+                'pr_title': title,
+            },
+        )
+
     timeline.log_action(
         action='create_pull_request',
         target=f"{repo}:{head}->{base}",
         reason=reason,
         status='APPROVED',
-        details={'pr_url': pr_html_url, 'pr_number': pr_number, 'dry_run': dry_run},
+        details={'mode': 'api', 'pr_url': pr_html_url, 'pr_number': pr_number, 'dry_run': dry_run},
     )
 
     out: Dict[str, Any] = {
         'success': True,
         'status': 'APPROVED',
+        'mode': 'api',
         'pr_url': pr_html_url,
         'pr_number': pr_number,
         'repo': repo,
@@ -1054,21 +1269,27 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
         approval_ticket_id: Optional[str] = None,
         dry_run: bool = False,
         body_file: Optional[str] = None,
+        web_url: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Create a GitHub Pull Request (requires maintainer approval).
+        Prepare a pre-filled GitHub compare URL for opening a Pull Request (default, `web_url=True`),
+        or create the Pull Request directly via the GitHub REST API (`web_url=False`, requires
+        maintainer approval ticket).
 
         Args:
             session_id: Active session identifier.
             repo: Target repository full name (e.g. 'ros2/rclcpp').
             title: Pull request title.
             body: Pull request description.
-            head: Head branch (e.g. 'wjwwood:feature_branch').
+            head: Head branch (e.g. 'wjwwood/feature_branch' or 'wjwwood:feature_branch').
             base: Base branch (e.g. 'rolling').
             reason: MANDATORY explanation for opening this PR.
-            approval_ticket_id: Ticket ID approved by maintainer.
+            approval_ticket_id: Ticket ID approved by maintainer (when `web_url=False`).
             dry_run: If True, simulate creation without GitHub API call.
             body_file: Optional path to a markdown file containing the PR description.
+            web_url: If True (default), return a pre-filled GitHub compare URL so the maintainer can
+                review the diff and description in the browser before clicking 'Create pull request'.
+                If False, create the PR directly via the GitHub REST API (requires approval ticket).
         """
         return perform_create_pull_request(
             workspace=workspace,
@@ -1083,6 +1304,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             dry_run=dry_run,
             approval_mgr=approval_mgr,
             body_file=body_file,
+            web_url=web_url,
         )
 
     # 5b. edit_pull_request

@@ -30,6 +30,11 @@ def dump_default_rules_md() -> str:
   with `ros-find-restarted-ci` before re-running.
 
 ## Pull Requests & Attribution
+- When opening a new pull request, prefer generating a pre-filled GitHub compare URL
+  (`create-pr` / `create_pull_request` defaults to `--web-url` / `web_url=True`) so the maintainer can click the link,
+  review both the diff and the PR title/description in the browser, and click "Create pull request" themselves.
+  Only use `--api` / `web_url=False` if the maintainer explicitly asks the agent to submit the PR directly via the
+  GitHub API.
 - When opening or updating a pull request, always fill out the target repository or organization PR template.
   For `ros2` repositories (`ros2/.github` `.github/PULL_REQUEST_TEMPLATE.md`), include:
   - `## Description`

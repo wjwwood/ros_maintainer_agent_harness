@@ -932,10 +932,7 @@ def handle_ci(args: argparse.Namespace) -> int:
         if not pr_url and args.session:
             session_dir = layout.sessions_dir / args.session
             meta = read_session_metadata(session_dir)
-            pr_url = meta.get('pr_url') or meta.get('pr_ref')
-        if not pr_url:
-            print("Error: PR URL or shorthand must be provided (via positional arg or --pr).", file=sys.stderr)
-            return 1
+            pr_url = meta.get('pr_url') or meta.get('pr_ref') or ''
 
         packages = None
         if args.packages:
@@ -1065,6 +1062,7 @@ def handle_create_pr(args: argparse.Namespace) -> int:
         approval_ticket_id=args.approval_ticket_id,
         dry_run=args.dry_run,
         body_file=getattr(args, 'body_file', None),
+        web_url=getattr(args, 'web_url', None),
     )
     if getattr(args, 'json', False):
         print(json.dumps(res, indent=2))
@@ -1072,7 +1070,15 @@ def handle_create_pr(args: argparse.Namespace) -> int:
         for w in res.get('template_warnings', []):
             print(f"⚠️  PR Template Warning: {w}", file=sys.stderr)
         if res.get('success'):
-            print(f"✅ Created Pull Request ({res.get('status')}): {res.get('pr_url')}")
+            if res.get('mode') == 'web_url':
+                print(f"🔗 Pre-filled GitHub PR creation URL ready ({res.get('status')}):")
+                print(f"   {res.get('compare_url') or res.get('pr_url')}")
+                print(
+                    "   (Open this link in your browser to review the diff, title, and description "
+                    "before clicking 'Create pull request'.)"
+                )
+            else:
+                print(f"✅ Created Pull Request ({res.get('status')}): {res.get('pr_url')}")
         elif res.get('status') == 'PENDING_APPROVAL':
             print(
                 f"🎟️  PENDING_APPROVAL: {res.get('message')}\n"
@@ -1352,7 +1358,8 @@ def parse_args():
 
     # create-pr (policy-guarded PR creation)
     cpr_parser = subparsers.add_parser(
-        'create-pr', help='Create a GitHub Pull Request with policy validation and maintainer approval gating'
+        'create-pr',
+        help='Generate a pre-filled GitHub PR creation URL (default) or create a PR directly via the GitHub API',
     )
     cpr_parser.add_argument('-s', '--session', type=str, required=True, help='Active session ID')
     cpr_parser.add_argument('--repo', type=str, required=True, help='Target repository full name (e.g. ros2/rclcpp)')
@@ -1366,8 +1373,16 @@ def parse_args():
     cpr_parser.add_argument('--base', type=str, default='rolling', help='Base branch (default: rolling)')
     cpr_parser.add_argument('-m', '--reason', type=str, required=True, help='Mandatory explanation for opening PR')
     cpr_parser.add_argument(
+        '--web-url', dest='web_url', action='store_true', default=None,
+        help='Generate a pre-filled GitHub compare URL for the maintainer to review in the browser (default)',
+    )
+    cpr_parser.add_argument(
+        '--api', dest='web_url', action='store_false',
+        help='Create the Pull Request directly via the GitHub REST API (requires maintainer approval ticket)',
+    )
+    cpr_parser.add_argument(
         '--approval-ticket-id', '--ticket', dest='approval_ticket_id', type=str, default=None,
-        help='Approved ticket ID',
+        help='Approved ticket ID (when using --api)',
     )
     cpr_parser.add_argument('--dry-run', action='store_true', help='Simulate creation without GitHub API call')
     cpr_parser.add_argument('--json', action='store_true', help='Output result as JSON')
