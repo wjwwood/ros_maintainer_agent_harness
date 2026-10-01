@@ -1063,6 +1063,7 @@ def handle_create_pr(args: argparse.Namespace) -> int:
         reason=args.reason,
         approval_ticket_id=args.approval_ticket_id,
         dry_run=args.dry_run,
+        body_file=getattr(args, 'body_file', None),
     )
     if getattr(args, 'json', False):
         print(json.dumps(res, indent=2))
@@ -1319,6 +1320,10 @@ def parse_args():
     cpr_parser.add_argument('--repo', type=str, required=True, help='Target repository full name (e.g. ros2/rclcpp)')
     cpr_parser.add_argument('--title', type=str, required=True, help='Pull request title')
     cpr_parser.add_argument('--body', type=str, default='', help='Pull request description')
+    cpr_parser.add_argument(
+        '-F', '--body-file', dest='body_file', type=str, default=None,
+        help='Read pull request description from file (resolved relative to session_dir or /workspace)',
+    )
     cpr_parser.add_argument('--head', type=str, required=True, help='Head branch (e.g. wjwwood:feature_branch)')
     cpr_parser.add_argument('--base', type=str, default='rolling', help='Base branch (default: rolling)')
     cpr_parser.add_argument('-m', '--reason', type=str, required=True, help='Mandatory explanation for opening PR')

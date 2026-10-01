@@ -215,11 +215,13 @@ def _first_executable_in_segment(segment: str) -> Optional[str]:
 def _split_top_level_segments(command_line: str, include_pipe: bool = False) -> List[str]:
     """
     Split a shell command string on top-level `&&`, `||`, `;`, or `\n`
-    (and optionally `|`) while ignoring separators inside single or double quotes.
+    (and optionally `|`) while ignoring separators inside single (`'...'`),
+    ANSI-C (`$'...'`), or double (`"..."`) quotes.
     """
     segments: List[str] = []
     buf: List[str] = []
     in_single = False
+    in_ansi_single = False
     in_double = False
     escaped = False
     i = 0
@@ -239,19 +241,30 @@ def _split_top_level_segments(command_line: str, include_pipe: bool = False) -> 
             i += 1
             continue
 
+        if not in_single and not in_ansi_single and not in_double and command_line.startswith("$'", i):
+            in_ansi_single = True
+            buf.append("$'")
+            i += 2
+            continue
+
         if ch == "'" and not in_double:
-            in_single = not in_single
+            if in_ansi_single:
+                in_ansi_single = False
+            elif not in_single:
+                in_single = True
+            else:
+                in_single = False
             buf.append(ch)
             i += 1
             continue
 
-        if ch == '"' and not in_single:
+        if ch == '"' and not in_single and not in_ansi_single:
             in_double = not in_double
             buf.append(ch)
             i += 1
             continue
 
-        if not in_single and not in_double:
+        if not in_single and not in_ansi_single and not in_double:
             if command_line.startswith('&&', i) or command_line.startswith('||', i):
                 seg = ''.join(buf).strip()
                 if seg:
@@ -277,8 +290,12 @@ def _split_top_level_segments(command_line: str, include_pipe: bool = False) -> 
 
 
 def _contains_shell_substitution(command_line: str) -> bool:
-    """Return True if `command_line` contains `$(`, backticks, or process substitution outside single quotes."""
+    """
+    Return True if `command_line` contains `$(`, backticks, or process substitution
+    outside single quotes (`'...'` and ANSI-C `$'...'`).
+    """
     in_single = False
+    in_ansi_single = False
     in_double = False
     escaped = False
     i = 0
@@ -293,15 +310,24 @@ def _contains_shell_substitution(command_line: str) -> bool:
             escaped = True
             i += 1
             continue
+        if not in_single and not in_ansi_single and not in_double and command_line.startswith("$'", i):
+            in_ansi_single = True
+            i += 2
+            continue
         if ch == "'" and not in_double:
-            in_single = not in_single
+            if in_ansi_single:
+                in_ansi_single = False
+            elif not in_single:
+                in_single = True
+            else:
+                in_single = False
             i += 1
             continue
-        if ch == '"' and not in_single:
-            in_double = not in_single and not in_double
+        if ch == '"' and not in_single and not in_ansi_single:
+            in_double = not in_double
             i += 1
             continue
-        if not in_single:
+        if not in_single and not in_ansi_single:
             if ch == '`':
                 return True
             if command_line.startswith('$(', i):
@@ -362,6 +388,13 @@ def is_forbidden_session_command(command_line: str, session_id: str) -> Optional
         return None
     if first_exe == 'ros-maintainer-harness' and 'session exec' in stripped:
         return None
+    if first_exe == 'ros-maintainer-harness' and _contains_shell_substitution(stripped):
+        return (
+            "Unquoted shell command substitution ($(...) or backticks inside double quotes) "
+            "is not permitted in host 'ros-maintainer-harness' commands. "
+            "Wrap arguments containing markdown backticks in single quotes ('...' or $'...') "
+            "or pass --body-file <path>."
+        )
 
     segments = _split_top_level_segments(stripped, include_pipe=True)
     for seg in segments:

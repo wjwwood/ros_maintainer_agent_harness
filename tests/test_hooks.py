@@ -435,6 +435,46 @@ class TestContainerHooks(unittest.TestCase):
                     self.assertEqual(kwargs['workdir'], '/workspace')
                     self.assertEqual(kwargs['command'], "python3 -c 'print(42)'")
 
+        # Test ANSI-C $'...' single-quoted markdown backticks in ros-maintainer-harness create-pr pass through
+        ansi_c_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': (
+                        f"ros-maintainer-harness -w {self.ws_root} create-pr -s pr-rclcpp-160 "
+                        "--repo ros2/launch --title 'Doc fix' "
+                        "--body $'This PR wasn\\'t handling `SIGINT` in `AsyncSafeSignalManager`' "
+                        "--head wjwwood/doc_fix --base rolling -m 'Open follow-up PR'"
+                    ),
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        res_ansi = evaluate_pre_tool_use(ansi_c_payload, workspace_root=self.ws_root)
+        self.assertNotIn('rmah-session-exec', res_ansi.get('overwrite', {}).get('CommandLine', ''))
+        self.assertNotEqual(res_ansi.get('decision'), 'deny')
+
+        # Test unquoted/double-quoted backticks in ros-maintainer-harness command are denied with helpful hint
+        dq_backtick_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': (
+                        f'ros-maintainer-harness -w {self.ws_root} create-pr -s pr-rclcpp-160 '
+                        '--repo ros2/launch --title "Doc fix" --body "Handles `SIGINT`"'
+                    ),
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        res_dq = evaluate_pre_tool_use(dq_backtick_payload, workspace_root=self.ws_root)
+        self.assertEqual(res_dq.get('decision'), 'deny')
+        self.assertIn('--body-file', res_dq.get('reason', ''))
+
     def test_install_hooks_merges_existing_config_without_duplicating(self):
         first = install_hooks_config(target_dir=self.ws_root, workspace_root=self.ws_root)
         second = install_hooks_config(target_dir=self.ws_root, workspace_root=self.ws_root)
