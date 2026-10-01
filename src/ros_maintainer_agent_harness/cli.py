@@ -55,6 +55,7 @@ from .rules import MaintainerRules
 from .scaffolder import scaffold_session_from_pr
 from .server import (
     perform_create_pull_request,
+    perform_edit_pull_request,
     perform_find_restarted_ci,
     perform_git_push,
     perform_launch_jenkins_ci,
@@ -1068,6 +1069,8 @@ def handle_create_pr(args: argparse.Namespace) -> int:
     if getattr(args, 'json', False):
         print(json.dumps(res, indent=2))
     else:
+        for w in res.get('template_warnings', []):
+            print(f"⚠️  PR Template Warning: {w}", file=sys.stderr)
         if res.get('success'):
             print(f"✅ Created Pull Request ({res.get('status')}): {res.get('pr_url')}")
         elif res.get('status') == 'PENDING_APPROVAL':
@@ -1078,6 +1081,41 @@ def handle_create_pr(args: argparse.Namespace) -> int:
             )
         else:
             print(f"❌ Create PR {res.get('status')}: {res.get('error')}", file=sys.stderr)
+    return 0 if res.get('success') else 1
+
+
+def handle_edit_pr(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    pr_url = getattr(args, 'pr_opt', None) or getattr(args, 'pr_target', None)
+    res = perform_edit_pull_request(
+        workspace=layout,
+        session_id=args.session,
+        repo=args.repo,
+        pr_number=args.number,
+        pr_url=pr_url,
+        title=args.title,
+        body=args.body,
+        body_file=getattr(args, 'body_file', None),
+        reason=args.reason,
+        approval_ticket_id=args.approval_ticket_id,
+        dry_run=args.dry_run,
+    )
+    if getattr(args, 'json', False):
+        print(json.dumps(res, indent=2))
+    else:
+        for w in res.get('template_warnings', []):
+            print(f"⚠️  PR Template Warning: {w}", file=sys.stderr)
+        if res.get('success'):
+            print(f"✅ Updated Pull Request ({res.get('status')}): {res.get('pr_url')}")
+        elif res.get('status') == 'PENDING_APPROVAL':
+            print(
+                f"🎟️  PENDING_APPROVAL: {res.get('message')}\n"
+                f"   Approve with: ros-maintainer-harness -w {layout.root} approval approve {res.get('ticket_id')}\n"
+                f"   Then re-run with: --approval-ticket-id {res.get('ticket_id')}"
+            )
+        else:
+            print(f"❌ Edit PR {res.get('status')}: {res.get('error')}", file=sys.stderr)
     return 0 if res.get('success') else 1
 
 
@@ -1334,6 +1372,33 @@ def parse_args():
     cpr_parser.add_argument('--dry-run', action='store_true', help='Simulate creation without GitHub API call')
     cpr_parser.add_argument('--json', action='store_true', help='Output result as JSON')
 
+    # edit-pr (policy-guarded PR update)
+    epr_parser = subparsers.add_parser(
+        'edit-pr', help='Edit an existing GitHub Pull Request title or body with policy validation and approval gating'
+    )
+    epr_parser.add_argument(
+        'pr_target', nargs='?', default=None, help='Optional PR URL or shorthand (e.g. ros2/launch#1025)'
+    )
+    epr_parser.add_argument('-s', '--session', type=str, required=True, help='Active session ID')
+    epr_parser.add_argument('--repo', type=str, default=None, help='Target repository full name (e.g. ros2/launch)')
+    epr_parser.add_argument(
+        '--number', '--pr-number', dest='number', type=int, default=None, help='Pull request number'
+    )
+    epr_parser.add_argument('--pr', '--pr-url', dest='pr_opt', type=str, default=None, help='PR URL or shorthand')
+    epr_parser.add_argument('--title', type=str, default=None, help='Updated pull request title')
+    epr_parser.add_argument('--body', type=str, default=None, help='Updated pull request description')
+    epr_parser.add_argument(
+        '-F', '--body-file', dest='body_file', type=str, default=None,
+        help='Read updated pull request description from file (resolved relative to session_dir or /workspace)',
+    )
+    epr_parser.add_argument('-m', '--reason', type=str, required=True, help='Mandatory explanation for editing PR')
+    epr_parser.add_argument(
+        '--approval-ticket-id', '--ticket', dest='approval_ticket_id', type=str, default=None,
+        help='Approved ticket ID',
+    )
+    epr_parser.add_argument('--dry-run', action='store_true', help='Simulate edit without GitHub API call')
+    epr_parser.add_argument('--json', action='store_true', help='Output result as JSON')
+
     # rules
     rules_parser = subparsers.add_parser('rules', help='View or update maintainer style & preferences')
     rules_subparsers = rules_parser.add_subparsers(dest='rules_action')
@@ -1547,6 +1612,8 @@ def main():
         return handle_git_push(args)
     elif args.command == 'create-pr':
         return handle_create_pr(args)
+    elif args.command == 'edit-pr':
+        return handle_edit_pr(args)
     elif args.command == 'rules':
         return handle_rules(args)
     elif args.command == 'policy':

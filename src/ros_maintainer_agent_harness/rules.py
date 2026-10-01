@@ -30,7 +30,20 @@ def dump_default_rules_md() -> str:
   with `ros-find-restarted-ci` before re-running.
 
 ## Pull Requests & Attribution
-- In PR templates, set the Generative AI attribution field to `Yes, Gemini`.
+- When opening or updating a pull request, always fill out the target repository or organization PR template.
+  For `ros2` repositories (`ros2/.github` `.github/PULL_REQUEST_TEMPLATE.md`), include:
+  - `## Description`
+  - `### Is this user-facing behavior change?`
+    (always include and answer, even if just `No, documentation changes only.`)
+  - `### Did you use Generative AI?`
+  - `### Additional Information`
+    (only include when there is a problem or extra context needed to understand the change;
+    otherwise omit this section entirely)
+- Always include the Generative AI attribution under `### Did you use Generative AI?`, kept simple and concise
+  (tool/model name only, no long disclosure paragraph), e.g. `Yes, Claude Opus 5.5` or `Yes, Gemini`.
+- Do NOT mention running local builds or tests in PR descriptions (that is assumed).
+- When drafting PR descriptions or comments for the maintainer, prefer providing a copy-pasteable markdown block
+  directly in the conversation (with a file as an acceptable fallback).
 
 ## General
 - Always review linter errors before launching Jenkins CI.

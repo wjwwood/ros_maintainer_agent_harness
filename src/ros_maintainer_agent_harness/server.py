@@ -392,17 +392,45 @@ def resolve_session_file_path(session_dir: Path, file_path: str) -> Path:
     return cand.resolve()
 
 
-def _execute_github_create_pr(
-    repo: str,
-    title: str,
-    body: str,
-    head: str,
-    base: str,
-) -> Dict[str, Any]:
-    """Create a Pull Request on GitHub via the REST API (or `gh api` fallback) on the host."""
+def check_pr_body_template(repo: str, body: str) -> List[str]:
+    """
+    Check whether a PR description body includes the expected PR template sections
+    and a concise Generative AI attribution.
+    """
+    warnings: List[str] = []
+    text = (body or '').strip()
+    if not text:
+        warnings.append(
+            "PR body is empty. Always fill out the target repo/org PR template and include "
+            "'### Did you use Generative AI?' with a concise attribution (e.g. 'Yes, Claude Opus 5.5')."
+        )
+        return warnings
+
+    lower_text = text.lower()
+    if 'did you use generative ai' not in lower_text and 'generative ai' not in lower_text:
+        warnings.append(
+            "Missing '### Did you use Generative AI?' section in PR body. "
+            "Always include a concise attribution (e.g. 'Yes, Claude Opus 5.5' or 'Yes, Gemini')."
+        )
+
+    if repo and repo.lower().startswith('ros2/'):
+        required_headings = (
+            '## Description',
+            '### Is this user-facing behavior change?',
+            '### Did you use Generative AI?',
+        )
+        missing = [h for h in required_headings if h.lower() not in lower_text]
+        if missing:
+            warnings.append(
+                f"PR body for '{repo}' is missing ros2/.github PR template section(s): {', '.join(missing)}."
+            )
+    return warnings
+
+
+def _resolve_host_github_token() -> str:
+    """Resolve a host GitHub token for creating or editing Pull Requests."""
     import os
     import subprocess
-    import requests
 
     token = (
         os.environ.get('ROS_HOST_GITHUB_TOKEN')
@@ -425,7 +453,20 @@ def _execute_github_create_pr(
                 token = res.stdout.strip()
         except Exception:
             pass
+    return token
 
+
+def _execute_github_create_pr(
+    repo: str,
+    title: str,
+    body: str,
+    head: str,
+    base: str,
+) -> Dict[str, Any]:
+    """Create a Pull Request on GitHub via the REST API on the host."""
+    import requests
+
+    token = _resolve_host_github_token()
     if not token:
         return {
             'success': False,
@@ -454,6 +495,66 @@ def _execute_github_create_pr(
                 'success': True,
                 'pr_url': data.get('html_url', f'https://github.com/{repo}/pull/{data.get("number")}'),
                 'pr_number': data.get('number'),
+            }
+        try:
+            err_json = resp.json()
+            msg = err_json.get('message', f'HTTP {resp.status_code}')
+            errors = err_json.get('errors')
+            if errors:
+                msg = f"{msg} ({errors})"
+        except Exception:
+            msg = resp.text[:300] or f'HTTP {resp.status_code}'
+        return {
+            'success': False,
+            'error': f'GitHub API HTTP {resp.status_code}: {msg}',
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'GitHub API request failed: {e}',
+        }
+
+
+def _execute_github_edit_pr(
+    repo: str,
+    pr_number: int,
+    title: Optional[str] = None,
+    body: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Update an existing Pull Request title and/or body on GitHub via the REST API on the host."""
+    import requests
+
+    token = _resolve_host_github_token()
+    if not token:
+        return {
+            'success': False,
+            'error': 'No host GitHub authentication token available to edit Pull Request.',
+        }
+
+    payload: Dict[str, Any] = {}
+    if title is not None:
+        payload['title'] = title
+    if body is not None:
+        payload['body'] = body
+
+    url = f'https://api.github.com/repos/{repo}/pulls/{pr_number}'
+    try:
+        resp = requests.patch(
+            url,
+            headers={
+                'Authorization': f'token {token}',
+                'Accept': 'application/vnd.github+json',
+            },
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                'success': True,
+                'pr_url': data.get('html_url', f'https://github.com/{repo}/pull/{pr_number}'),
+                'pr_number': data.get('number', pr_number),
+                'title': data.get('title', title),
             }
         try:
             err_json = resp.json()
@@ -518,6 +619,8 @@ def perform_create_pull_request(
         except Exception:
             pass
 
+    template_warnings = check_pr_body_template(repo, body)
+
     allowed, msg, requires_approval = policy.validate_pull_request_creation(
         repo_full_name=repo,
         base_branch=base,
@@ -549,12 +652,15 @@ def perform_create_pull_request(
                 status='PENDING_APPROVAL',
                 details={'ticket_id': req.ticket_id},
             )
-            return {
+            res_pending: Dict[str, Any] = {
                 'success': False,
                 'status': 'PENDING_APPROVAL',
                 'ticket_id': req.ticket_id,
                 'message': f"{msg} Created approval ticket '{req.ticket_id}'.",
             }
+            if template_warnings:
+                res_pending['template_warnings'] = template_warnings
+            return res_pending
 
     if dry_run:
         pr_number = 9999
@@ -592,7 +698,7 @@ def perform_create_pull_request(
         details={'pr_url': pr_html_url, 'pr_number': pr_number, 'dry_run': dry_run},
     )
 
-    return {
+    out: Dict[str, Any] = {
         'success': True,
         'status': 'APPROVED',
         'pr_url': pr_html_url,
@@ -601,6 +707,175 @@ def perform_create_pull_request(
         'title': title,
         'dry_run': dry_run,
     }
+    if template_warnings:
+        out['template_warnings'] = template_warnings
+    return out
+
+
+def perform_edit_pull_request(
+    workspace: WorkspaceLayout,
+    session_id: str,
+    repo: Optional[str] = None,
+    pr_number: Optional[int] = None,
+    pr_url: Optional[str] = None,
+    title: Optional[str] = None,
+    body: Optional[str] = None,
+    body_file: Optional[str] = None,
+    reason: str = '',
+    approval_ticket_id: Optional[str] = None,
+    dry_run: bool = False,
+    approval_mgr: Optional[ApprovalManager] = None,
+) -> Dict[str, Any]:
+    """Edit an existing GitHub Pull Request title and/or body with policy validation and approval gating."""
+    from .ci import parse_pr_url
+
+    if not reason or not reason.strip():
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': 'Mandatory parameter `reason` must not be empty.',
+        }
+
+    session_dir = workspace.sessions_dir / session_id
+    timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
+    policy = workspace.get_policy()
+    approval_mgr = approval_mgr or ApprovalManager(workspace.audit_dir / 'approvals.json')
+
+    if pr_url and (not repo or not pr_number):
+        parsed_repo, parsed_num = parse_pr_url(pr_url)
+        repo = repo or parsed_repo
+        pr_number = pr_number or parsed_num
+
+    if not repo or not pr_number:
+        meta = read_session_metadata(session_dir)
+        fallback_ref = meta.get('pr_url') or meta.get('pr_ref') or ''
+        if fallback_ref:
+            parsed_repo, parsed_num = parse_pr_url(fallback_ref)
+            repo = repo or parsed_repo
+            pr_number = pr_number or parsed_num
+
+    if not repo or not pr_number:
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': 'Both `repo` (owner/repo) and `pr_number` (or `pr_url`) must be provided.',
+        }
+
+    if body_file and body_file.strip():
+        resolved_file = resolve_session_file_path(session_dir, body_file)
+        if not resolved_file.is_file():
+            return {
+                'success': False,
+                'status': 'REJECTED',
+                'error': f"PR body file not found: '{body_file}' (resolved to '{resolved_file}').",
+            }
+        body = resolved_file.read_text(encoding='utf-8')
+
+    if approval_ticket_id and title is None and body is None:
+        try:
+            existing_req = approval_mgr.get_request(approval_ticket_id)
+            if existing_req and isinstance(existing_req.details, dict):
+                if existing_req.details.get('title') is not None:
+                    title = existing_req.details['title']
+                if existing_req.details.get('body') is not None:
+                    body = existing_req.details['body']
+        except Exception:
+            pass
+
+    if title is None and body is None:
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': 'Provide at least one of `title`, `body`, or `body_file` to update the Pull Request.',
+        }
+
+    template_warnings = check_pr_body_template(repo, body) if body is not None else []
+    target_label = f"{repo}#{pr_number}"
+
+    allowed, msg, requires_approval = policy.validate_pull_request_creation(
+        repo_full_name=repo,
+    )
+    if not allowed:
+        timeline.log_action(
+            action='edit_pull_request',
+            target=target_label,
+            reason=reason,
+            status='DENIED',
+            details={'error': msg},
+        )
+        return {'success': False, 'status': 'DENIED', 'error': msg}
+
+    if requires_approval:
+        if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
+            req = approval_mgr.create_request(
+                session_id=session_id,
+                action='edit_pull_request',
+                target=target_label,
+                reason=reason,
+                details={'repo': repo, 'pr_number': pr_number, 'title': title, 'body': body},
+            )
+            timeline.log_action(
+                action='edit_pull_request',
+                target=target_label,
+                reason=reason,
+                status='PENDING_APPROVAL',
+                details={'ticket_id': req.ticket_id},
+            )
+            res_pending: Dict[str, Any] = {
+                'success': False,
+                'status': 'PENDING_APPROVAL',
+                'ticket_id': req.ticket_id,
+                'message': f"Editing Pull Request '{target_label}' requires maintainer approval. "
+                           f"Created approval ticket '{req.ticket_id}'.",
+            }
+            if template_warnings:
+                res_pending['template_warnings'] = template_warnings
+            return res_pending
+
+    pr_html_url = f"https://github.com/{repo}/pull/{pr_number}"
+    if not dry_run:
+        gh_res = _execute_github_edit_pr(
+            repo=repo,
+            pr_number=pr_number,
+            title=title,
+            body=body,
+        )
+        if not gh_res.get('success'):
+            err = gh_res.get('error', 'Failed to edit Pull Request on GitHub')
+            timeline.log_action(
+                action='edit_pull_request',
+                target=target_label,
+                reason=reason,
+                status='FAILED',
+                details={'error': err},
+            )
+            return {
+                'success': False,
+                'status': 'FAILED',
+                'error': err,
+            }
+        pr_html_url = gh_res.get('pr_url', pr_html_url)
+
+    timeline.log_action(
+        action='edit_pull_request',
+        target=target_label,
+        reason=reason,
+        status='APPROVED',
+        details={'pr_url': pr_html_url, 'pr_number': pr_number, 'dry_run': dry_run},
+    )
+
+    out: Dict[str, Any] = {
+        'success': True,
+        'status': 'APPROVED',
+        'pr_url': pr_html_url,
+        'pr_number': pr_number,
+        'repo': repo,
+        'title': title,
+        'dry_run': dry_run,
+    }
+    if template_warnings:
+        out['template_warnings'] = template_warnings
+    return out
 
 
 def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
@@ -799,6 +1074,50 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             dry_run=dry_run,
             approval_mgr=approval_mgr,
             body_file=body_file,
+        )
+
+    # 5b. edit_pull_request
+    @server.tool()
+    def edit_pull_request(
+        session_id: str,
+        repo: Optional[str] = None,
+        pr_number: Optional[int] = None,
+        pr_url: Optional[str] = None,
+        title: Optional[str] = None,
+        body: Optional[str] = None,
+        body_file: Optional[str] = None,
+        reason: str = '',
+        approval_ticket_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Edit an existing GitHub Pull Request title and/or body (requires maintainer approval).
+
+        Args:
+            session_id: Active session identifier.
+            repo: Target repository full name (e.g. 'ros2/launch').
+            pr_number: Pull request number (e.g. 1025).
+            pr_url: Optional PR URL or shorthand (e.g. 'ros2/launch#1025').
+            title: Optional updated pull request title.
+            body: Optional updated pull request description.
+            body_file: Optional path to a markdown file containing the updated PR description.
+            reason: MANDATORY explanation for editing this PR.
+            approval_ticket_id: Ticket ID approved by maintainer.
+            dry_run: If True, simulate edit without GitHub API call.
+        """
+        return perform_edit_pull_request(
+            workspace=workspace,
+            session_id=session_id,
+            repo=repo,
+            pr_number=pr_number,
+            pr_url=pr_url,
+            title=title,
+            body=body,
+            body_file=body_file,
+            reason=reason,
+            approval_ticket_id=approval_ticket_id,
+            dry_run=dry_run,
+            approval_mgr=approval_mgr,
         )
 
     # 6. check_policy
