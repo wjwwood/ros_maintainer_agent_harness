@@ -99,8 +99,8 @@ ros-session-status -m "Build Succeeded" "Fixed compilation error in executor.cpp
 ## 4. Safety Guardrails & Policy Gateway
 
 You do not have direct write access or push credentials to remote Git repositories inside the container.
-All remote mutations (`git_push`, `launch_jenkins_ci`, `create_pull_request`) are policy-guarded by the
-Host MCP Gateway:
+All remote mutations (`git_push`, `launch_jenkins_ci`, `create_pull_request`, `edit_pull_request`) are policy-guarded
+by the Host MCP Gateway:
 
 1. **Base Distro Branch Protection**:
    - Pushing directly to base distribution branches
@@ -109,9 +109,22 @@ Host MCP Gateway:
    - Use descriptive topic branches formatted like `<username>/<topic>` or `fix/<topic>`
      (e.g. `wjwwood/fix_timer_drift`).
 3. **Approval Gating**:
-   - Pushing to 3rd-party contributor forks or creating PRs requires maintainer ticket approval.
+   - Pushing to 3rd-party contributor forks or creating/editing PRs requires maintainer ticket approval.
 4. **Mandatory Audit Reasons**:
    - Every mutating tool call requires an explicit, clear `reason` explaining why the action is performed.
+5. **PR Template & Concise Generative AI Attribution**:
+   - When creating or editing a Pull Request, always follow the target repository/organization PR template
+     (for `ros2` repos: `## Description`, `### Is this user-facing behavior change?`, and
+     `### Did you use Generative AI?`).
+   - Always include and answer `### Is this user-facing behavior change?`, even if just
+     `No, documentation changes only.`
+   - Always include the Generative AI attribution under `### Did you use Generative AI?`, kept simple and concise
+     (tool/model name only, no long disclosure paragraph), e.g. `Yes, Claude Opus 5.5` or `Yes, Gemini`.
+   - Only include `### Additional Information` when there is a problem or extra context needed to understand the
+     change; otherwise omit that section entirely.
+   - Do NOT mention running local tests or builds in PR descriptions (that is assumed).
+   - When drafting PR descriptions or comments for the user, prefer providing a copy-pasteable markdown block
+     directly in the conversation (with a file as an acceptable fallback).
 
 ---
 
@@ -328,6 +341,29 @@ def get_session_agent_instructions(
     - CLI: `ros-maintainer-harness -w {ws_str} git-push -s {session_id} -b <branch> --remote <remote> -m "<reason>"`
       *(If pushing to an external contributor fork returns `PENDING_APPROVAL` with a `ticket_id`, ask the maintainer or
       Hub conversation for approval, then re-run with `--approval-ticket-id <ticket_id>`).*
+  - **Create or Edit Pull Request**:
+    - MCP: `create_pull_request(session_id="{session_id}", repo="...", title="...", body_file="...",`
+      `head="...", base="...", reason="...")`
+      or `edit_pull_request(session_id="{session_id}", repo="...", pr_number=123, title="...",`
+      `body_file="...", reason="...")`
+    - CLI:
+      `ros-maintainer-harness -w {ws_str} create-pr -s {session_id} --repo <owner/repo> --title "<title>"`
+      `-F <body_file> --head <head> --base <base> -m "<reason>"`
+      `ros-maintainer-harness -w {ws_str} edit-pr -s {session_id} --repo <owner/repo> --number <num>`
+      `[--title "<title>"] -F <body_file> -m "<reason>"`
+    - **PR Template & Concise AI Attribution Rule**:
+      - Always fill out the target repository/organization PR template (for `ros2` repositories: `## Description`,
+        `### Is this user-facing behavior change?`, and `### Did you use Generative AI?`).
+      - Always include and answer `### Is this user-facing behavior change?`, even if just
+        `No, documentation changes only.`
+      - Always include the Generative AI attribution under `### Did you use Generative AI?`, kept simple and concise
+        (tool/model name only, no long disclosure paragraph), e.g. `Yes, Claude Opus 5.5` or `Yes, Gemini`.
+      - Only include `### Additional Information` when there is a problem or extra context needed to understand the
+        change; otherwise omit that section entirely.
+      - Do NOT mention running local tests or builds in PR descriptions (that is assumed).
+      - When drafting PR descriptions or comments for the user, prefer providing a copy-pasteable markdown block
+        directly in the conversation (with a file as an acceptable fallback).
+      - When calling `create-pr` or `edit-pr`, prefer passing `-F <file>` (`--body-file`) or single quotes (`'...'`).
   - **Launch Jenkins CI (One-Step)**:
     - MCP: `launch_jenkins_ci(session_id="{session_id}", comment=True, reason="...")`
     - CLI:

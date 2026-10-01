@@ -402,6 +402,56 @@ class TestMCPServer(unittest.TestCase):
                 head='wjwwood:fix_leak',
                 base='rolling',
             )
+            self.assertIn('template_warnings', res_live)
+
+        # 6. Test edit_pull_request with compliant ros2 PR template (no ### Additional Information required)
+        compliant_body = (
+            "## Description\n"
+            "Document signal handling.\n\n"
+            "### Is this user-facing behavior change?\n"
+            "No, documentation changes only.\n\n"
+            "### Did you use Generative AI?\n"
+            "Yes, Claude Opus 5.5\n"
+        )
+        (session_dir / 'edit_body.md').write_text(compliant_body, encoding='utf-8')
+        res_edit_pending = self._call('edit_pull_request', {
+            'session_id': 'session-1',
+            'pr_url': 'ros2/launch#1025',
+            'body_file': '/workspace/edit_body.md',
+            'reason': 'Update PR description to follow ros2 template',
+        })
+        self.assertEqual(res_edit_pending['status'], 'PENDING_APPROVAL')
+        self.assertNotIn('template_warnings', res_edit_pending)
+        edit_ticket_id = res_edit_pending['ticket_id']
+
+        self._call('respond_approval_request', {
+            'ticket_id': edit_ticket_id,
+            'approve': True,
+            'maintainer': 'wjwwood',
+        })
+        with patch('ros_maintainer_agent_harness.server._execute_github_edit_pr') as mock_gh_edit:
+            mock_gh_edit.return_value = {
+                'success': True,
+                'pr_url': 'https://github.com/ros2/launch/pull/1025',
+                'pr_number': 1025,
+                'title': 'Document signal handling',
+            }
+            res_edit_live = self._call('edit_pull_request', {
+                'session_id': 'session-1',
+                'pr_url': 'ros2/launch#1025',
+                'reason': 'Update PR description to follow ros2 template',
+                'approval_ticket_id': edit_ticket_id,
+                'dry_run': False,
+            })
+            self.assertTrue(res_edit_live['success'])
+            self.assertEqual(res_edit_live['pr_url'], 'https://github.com/ros2/launch/pull/1025')
+            self.assertNotIn('template_warnings', res_edit_live)
+            mock_gh_edit.assert_called_once_with(
+                repo='ros2/launch',
+                pr_number=1025,
+                title=None,
+                body=compliant_body,
+            )
 
     def test_session_lifecycle_tools(self):
         # Create session
