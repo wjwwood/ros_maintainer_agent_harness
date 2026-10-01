@@ -25,6 +25,8 @@ dependencies = [
 
 [project.scripts]
 ros-maintainer-harness = "ros_maintainer_agent_harness.cli:main"
+rmah-session-exec = "ros_maintainer_agent_harness.cli:session_exec_main"
+
 
 [tool.setuptools.packages.find]
 where = ["src"]

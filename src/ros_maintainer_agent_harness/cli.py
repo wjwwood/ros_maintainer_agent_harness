@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from typing import List, Optional, Tuple
 
 from .approval import ApprovalManager
 from .audit import format_audit_record, read_audit_records
@@ -1555,6 +1556,130 @@ def main():
         return handle_hook(args)
 
     return 0
+
+
+def infer_session_context_from_cwd(
+    cwd: Optional[Path] = None,
+) -> Optional[Tuple[Path, str, Path, str]]:
+    """
+    Infer (workspace_root, session_id, session_dir, container_workdir) from a host directory
+    inside `<workspace_root>/sessions/<session_id>[/<subdir>]`.
+    """
+    try:
+        cur = (cwd or Path.cwd()).resolve()
+    except Exception:
+        return None
+    parts = cur.parts
+    for idx in range(len(parts) - 1, -1, -1):
+        if parts[idx] == 'sessions' and idx + 1 < len(parts):
+            ws_root = Path(*parts[:idx])
+            session_id = parts[idx + 1]
+            session_dir = ws_root / 'sessions' / session_id
+            rel_parts = parts[idx + 2:]
+            container_workdir = '/workspace' + ('/' + '/'.join(rel_parts) if rel_parts else '')
+            return ws_root, session_id, session_dir, container_workdir
+    return None
+
+
+def session_exec_main(argv: Optional[List[str]] = None) -> int:
+    """
+    Concise CLI entry point (`rmah-session-exec`) for executing commands inside a session container.
+    Automatically infers workspace root, session ID, and container working directory from the host CWD
+    when invoked inside `<workspace_root>/sessions/<session_id>[/<subdir>]`.
+    """
+    parser = argparse.ArgumentParser(
+        prog='rmah-session-exec',
+        description='Execute a command inside the active ROS session sandbox container',
+    )
+    parser.add_argument('-w', '--workspace', type=str, default=None, help='Maintainer workspace root')
+    parser.add_argument('-s', '--session', type=str, default=None, help='Session ID (inferred from CWD if omitted)')
+    parser.add_argument(
+        '-d', '--workdir', type=str, default=None, help='Container workdir (inferred from CWD if omitted)'
+    )
+    parser.add_argument('--timeout', type=int, default=600, help='Command timeout in seconds (default: 600)')
+    parser.add_argument('--no-auto-start', action='store_true', help='Do not auto-start container if stopped')
+    parser.add_argument('exec_command', nargs=argparse.REMAINDER, help='Command to execute inside container')
+
+    args = parser.parse_args(argv)
+    inferred = infer_session_context_from_cwd()
+
+    ws_path = (
+        Path(args.workspace).resolve()
+        if args.workspace
+        else (inferred[0] if inferred else get_default_workspace_path())
+    )
+    session_id = args.session or (inferred[1] if inferred else None)
+    workdir = args.workdir or (inferred[3] if inferred else '/workspace')
+
+    cmd_parts = list(args.exec_command or [])
+    while cmd_parts:
+        opt = cmd_parts.pop(0)
+        if opt == '--':
+            break
+        elif opt in ('-d', '--workdir') and cmd_parts:
+            workdir = cmd_parts.pop(0)
+        elif opt in ('-s', '--session') and cmd_parts:
+            session_id = cmd_parts.pop(0)
+        elif opt in ('-w', '--workspace') and cmd_parts:
+            ws_path = Path(cmd_parts.pop(0)).resolve()
+        elif opt == '--timeout' and cmd_parts:
+            try:
+                args.timeout = int(cmd_parts.pop(0))
+            except ValueError:
+                pass
+        elif opt == '--no-auto-start':
+            args.no_auto_start = True
+        else:
+            cmd_parts.insert(0, opt)
+            break
+
+    if cmd_parts and cmd_parts[0] == '--':
+        cmd_parts = cmd_parts[1:]
+
+    if cmd_parts:
+        command_str = ' '.join(cmd_parts) if len(cmd_parts) > 1 else cmd_parts[0]
+    elif not sys.stdin.isatty():
+        command_str = sys.stdin.read().strip()
+    else:
+        command_str = ''
+
+    if not session_id:
+        print(
+            "Error: Could not infer session ID from current working directory. "
+            "Run inside <workspace>/sessions/<session_id> or pass -s <session_id>.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not command_str:
+        print("Error: Provide a command to execute inside the session container.", file=sys.stderr)
+        return 1
+
+    layout = WorkspaceLayout(ws_path)
+    mgr = SessionManager(layout)
+    if not mgr.session_exists(session_id):
+        print(f"Error: Session '{session_id}' does not exist in '{ws_path}'.", file=sys.stderr)
+        return 1
+
+    session_dir = mgr.get_session_dir(session_id)
+    info = mgr.get_session_info(session_id)
+    distro = info.distro if info and info.distro else 'rolling'
+
+    res = exec_in_session_container(
+        session_id=session_id,
+        command=command_str,
+        workdir=workdir,
+        timeout=args.timeout,
+        auto_start=not args.no_auto_start,
+        session_dir=session_dir,
+        workspace_root=layout.root,
+        distro=distro,
+    )
+    if res.get('stdout'):
+        sys.stdout.write(res['stdout'])
+    if res.get('stderr'):
+        sys.stderr.write(res['stderr'])
+    return int(res.get('returncode', 0 if res.get('success') else 1))
 
 
 if __name__ == '__main__':
