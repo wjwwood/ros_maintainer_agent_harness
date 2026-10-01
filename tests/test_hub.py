@@ -174,19 +174,32 @@ class TestHubCoordinator(unittest.TestCase):
             hub_uuid = '00000000-1111-2222-3333-444444444444'
             spawned_uuid = '99999999-8888-7777-6666-555555555555'
 
-            with patch('ros_maintainer_agent_harness.hub.find_agentapi_executable', return_value='/usr/bin/agentapi'):
-                with patch('ros_maintainer_agent_harness.hub.subprocess.run') as mock_run:
-                    mock_run.return_value = MagicMock(
-                        returncode=0,
-                        stdout=f'Started conversation {spawned_uuid}\n',
-                        stderr='',
-                    )
-                    res = start_session_conversation(
-                        workspace=ws,
-                        session_id='sess-50',
-                        hub_conversation_id=hub_uuid,
-                        mode='agentapi',
-                    )
+            with patch.dict(
+                'os.environ',
+                {
+                    'ANTIGRAVITY_PROJECT_ID': 'proj-123',
+                    'ANTIGRAVITY_SOURCE_METADATA': 'meta-abc',
+                },
+            ):
+                with patch(
+                    'ros_maintainer_agent_harness.hub.find_agentapi_executable',
+                    return_value='/usr/bin/agentapi',
+                ):
+                    with patch('ros_maintainer_agent_harness.hub.subprocess.run') as mock_run:
+                        mock_run.return_value = MagicMock(
+                            returncode=0,
+                            stdout=f'Started conversation {spawned_uuid}\n',
+                            stderr='',
+                        )
+                        res = start_session_conversation(
+                            workspace=ws,
+                            session_id='sess-50',
+                            hub_conversation_id=hub_uuid,
+                            mode='agentapi',
+                        )
+                        called_env = mock_run.call_args.kwargs.get('env', {})
+                        self.assertEqual(called_env.get('ANTIGRAVITY_PROJECT_ID'), 'proj-123')
+                        self.assertNotIn('ANTIGRAVITY_SOURCE_METADATA', called_env)
 
             self.assertTrue(res['success'])
             self.assertEqual(res['launch_method'], 'agentapi')

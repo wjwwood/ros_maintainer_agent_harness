@@ -718,13 +718,11 @@ def start_session_conversation(
         cmd.append(task_prompt)
 
         clean_env = dict(os.environ)
-        for key in (
-            'ANTIGRAVITY_SOURCE_METADATA',
-            'ANTIGRAVITY_PROJECT_ID',
-            'ANTIGRAVITY_CONVERSATION_ID',
-            'ANTIGRAVITY_TRAJECTORY_ID',
-        ):
-            clean_env.pop(key, None)
+        # Strip ANTIGRAVITY_SOURCE_METADATA so the new conversation is created as a
+        # top-level sidebar conversation ("sourceMetadata": null) rather than a hidden
+        # child/subagent of the Hub conversation, while preserving ANTIGRAVITY_PROJECT_ID
+        # so the conversation is attached to the current workspace project.
+        clean_env.pop('ANTIGRAVITY_SOURCE_METADATA', None)
 
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=clean_env)
         combined_out = (res.stdout or '') + '\n' + (res.stderr or '')
