@@ -624,6 +624,178 @@ class TestMCPServer(unittest.TestCase):
         self.assertEqual(res['session_id'], 'pr-rclcpp-160')
         self.assertEqual(res['distro'], 'rolling')
 
+    def test_push_release_and_run_bloom_release(self):
+        import argparse
+        from unittest.mock import MagicMock
+        from ros_maintainer_agent_harness.cli import handle_release
+        from ros_maintainer_agent_harness.worktree import read_session_metadata
+
+        origin_remote = self.ws_root / 'ros2' / 'launch.git'
+        subprocess.run(['git', 'init', '--bare', str(origin_remote)], check=True)
+
+        session_dir = self.workspace.sessions_dir / 'pr-launch-release'
+        repo_dir = session_dir / 'src' / 'launch'
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(['git', 'init', '-b', 'rolling'], cwd=str(repo_dir), check=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=str(repo_dir), check=True)
+        subprocess.run(['git', 'config', 'user.name', 'Tester'], cwd=str(repo_dir), check=True)
+        subprocess.run(['git', 'remote', 'add', 'origin', str(origin_remote)], cwd=str(repo_dir), check=True)
+        (repo_dir / 'package.xml').write_text('<version>3.10.1</version>\n')
+        subprocess.run(['git', 'add', '.'], cwd=str(repo_dir), check=True)
+        subprocess.run(['git', 'commit', '-m', 'Initial commit'], cwd=str(repo_dir), check=True)
+        subprocess.run(['git', 'push', 'origin', 'rolling'], cwd=str(repo_dir), check=True)
+
+        # Simulate catkin_prepare_release --no-push on local release-3.10.2 branch
+        subprocess.run(['git', 'checkout', '-b', 'release-3.10.2'], cwd=str(repo_dir), check=True)
+        (repo_dir / 'CHANGELOG.rst').write_text('3.10.2 changelog\n')
+        subprocess.run(['git', 'add', 'CHANGELOG.rst'], cwd=str(repo_dir), check=True)
+        subprocess.run(['git', 'commit', '-m', 'Update changelogs'], cwd=str(repo_dir), check=True)
+        (repo_dir / 'package.xml').write_text('<version>3.10.2</version>\n')
+        subprocess.run(['git', 'add', 'package.xml'], cwd=str(repo_dir), check=True)
+        subprocess.run(['git', 'commit', '-m', '3.10.2'], cwd=str(repo_dir), check=True)
+        subprocess.run(['git', 'tag', '3.10.2'], cwd=str(repo_dir), check=True)
+
+        # 1. Non-existent local tag -> REJECTED
+        res_bad_tag = self._call('push_release', {
+            'session_id': 'pr-launch-release',
+            'repo_path': 'launch',
+            'tag': '9.9.9',
+            'target_branch': 'rolling',
+            'reason': 'Push non-existent tag',
+        })
+        self.assertFalse(res_bad_tag['success'])
+        self.assertEqual(res_bad_tag['status'], 'REJECTED')
+
+        # 2. Valid local tag without approval ticket -> PENDING_APPROVAL
+        res_pending = self._call('push_release', {
+            'session_id': 'pr-launch-release',
+            'repo_path': 'launch',
+            'tag': '3.10.2',
+            'target_branch': 'rolling',
+            'reason': 'Push launch 3.10.2 release commit and tag to rolling',
+        })
+        self.assertFalse(res_pending['success'])
+        self.assertEqual(res_pending['status'], 'PENDING_APPROVAL')
+        ticket_id = res_pending['ticket_id']
+
+        # 3. Approve ticket and push via git_push(..., tag='3.10.2') delegation
+        self._call('respond_approval_request', {
+            'ticket_id': ticket_id,
+            'approve': True,
+            'maintainer': 'wjwwood',
+        })
+        res_pushed = self._call('git_push', {
+            'session_id': 'pr-launch-release',
+            'repo_path': 'launch',
+            'branch': 'rolling',
+            'tag': '3.10.2',
+            'reason': 'Push launch 3.10.2 release commit and tag to rolling',
+            'approval_ticket_id': ticket_id,
+        })
+        self.assertTrue(res_pushed['success'])
+        self.assertEqual(res_pushed['status'], 'APPROVED')
+        self.assertEqual(res_pushed['tag'], '3.10.2')
+
+        # Verify remote has both rolling branch at tag commit and refs/tags/3.10.2
+        remote_tags = subprocess.run(
+            ['git', f'--git-dir={origin_remote}', 'tag', '-l', '3.10.2'],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        self.assertEqual(remote_tags, '3.10.2')
+
+        # 4. Run bloom release without ticket -> PENDING_APPROVAL
+        bloom_pending = self._call('run_bloom_release', {
+            'session_id': 'pr-launch-release',
+            'repository': 'launch',
+            'rosdistro': 'rolling',
+            'reason': 'Run bloom-release for launch 3.10.2 into rolling',
+        })
+        self.assertFalse(bloom_pending['success'])
+        self.assertEqual(bloom_pending['status'], 'PENDING_APPROVAL')
+        bloom_ticket_id = bloom_pending['ticket_id']
+
+        # 5. Approve bloom ticket and run with mocked bloom-release executable
+        self._call('respond_approval_request', {
+            'ticket_id': bloom_ticket_id,
+            'approve': True,
+            'maintainer': 'wjwwood',
+        })
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = (
+            '==> Generating pull request to distro file located at '
+            "'https://raw.githubusercontent.com/ros/rosdistro/master/rolling/distribution.yaml'\n"
+            'Pull request opened at: https://github.com/ros/rosdistro/pull/45678\n'
+        )
+        mock_proc.stderr = ''
+        with patch(
+            'ros_maintainer_agent_harness.server._find_bloom_release_executable',
+            return_value='/usr/bin/bloom-release',
+        ):
+            with patch('subprocess.run', return_value=mock_proc):
+                bloom_ok = self._call('run_bloom_release', {
+                    'session_id': 'pr-launch-release',
+                    'repository': 'launch',
+                    'rosdistro': 'rolling',
+                    'reason': 'Run bloom-release for launch 3.10.2 into rolling',
+                    'approval_ticket_id': bloom_ticket_id,
+                })
+        self.assertTrue(bloom_ok['success'])
+        self.assertEqual(bloom_ok['status'], 'APPROVED')
+        self.assertEqual(bloom_ok['rosdistro_pr_url'], 'https://github.com/ros/rosdistro/pull/45678')
+
+        meta = read_session_metadata(session_dir)
+        self.assertEqual(
+            meta.get('last_rosdistro_pr_url'),
+            'https://github.com/ros/rosdistro/pull/45678',
+        )
+        self.assertIn(
+            'https://github.com/ros/rosdistro/pull/45678',
+            meta.get('rosdistro_pr_urls', []),
+        )
+
+        # 6. Test CLI handle_release dry-run for both push and bloom with approved tickets
+        rel_push_args = argparse.Namespace(
+            workspace=str(self.ws_root),
+            release_action='push',
+            session='pr-launch-release',
+            repo_path='launch',
+            tag='3.10.2',
+            target_branch='rolling',
+            remote='origin',
+            reason='Dry run release push',
+            approval_ticket_id=ticket_id,
+            dry_run=True,
+            json=True,
+        )
+        self.assertEqual(handle_release(rel_push_args), 0)
+
+        rel_bloom_args = argparse.Namespace(
+            workspace=str(self.ws_root),
+            release_action='bloom',
+            session='pr-launch-release',
+            repository='launch',
+            repository_opt=None,
+            rosdistro='rolling',
+            track='rolling',
+            interactive=False,
+            pretend=True,
+            no_pull_request=False,
+            pull_request_only=False,
+            reason='Dry run bloom release',
+            approval_ticket_id=bloom_ticket_id,
+            dry_run=True,
+            json=True,
+        )
+        with patch(
+            'ros_maintainer_agent_harness.server._find_bloom_release_executable',
+            return_value='/usr/bin/bloom-release',
+        ):
+            with patch('subprocess.run', return_value=mock_proc):
+                self.assertEqual(handle_release(rel_bloom_args), 0)
+
 
 if __name__ == '__main__':
     unittest.main()

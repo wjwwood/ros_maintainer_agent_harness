@@ -50,6 +50,15 @@ def dump_default_rules_md() -> str:
 - When drafting PR descriptions or comments for the maintainer, prefer providing a copy-pasteable markdown block
   directly in the conversation (with a file as an acceptable fallback).
 
+## Releases
+- Follow the 3-step release workflow when releasing ROS packages:
+  1. Generate and polish changelogs (`catkin_generate_changelog`, edit `CHANGELOG.rst`), commit them, and run
+     `catkin_prepare_release --no-push` inside the session container to create the local version bump commit and tag.
+  2. Push the release commit and tag via `ros-maintainer-harness release push` (or MCP `push_release`), which requires a
+     maintainer approval ticket (`action='release_push'`).
+  3. Run `bloom-release` on the host via `ros-maintainer-harness release bloom` (or MCP `run_bloom_release`), which
+     requires a maintainer approval ticket (`action='bloom_release'`).
+
 ## General
 - Always review linter errors before launching Jenkins CI.
 """

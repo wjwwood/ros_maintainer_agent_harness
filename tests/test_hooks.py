@@ -475,6 +475,53 @@ class TestContainerHooks(unittest.TestCase):
         self.assertEqual(res_dq.get('decision'), 'deny')
         self.assertIn('--body-file', res_dq.get('reason', ''))
 
+        # Test direct bloom-release and catkin_prepare_release (without --no-push) are denied inside session
+        bloom_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': 'bloom-release --rosdistro rolling --track rolling launch',
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        res_bloom = evaluate_pre_tool_use(bloom_payload, workspace_root=self.ws_root)
+        self.assertEqual(res_bloom.get('decision'), 'deny')
+        self.assertIn('release bloom', res_bloom.get('reason', ''))
+
+        prep_no_flag_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': 'catkin_prepare_release -y',
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        res_prep_deny = evaluate_pre_tool_use(prep_no_flag_payload, workspace_root=self.ws_root)
+        self.assertEqual(res_prep_deny.get('decision'), 'deny')
+        self.assertIn('--no-push', res_prep_deny.get('reason', ''))
+
+        # catkin_prepare_release --no-push is allowed and rewritten into the container
+        prep_ok_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': [str(self.ws_root)],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': 'catkin_prepare_release --no-push -y',
+                    'Cwd': str(self.session.session_dir),
+                },
+            },
+        }
+        res_prep_ok = evaluate_pre_tool_use(prep_ok_payload, workspace_root=self.ws_root)
+        self.assertEqual(res_prep_ok.get('decision'), 'allow')
+        self.assertIn('rmah-session-exec', res_prep_ok['overwrite']['CommandLine'])
+
     def test_install_hooks_merges_existing_config_without_duplicating(self):
         first = install_hooks_config(target_dir=self.ws_root, workspace_root=self.ws_root)
         second = install_hooks_config(target_dir=self.ws_root, workspace_root=self.ws_root)

@@ -130,6 +130,15 @@ by the Host MCP Gateway:
    - Do NOT mention running local tests or builds in PR descriptions (that is assumed).
    - When drafting PR descriptions or comments for the user, prefer providing a copy-pasteable markdown block
      directly in the conversation (with a file as an acceptable fallback).
+6. **ROS Package Release Workflow (`release push` & `release bloom`)**:
+   - Step 1 (Container): Run `catkin_generate_changelog`, polish `CHANGELOG.rst` with the maintainer, commit the
+     changelog changes, and run `catkin_prepare_release --no-push` to create the local version bump commit and tag.
+   - Step 2 (Host Gateway): Push the release commit and version tag to the upstream distro branch via
+     `push_release` (or `ros-maintainer-harness release push -s <session> [-C <repo>] -b <distro> -t <tag> -m "..."`),
+     which requires a maintainer approval ticket (`action='release_push'`).
+   - Step 3 (Host Gateway): Run `bloom-release` on the host via `run_bloom_release` (or
+     `ros-maintainer-harness release bloom <repository> -s <session> --rosdistro <distro> -m "..."`), which requires a
+     maintainer approval ticket (`action='bloom_release'`).
 
 ---
 
@@ -388,6 +397,25 @@ def get_session_agent_instructions(
   - **Find Restarted CI**:
     - MCP: `find_restarted_ci(session_id="{session_id}", pr_or_comment_url="...", update_comment=True)`
     - CLI: `ros-maintainer-harness -w {ws_str} ci find-restarted -s {session_id} --update-comment`
+  - **ROS Package Release Workflow (3-Step)**:
+    1. **Prepare Changelogs & Release Tag in Container**:
+       - Run `catkin_generate_changelog`, polish `CHANGELOG.rst` with the maintainer, commit the changelog changes,
+         and run `catkin_prepare_release --no-push` (e.g. `catkin_prepare_release --no-push --bump patch` or
+         `--version <ver>`). Always pass `--no-push` inside the container.
+    2. **Ticket-Gated Release Push (Host Gateway)**:
+       - MCP: `push_release(session_id="{session_id}", repo_path="...", target_branch="{distro}",`
+         `tag="<tag>", reason="...")`
+       - CLI:
+         `ros-maintainer-harness -w {ws_str} release push -s {session_id} [-C <repo>] -b {distro}`
+         `-t <tag> -m "<reason>"`
+         *(Requires maintainer approval ticket `action='release_push'`; once approved, re-run with
+         `--approval-ticket-id <ticket_id>`).*
+    3. **Ticket-Gated Bloom Release (Host Gateway)**:
+       - MCP: `run_bloom_release(session_id="{session_id}", repository="<repo>", rosdistro="{distro}", reason="...")`
+       - CLI:
+         `ros-maintainer-harness -w {ws_str} release bloom <repo> -s {session_id} --rosdistro {distro} -m "<reason>"`
+         *(Requires maintainer approval ticket `action='bloom_release'`; once approved, re-run with
+         `--approval-ticket-id <ticket_id>`).*
 
 ---
 

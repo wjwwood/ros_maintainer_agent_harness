@@ -150,7 +150,7 @@ ros-maintainer-harness approval reject req-abcd1234 --comment "Needs cleaner com
 The host gateway enforces safety constraints defined in `config/policy.yaml`:
 
 ### Invariants
-- **No direct base branch pushes**: Pushes to `main`, `master`, `rolling`, `jazzy`, `iron`, `humble`, etc. are blocked at the gateway level.
+- **No unapproved base branch pushes**: Pushes to `main`, `master`, `rolling`, `jazzy`, `iron`, `humble`, etc. are blocked unless pushing a verified release tag via `release push` (`push_release` / `git-push --tag <tag>`) with an explicit maintainer approval ticket.
 - **No unapproved PR creation or mutation**: By default, `create-pr` / `create_pull_request` generates a pre-filled GitHub `/compare/...?quick_pull=1&title=...&body=...` URL (`--web-url`, `web_url=True`) so you can review both the diff and the PR description in your browser before clicking "Create pull request" yourself. Direct API creation (`--api` / `web_url=False`) or editing an existing PR (`edit-pr` / `edit_pull_request`) requires an explicit maintainer approval ticket.
 - **No conversational commenting**: The harness does not provide tools for posting conversational comments on issues or PRs, preventing impersonation.
 - **No automated merges**: Merging pull requests is strictly reserved for the maintainer.
@@ -215,7 +215,7 @@ The workspace uses linked Git worktrees and session overlay directories so multi
 When running `ros-maintainer-harness serve`, the host gateway exposes tools to connected AI coding agents over the Model Context Protocol:
 
 - **Environment & Container Sandbox**: `check_environment` (pre-flight check for runtime, tokens, and MCP config), `start_session_container`, `exec_in_session` (runs `colcon build`/`colcon test` inside the session container), `stop_session_container`.
-- **Git & GitHub**: `git_push` (guarded by policy), `create_pull_request` (generates a pre-filled GitHub compare URL by default via `web_url=True`, or creates the PR via the API with `web_url=False` and an approval ticket), `edit_pull_request` (requires approval ticket).
+- **Git, GitHub & Package Releases**: `git_push` (guarded by policy), `push_release` (ticket-gated push of a `catkin_prepare_release --no-push` commit and version tag to a release branch), `run_bloom_release` (ticket-gated host execution of `bloom-release --non-interactive --no-web` to open the `ros/rosdistro` PR), `create_pull_request` (generates a pre-filled GitHub compare URL by default via `web_url=True`, or creates the PR via the API with `web_url=False` and an approval ticket), `edit_pull_request` (requires approval ticket).
 - **CI Management**: `launch_jenkins_ci`, `get_ci_status` (supports host-side blocking wait), `get_ci_summary` (parses JUnit failures & compiler errors), `list_ci_runs`, `cancel_ci_run`, `find_restarted_ci`.
 - **Sessions & Workspaces**: `scaffold_session_from_pr`, `create_session`, `list_sessions`, `prune_session`, `generate_mcp_config`, `get_session_launch_info`.
 - **Maintainer Preferences & Audit**: `log_status` (records milestones in `timeline.md`), `get_maintainer_rules`, `add_maintainer_rule`, `check_policy`, `list_approval_requests`, `respond_approval_request`.
