@@ -148,11 +148,12 @@ def detect_session_packages(session_dir: Path) -> List[str]:
             changed_files.extend([str(f) for f in meta['changed_files'] if f])
 
         if not changed_files and (repo_dir / '.git').exists():
+            from .git_ops import git_safe_cmd
             base_ref = meta.get('base_ref') or 'rolling'
             for diff_range in (f'origin/{base_ref}...HEAD', f'{base_ref}...HEAD', 'HEAD~1...HEAD'):
                 try:
                     res = subprocess.run(
-                        ['git', 'diff', '--name-only', diff_range],
+                        git_safe_cmd(repo_dir, 'diff', '--name-only', diff_range),
                         cwd=str(repo_dir),
                         capture_output=True,
                         text=True,

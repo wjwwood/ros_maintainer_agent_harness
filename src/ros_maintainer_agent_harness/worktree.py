@@ -304,10 +304,11 @@ class SessionManager:
             # Inspect active worktree branches in src
             active_branches = {}
             if src_dir.exists():
+                from .git_ops import git_safe_cmd
                 for sub in src_dir.iterdir():
                     if sub.is_dir() and (sub / '.git').exists():
                         res = subprocess.run(
-                            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                            git_safe_cmd(sub, 'rev-parse', '--abbrev-ref', 'HEAD'),
                             cwd=str(sub),
                             capture_output=True,
                             text=True,
@@ -345,10 +346,11 @@ class SessionManager:
 
         active_branches = {}
         if src_dir.exists():
+            from .git_ops import git_safe_cmd
             for sub in src_dir.iterdir():
                 if sub.is_dir() and (sub / '.git').exists():
                     res = subprocess.run(
-                        ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                        git_safe_cmd(sub, 'rev-parse', '--abbrev-ref', 'HEAD'),
                         cwd=str(sub),
                         capture_output=True,
                         text=True,
@@ -396,11 +398,12 @@ class SessionManager:
 
         src_dir = session_dir / 'src'
         if src_dir.exists():
+            from .git_ops import git_safe_cmd
             for sub in src_dir.iterdir():
                 if sub.is_dir() and (sub / '.git').exists():
                     # Attempt clean git worktree remove
                     subprocess.run(
-                        ['git', 'worktree', 'remove', str(sub)] + (['--force'] if force else []),
+                        git_safe_cmd(sub, 'worktree', 'remove', str(sub)) + (['--force'] if force else []),
                         cwd=str(sub),
                         capture_output=True,
                     )
