@@ -16,6 +16,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 from ros_maintainer_agent_harness.git_ops import (
     execute_git_push,
@@ -23,10 +24,32 @@ from ros_maintainer_agent_harness.git_ops import (
     get_current_branch,
     get_current_commit_sha,
     get_repo_remote_url,
+    git_safe_cmd,
 )
 
 
 class TestGitOps(unittest.TestCase):
+
+    def test_git_safe_cmd_passes_safe_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / 'container_cloned_repo'
+            repo_path.mkdir()
+            cmd = git_safe_cmd(repo_path, 'remote', 'get-url', '--', 'origin')
+            self.assertEqual(
+                cmd,
+                ['git', '-c', f'safe.directory={repo_path.resolve()}', 'remote', 'get-url', '--', 'origin'],
+            )
+
+            with patch('ros_maintainer_agent_harness.git_ops.subprocess.run') as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout='https://github.com/ros2/ros2_documentation.git\n',
+                    stderr='',
+                )
+                url = get_repo_remote_url(repo_path, 'origin')
+                self.assertEqual(url, 'https://github.com/ros2/ros2_documentation.git')
+                called_cmd = mock_run.call_args[0][0]
+                self.assertIn(f'safe.directory={repo_path.resolve()}', called_cmd)
 
     def test_extract_repo_full_name(self):
         self.assertEqual(

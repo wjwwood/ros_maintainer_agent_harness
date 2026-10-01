@@ -19,13 +19,18 @@ import subprocess
 from typing import Optional, Tuple
 
 
+def git_safe_cmd(repo_dir: Path, *args: str) -> list[str]:
+    """Build a git command list with safe.directory configured for repo_dir."""
+    return ['git', '-c', f'safe.directory={repo_dir.resolve()}', *args]
+
+
 def get_repo_remote_url(repo_dir: Path, remote: str = 'origin') -> Optional[str]:
     """Retrieve the URL for a named Git remote."""
     if not repo_dir.exists():
         return None
     try:
         res = subprocess.run(
-            ['git', 'remote', 'get-url', '--', remote],
+            git_safe_cmd(repo_dir, 'remote', 'get-url', '--', remote),
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
@@ -85,7 +90,7 @@ def get_current_branch(repo_dir: Path) -> Optional[str]:
         return None
     try:
         res = subprocess.run(
-            ['git', 'symbolic-ref', '--short', '-q', 'HEAD'],
+            git_safe_cmd(repo_dir, 'symbolic-ref', '--short', '-q', 'HEAD'),
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
@@ -105,7 +110,7 @@ def get_current_commit_sha(repo_dir: Path) -> Optional[str]:
         return None
     try:
         res = subprocess.run(
-            ['git', 'rev-parse', 'HEAD'],
+            git_safe_cmd(repo_dir, 'rev-parse', 'HEAD'),
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
@@ -146,7 +151,7 @@ def execute_git_push(
         has_local_ref = False
         try:
             chk = subprocess.run(
-                ['git', 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}'],
+                git_safe_cmd(repo_dir, 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}'),
                 cwd=str(repo_dir),
                 capture_output=True,
                 timeout=10,
@@ -160,7 +165,7 @@ def execute_git_push(
         ):
             refspec = f'HEAD:refs/heads/{branch}'
 
-    cmd = ['git', 'push']
+    cmd = git_safe_cmd(repo_dir, 'push')
     if force_with_lease:
         cmd.append('--force-with-lease')
     if dry_run:

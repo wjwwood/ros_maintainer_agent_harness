@@ -45,6 +45,7 @@ from .git_ops import (
     execute_git_push,
     extract_repo_full_name,
     get_repo_remote_url,
+    git_safe_cmd,
 )
 from .hub import (
     format_conversation_link,
@@ -79,6 +80,14 @@ def resolve_session_repo_path(session_dir: Path, repo_path: Optional[str] = None
             ]
             if len(candidates) == 1:
                 return candidates[0].resolve()
+            if len(candidates) > 1:
+                meta = read_session_metadata(session_dir)
+                pr_ref = str(meta.get('pr_ref') or '')
+                if '#' in pr_ref and '/' in pr_ref:
+                    primary_repo = pr_ref.split('#', 1)[0].split('/')[-1]
+                    for cand in candidates:
+                        if cand.name == primary_repo:
+                            return cand.resolve()
         return session_dir.resolve()
 
     cleaned = repo_path.strip()
@@ -128,7 +137,7 @@ def perform_git_push(
         if get_repo_remote_url(repo_dir, remote) is None and remote in ('fork', meta.get('head_repo_owner')):
             import subprocess as _sp
             _sp.run(
-                ['git', 'remote', 'add', '--', remote, meta['head_repo_url']],
+                git_safe_cmd(repo_dir, 'remote', 'add', '--', remote, meta['head_repo_url']),
                 cwd=str(repo_dir),
                 capture_output=True,
                 text=True,
