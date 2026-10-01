@@ -152,6 +152,14 @@ When a task involves opening a new Pull Request (after pushing a topic branch to
 - Click the returned link to review the commit history, file diff, title, and pre-filled PR template description in your browser before clicking **Create pull request** yourself.
 - If you instead want the agent to open the PR directly via the GitHub REST API, pass `--api` (or `web_url=False` on the MCP tool), which gates creation on a maintainer approval ticket.
 
+### Releasing a ROS Package (`release push` & `release bloom`)
+When preparing a ROS package release:
+1. Inside the session container, the agent runs `catkin_generate_changelog`, cleans up `CHANGELOG.rst`, commits the changelogs, and runs `catkin_prepare_release --no-push` to create the local version bump commit and tag.
+2. **Push Release Commit & Tag (Ticket-Gated)**:
+   The agent requests a release push via `push_release` (or `ros-maintainer-harness release push -s <session_id> --repo <repo> --branch rolling --tag <version> -m "..."`). After you approve the `release_push` ticket, retrying pushes `<tag_commit>:refs/heads/rolling` and `refs/tags/<version>` to `origin`.
+3. **Run Bloom Release (Ticket-Gated)**:
+   The agent requests a Bloom release via `run_bloom_release` (or `ros-maintainer-harness release bloom -s <session_id> --repo <repository> --rosdistro rolling -m "..."`). After you approve the `bloom_release` ticket, the host gateway executes `bloom-release --rosdistro rolling --track rolling --non-interactive --no-web <repository>` using your host `~/.config/bloom` credentials and records the resulting `ros/rosdistro` PR URL.
+
 ---
 
 ## 6. Cleanup

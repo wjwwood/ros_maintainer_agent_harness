@@ -200,3 +200,106 @@ def execute_git_push(
     else:
         err = res.stderr.strip() or res.stdout.strip() or "git push failed with unknown error."
         return (False, err)
+
+
+VERSION_TAG_PATTERN = re.compile(r'^v?[0-9]+\.[0-9]+\.[0-9]+(?:[._-][0-9A-Za-z._-]+)?$')
+
+
+def verify_release_tag(repo_dir: Path, tag: str) -> Tuple[bool, str, Optional[str]]:
+    """
+    Verify that ``tag`` matches a semantic version tag pattern and exists locally in ``repo_dir``.
+
+    Returns:
+        (valid: bool, message: str, tag_commit_sha: Optional[str])
+    """
+    if not repo_dir.exists():
+        return (False, f"Repository directory '{repo_dir}' does not exist.", None)
+
+    cleaned_tag = (tag or '').strip()
+    if not cleaned_tag or not VERSION_TAG_PATTERN.match(cleaned_tag):
+        return (
+            False,
+            f"Tag '{cleaned_tag}' does not match expected version tag format (e.g. '3.10.2' or 'v1.2.3').",
+            None,
+        )
+
+    try:
+        res = subprocess.run(
+            git_safe_cmd(repo_dir, 'rev-parse', '--verify', '--quiet', f'refs/tags/{cleaned_tag}^{{commit}}'),
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
+        )
+        if res.returncode != 0 or not res.stdout.strip():
+            return (
+                False,
+                f"Tag '{cleaned_tag}' does not exist locally in '{repo_dir}'. "
+                "Run 'catkin_prepare_release --no-push' first.",
+                None,
+            )
+        return (True, f"Verified local tag '{cleaned_tag}'.", res.stdout.strip())
+    except Exception as e:
+        return (False, f"Failed to verify local tag '{cleaned_tag}': {e}", None)
+
+
+def execute_release_push(
+    repo_dir: Path,
+    target_branch: str,
+    tag: str,
+    remote: str = 'origin',
+    dry_run: bool = False,
+) -> Tuple[bool, str]:
+    """
+    Push a local release commit (referenced by ``refs/tags/<tag>^{commit}``) to
+    ``refs/heads/<target_branch>`` and push ``refs/tags/<tag>`` to ``remote``
+    (fast-forward only, never force-pushed).
+    """
+    valid, msg, tag_commit_sha = verify_release_tag(repo_dir, tag)
+    if not valid or not tag_commit_sha:
+        return (False, msg)
+
+    cleaned_branch = (target_branch or '').strip()
+    if not cleaned_branch or cleaned_branch.startswith('-') or ':' in cleaned_branch or ' ' in cleaned_branch:
+        return (False, f"Invalid target branch name: '{target_branch}'.")
+
+    cleaned_tag = tag.strip()
+    branch_refspec = f'{tag_commit_sha}:refs/heads/{cleaned_branch}'
+    tag_refspec = f'refs/tags/{cleaned_tag}:refs/tags/{cleaned_tag}'
+
+    cmd = git_safe_cmd(repo_dir, 'push')
+    if dry_run:
+        cmd.append('--dry-run')
+    cmd.extend(['--', remote, branch_refspec, tag_refspec])
+
+    git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+    default_sock = Path.home() / '.ssh' / 'ssh_auth_sock'
+    if (
+        (not git_env.get('SSH_AUTH_SOCK') or not Path(git_env['SSH_AUTH_SOCK']).exists())
+        and default_sock.exists()
+    ):
+        git_env['SSH_AUTH_SOCK'] = str(default_sock)
+
+    try:
+        res = subprocess.run(
+            cmd,
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=git_env,
+        )
+    except subprocess.TimeoutExpired:
+        return (False, "git release push timed out after 120 seconds.")
+    except Exception as e:
+        return (False, f"git release push failed: {e}")
+
+    if res.returncode == 0:
+        out = res.stdout.strip() or res.stderr.strip() or (
+            f"Successfully pushed {cleaned_branch} ({tag_commit_sha[:8]}) and tag {cleaned_tag} to {remote}."
+        )
+        return (True, out)
+    else:
+        err = res.stderr.strip() or res.stdout.strip() or "git release push failed with unknown error."
+        return (False, err)

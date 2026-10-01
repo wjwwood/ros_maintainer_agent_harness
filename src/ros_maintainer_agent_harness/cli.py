@@ -59,6 +59,8 @@ from .server import (
     perform_find_restarted_ci,
     perform_git_push,
     perform_launch_jenkins_ci,
+    perform_push_release,
+    perform_run_bloom_release,
     run_server,
 )
 from .timeline import TimelineLogger
@@ -1027,6 +1029,7 @@ def handle_git_push(args: argparse.Namespace) -> int:
         reason=args.reason,
         approval_ticket_id=args.approval_ticket_id,
         dry_run=args.dry_run,
+        tag=getattr(args, 'tag', None),
     )
     if getattr(args, 'json', False):
         print(json.dumps(res, indent=2))
@@ -1045,6 +1048,86 @@ def handle_git_push(args: argparse.Namespace) -> int:
             err_msg = res.get('error') or res.get('output') or res.get('message')
             print(f"❌ Git push {res.get('status')}: {err_msg}", file=sys.stderr)
     return 0 if res.get('success') else 1
+
+
+def handle_release(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+
+    if args.release_action == 'push':
+        res = perform_push_release(
+            workspace=layout,
+            session_id=args.session,
+            repo_path=args.repo_path,
+            target_branch=args.target_branch,
+            tag=args.tag,
+            remote=args.remote or 'origin',
+            reason=args.reason,
+            approval_ticket_id=args.approval_ticket_id,
+            dry_run=args.dry_run,
+        )
+        if getattr(args, 'json', False):
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get('success'):
+                print(f"✅ Release push succeeded ({res.get('status')}) -> {res.get('target')}")
+                if res.get('output'):
+                    print(res['output'])
+            elif res.get('status') == 'PENDING_APPROVAL':
+                tid = res.get('ticket_id')
+                print(
+                    f"🎟️  PENDING_APPROVAL: {res.get('message')}\n"
+                    f"   Approve with: ros-maintainer-harness -w {layout.root} approval approve {tid}\n"
+                    f"   Then re-run with: --approval-ticket-id {tid}"
+                )
+            else:
+                err_msg = res.get('error') or res.get('output') or res.get('message')
+                print(f"❌ Release push {res.get('status')}: {err_msg}", file=sys.stderr)
+        return 0 if res.get('success') else 1
+
+    elif args.release_action == 'bloom':
+        repository = getattr(args, 'repository_opt', None) or getattr(args, 'repository', None) or ''
+        if not repository:
+            print("Error: Provide repository name (e.g. 'launch' or 'launch_ros').", file=sys.stderr)
+            return 1
+        res = perform_run_bloom_release(
+            workspace=layout,
+            session_id=args.session,
+            repository=repository,
+            rosdistro=args.rosdistro or 'rolling',
+            track=args.track,
+            non_interactive=not getattr(args, 'interactive', False),
+            pretend=args.pretend or args.dry_run,
+            no_web=True,
+            no_pull_request=args.no_pull_request,
+            pull_request_only=args.pull_request_only,
+            reason=args.reason,
+            approval_ticket_id=args.approval_ticket_id,
+            dry_run=args.dry_run,
+        )
+        if getattr(args, 'json', False):
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get('success'):
+                print(f"✅ bloom-release succeeded ({res.get('status')}) -> {res.get('target')}")
+                if res.get('rosdistro_pr_url'):
+                    print(f"🔗 rosdistro Pull Request: {res.get('rosdistro_pr_url')}")
+                if res.get('output'):
+                    print(res['output'])
+            elif res.get('status') == 'PENDING_APPROVAL':
+                tid = res.get('ticket_id')
+                print(
+                    f"🎟️  PENDING_APPROVAL: {res.get('message')}\n"
+                    f"   Approve with: ros-maintainer-harness -w {layout.root} approval approve {tid}\n"
+                    f"   Then re-run with: --approval-ticket-id {tid}"
+                )
+            else:
+                err_msg = res.get('error') or res.get('output') or res.get('message')
+                print(f"❌ bloom-release {res.get('status')}: {err_msg}", file=sys.stderr)
+        return 0 if res.get('success') else 1
+
+    print("Run `ros-maintainer-harness release --help` for release commands.")
+    return 0
 
 
 def handle_create_pr(args: argparse.Namespace) -> int:
@@ -1345,16 +1428,101 @@ def parse_args():
         help='Path to repository worktree (defaults to the single worktree in sessions/<id>/src/)',
     )
     gp_parser.add_argument('-b', '--branch', type=str, required=True, help='Branch name to push')
+    gp_parser.add_argument(
+        '-t', '--tag', type=str, default=None,
+        help='Optional release version tag (e.g. 3.10.2); delegates to release push (requires approval ticket)',
+    )
     gp_parser.add_argument('--remote', type=str, default='origin', help='Remote name (default: origin)')
     gp_parser.add_argument('--force-with-lease', action='store_true', help='Use --force-with-lease')
     gp_parser.add_argument('--force', action='store_true', help='Request force push')
     gp_parser.add_argument('-m', '--reason', type=str, required=True, help='Mandatory explanation for the push')
     gp_parser.add_argument(
         '--approval-ticket-id', '--ticket', dest='approval_ticket_id', type=str, default=None,
-        help='Approved ticket ID if pushing to an external contributor fork',
+        help='Approved ticket ID if pushing to an external contributor fork or release branch',
     )
     gp_parser.add_argument('--dry-run', action='store_true', help='Validate policy without network git push')
     gp_parser.add_argument('--json', action='store_true', help='Output result as JSON')
+
+    # release (ticket-gated release push & bloom-release)
+    rel_parser = subparsers.add_parser(
+        'release', help='Ticket-gated ROS package release workflow (release push and bloom-release)'
+    )
+    rel_subparsers = rel_parser.add_subparsers(dest='release_action')
+
+    rel_push = rel_subparsers.add_parser(
+        'push',
+        help='Push a local catkin_prepare_release commit and version tag to the upstream distro branch',
+    )
+    rel_push.add_argument('-s', '--session', type=str, required=True, help='Active session ID')
+    rel_push.add_argument(
+        '-C', '--repo-path', '--repo', dest='repo_path', type=str, default=None,
+        help='Repository path or name (e.g. launch or src/launch)',
+    )
+    rel_push.add_argument(
+        '-b', '--target-branch', '--branch', dest='target_branch', type=str, default='rolling',
+        help='Target upstream release/distro branch (default: rolling)',
+    )
+    rel_push.add_argument(
+        '-t', '--tag', type=str, required=True,
+        help='Version tag created by catkin_prepare_release --no-push (e.g. 3.10.2)',
+    )
+    rel_push.add_argument('--remote', type=str, default='origin', help='Remote name (default: origin)')
+    rel_push.add_argument('-m', '--reason', type=str, required=True, help='Mandatory explanation for release push')
+    rel_push.add_argument(
+        '--approval-ticket-id', '--ticket', dest='approval_ticket_id', type=str, default=None,
+        help='Approved ticket ID from maintainer',
+    )
+    rel_push.add_argument('--dry-run', action='store_true', help='Run git push --dry-run after approval')
+    rel_push.add_argument('--json', action='store_true', help='Output result as JSON')
+
+    rel_bloom = rel_subparsers.add_parser(
+        'bloom',
+        help='Run bloom-release on the host for a ROS repository (requires maintainer approval ticket)',
+    )
+    rel_bloom.add_argument(
+        'repository', nargs='?', default=None,
+        help='ROS distro repository name (e.g. launch or launch_ros)',
+    )
+    rel_bloom.add_argument(
+        '--repository', '--repo', dest='repository_opt', type=str, default=None,
+        help='ROS distro repository name (e.g. launch or launch_ros)',
+    )
+    rel_bloom.add_argument('-s', '--session', type=str, required=True, help='Active session ID')
+    rel_bloom.add_argument(
+        '-r', '--rosdistro', '--ros-distro', '--distro', dest='rosdistro', type=str, default='rolling',
+        help='Target ROS distribution (default: rolling)',
+    )
+    rel_bloom.add_argument(
+        '-t', '--track', type=str, default=None,
+        help='Release track name (defaults to --rosdistro)',
+    )
+    rel_bloom.add_argument(
+        '-y', '--non-interactive', action='store_true', default=True,
+        help='Pass --non-interactive to bloom-release (default: True)',
+    )
+    rel_bloom.add_argument(
+        '--interactive', action='store_true', default=False,
+        help='Run bloom-release without --non-interactive',
+    )
+    rel_bloom.add_argument(
+        '--pretend', action='store_true', default=False,
+        help='Pass --pretend to bloom-release',
+    )
+    rel_bloom.add_argument(
+        '--no-pull-request', action='store_true', default=False,
+        help='Pass --no-pull-request to bloom-release',
+    )
+    rel_bloom.add_argument(
+        '--pull-request-only', '-p', action='store_true', default=False,
+        help='Pass --pull-request-only to bloom-release',
+    )
+    rel_bloom.add_argument('-m', '--reason', type=str, required=True, help='Mandatory explanation for bloom-release')
+    rel_bloom.add_argument(
+        '--approval-ticket-id', '--ticket', dest='approval_ticket_id', type=str, default=None,
+        help='Approved ticket ID from maintainer',
+    )
+    rel_bloom.add_argument('--dry-run', action='store_true', help='Alias for --pretend')
+    rel_bloom.add_argument('--json', action='store_true', help='Output result as JSON')
 
     # create-pr (policy-guarded PR creation)
     cpr_parser = subparsers.add_parser(
@@ -1625,6 +1793,8 @@ def main():
             return 0
     elif args.command == 'git-push':
         return handle_git_push(args)
+    elif args.command == 'release':
+        return handle_release(args)
     elif args.command == 'create-pr':
         return handle_create_pr(args)
     elif args.command == 'edit-pr':

@@ -107,11 +107,17 @@ directly on the host OS.
 - Record progress milestones to `<session_dir>/timeline.md` using the MCP `log_status` tool or `ros-session-status`,
   and update session state via `update_session_status`.
 - Use the MCP gateway tools (`get_ci_status`, `get_ci_summary`, `launch_jenkins_ci`, `find_restarted_ci`,
-  `git_push`, `create_pull_request`, `edit_pull_request`) for all CI queries and policy-guarded remote mutations.
+  `git_push`, `create_pull_request`, `edit_pull_request`, `push_release`, `run_bloom_release`) for all CI queries,
+  policy-guarded remote mutations, and ROS package releases.
 - By default, `create_pull_request` (and `ros-maintainer-harness create-pr`) generates a pre-filled GitHub compare URL
   (`--web-url` / `web_url=True`, status `WEB_URL_READY`, no approval ticket required) so the maintainer can click the
   link, inspect both the diff and the PR title/description in the browser, and click "Create pull request" themselves.
   Only pass `web_url=False` (or `--api`) if the user explicitly asks to submit the PR directly via the GitHub API.
+- For releasing ROS packages, use the 3-step workflow:
+  1. Run `catkin_generate_changelog` + edit/commit `CHANGELOG.rst` + `catkin_prepare_release --no-push` inside the
+     session container.
+  2. Push the release commit and version tag via `push_release` (or `ros-maintainer-harness release push`, ticket-gated).
+  3. Run `bloom-release` on the host via `run_bloom_release` (or `ros-maintainer-harness release bloom`, ticket-gated).
 
 ---
 

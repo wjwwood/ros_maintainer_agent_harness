@@ -43,9 +43,11 @@ from .devcontainer import (
 )
 from .git_ops import (
     execute_git_push,
+    execute_release_push,
     extract_repo_full_name,
     get_repo_remote_url,
     git_safe_cmd,
+    verify_release_tag,
 )
 from .hub import (
     format_conversation_link,
@@ -68,8 +70,8 @@ from .worktree import SessionManager
 def resolve_session_repo_path(session_dir: Path, repo_path: Optional[str] = None) -> Path:
     """
     Resolve a repository path that may be a container path (`/workspace/...`),
-    a path relative to `session_dir`, an absolute host path, or omitted (auto-detecting
-    a single repository worktree under `session_dir / 'src'`).
+    a path relative to `session_dir` (or `session_dir / 'src'`), an absolute host path,
+    or omitted (auto-detecting a single repository worktree under `session_dir / 'src'`).
     """
     if not repo_path or not repo_path.strip():
         src_dir = session_dir / 'src'
@@ -98,8 +100,11 @@ def resolve_session_repo_path(session_dir: Path, repo_path: Optional[str] = None
         return (session_dir / rel_part).resolve()
 
     cand = Path(cleaned).expanduser()
-    if not cand.is_absolute() and (session_dir / cand).exists():
-        return (session_dir / cand).resolve()
+    if not cand.is_absolute():
+        if (session_dir / cand).exists():
+            return (session_dir / cand).resolve()
+        if (session_dir / 'src' / cand).exists():
+            return (session_dir / 'src' / cand).resolve()
     return cand.resolve()
 
 
@@ -115,8 +120,23 @@ def perform_git_push(
     approval_ticket_id: Optional[str] = None,
     dry_run: bool = False,
     approval_mgr: Optional[ApprovalManager] = None,
+    tag: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute policy-validated git push with approval ticket gating and timeline/audit logging."""
+    if tag and tag.strip():
+        return perform_push_release(
+            workspace=workspace,
+            session_id=session_id,
+            repo_path=repo_path,
+            target_branch=branch,
+            tag=tag.strip(),
+            remote=remote,
+            reason=reason,
+            approval_ticket_id=approval_ticket_id,
+            dry_run=dry_run,
+            approval_mgr=approval_mgr,
+        )
+
     if not reason or not reason.strip():
         return {
             'success': False,
@@ -157,6 +177,12 @@ def perform_git_push(
     )
 
     if not allowed:
+        if 'protected' in msg.lower():
+            msg = (
+                f"{msg} If you are pushing a 'catkin_prepare_release --no-push' release commit "
+                f"and version tag, use 'ros-maintainer-harness release push -s {session_id} "
+                f"-b {branch} -t <tag> -m \"...\"' (or MCP 'push_release')."
+            )
         timeline.log_action(
             action='git_push',
             target=target_label,
@@ -216,6 +242,158 @@ def perform_git_push(
         'success': success,
         'status': status_str,
         'target': target_label,
+        'output': out,
+        'dry_run': dry_run,
+    }
+
+
+def perform_push_release(
+    workspace: WorkspaceLayout,
+    session_id: str,
+    repo_path: Optional[str],
+    target_branch: str,
+    tag: str,
+    remote: str = 'origin',
+    reason: str = '',
+    approval_ticket_id: Optional[str] = None,
+    dry_run: bool = False,
+    approval_mgr: Optional[ApprovalManager] = None,
+) -> Dict[str, Any]:
+    """
+    Push a local release commit (created by `catkin_prepare_release --no-push`) and its version tag
+    to the upstream distro branch (`target_branch`) and `refs/tags/<tag>`.
+    Always requires an explicit maintainer approval ticket (`action='release_push'`).
+    """
+    if not reason or not reason.strip():
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': 'Mandatory parameter `reason` must not be empty.',
+        }
+
+    cleaned_branch = (target_branch or '').strip()
+    cleaned_tag = (tag or '').strip()
+    if not cleaned_branch or not cleaned_tag:
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': 'Both `target_branch` (e.g. "rolling") and `tag` (e.g. "3.10.2") must be provided.',
+        }
+
+    session_dir = workspace.sessions_dir / session_id
+    repo_dir = resolve_session_repo_path(session_dir, repo_path)
+    timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
+    policy = workspace.get_policy()
+    approval_mgr = approval_mgr or ApprovalManager(workspace.audit_dir / 'approvals.json')
+
+    remote_url = get_repo_remote_url(repo_dir, remote)
+    repo_full_name = extract_repo_full_name(remote_url)
+    target_label = f"{repo_full_name or str(repo_dir)}:{cleaned_branch} (tag {cleaned_tag})"
+
+    if policy.git_push.allowed_repositories:
+        repo_allowed = bool(repo_full_name and (
+            policy.is_repository_allowed(repo_full_name)
+            or (policy.github_username and repo_full_name.startswith(f"{policy.github_username}/"))
+        ))
+        if not repo_allowed:
+            msg = (
+                f"Repository '{repo_full_name}' is not in policy allowed_repositories "
+                f"{policy.git_push.allowed_repositories}."
+            )
+            timeline.log_action(
+                action='release_push',
+                target=target_label,
+                reason=reason,
+                status='DENIED',
+                details={'error': msg},
+            )
+            return {'success': False, 'status': 'DENIED', 'error': msg}
+
+    valid_tag, tag_msg, tag_commit_sha = verify_release_tag(repo_dir, cleaned_tag)
+    if not valid_tag or not tag_commit_sha:
+        timeline.log_action(
+            action='release_push',
+            target=target_label,
+            reason=reason,
+            status='REJECTED',
+            details={'error': tag_msg},
+        )
+        return {'success': False, 'status': 'REJECTED', 'error': tag_msg}
+
+    ticket_ok = False
+    if approval_ticket_id and approval_mgr.is_approved(approval_ticket_id):
+        req_obj = approval_mgr.get_request(approval_ticket_id)
+        if req_obj and req_obj.action == 'release_push' and req_obj.target == target_label:
+            ticket_ok = True
+
+    if not ticket_ok:
+        req = approval_mgr.create_request(
+            session_id=session_id,
+            action='release_push',
+            target=target_label,
+            reason=reason,
+            details={
+                'repo': repo_full_name,
+                'remote': remote,
+                'target_branch': cleaned_branch,
+                'tag': cleaned_tag,
+                'commit_sha': tag_commit_sha,
+            },
+        )
+        timeline.log_action(
+            action='release_push',
+            target=target_label,
+            reason=reason,
+            status='PENDING_APPROVAL',
+            details={
+                'ticket_id': req.ticket_id,
+                'commit_sha': tag_commit_sha,
+                'tag': cleaned_tag,
+            },
+        )
+        return {
+            'success': False,
+            'status': 'PENDING_APPROVAL',
+            'ticket_id': req.ticket_id,
+            'target': target_label,
+            'commit_sha': tag_commit_sha,
+            'message': (
+                f"Pushing release commit ({tag_commit_sha[:8]}) and tag '{cleaned_tag}' to "
+                f"'{repo_full_name}:{cleaned_branch}' requires maintainer approval. "
+                f"Created approval ticket '{req.ticket_id}'."
+            ),
+        }
+
+    success, out = execute_release_push(
+        repo_dir=repo_dir,
+        target_branch=cleaned_branch,
+        tag=cleaned_tag,
+        remote=remote,
+        dry_run=dry_run,
+    )
+
+    status_str = 'APPROVED' if success else 'FAILED'
+    timeline.log_action(
+        action='release_push',
+        target=target_label,
+        reason=reason,
+        status=status_str,
+        details={
+            'output': out,
+            'tag': cleaned_tag,
+            'commit_sha': tag_commit_sha,
+            'dry_run': dry_run,
+        },
+    )
+
+    return {
+        'success': success,
+        'status': status_str,
+        'target': target_label,
+        'repo': repo_full_name,
+        'target_branch': cleaned_branch,
+        'tag': cleaned_tag,
+        'commit_sha': tag_commit_sha,
         'output': out,
         'dry_run': dry_run,
     }
@@ -1102,6 +1280,265 @@ def perform_edit_pull_request(
     return out
 
 
+def _find_bloom_release_executable() -> Optional[str]:
+    """Locate `bloom-release` on the host."""
+    import shutil
+
+    found = shutil.which('bloom-release')
+    if found:
+        return found
+    local_bin = Path.home() / '.local' / 'bin' / 'bloom-release'
+    if local_bin.exists():
+        return str(local_bin)
+    usr_bin = Path('/usr/bin/bloom-release')
+    if usr_bin.exists():
+        return str(usr_bin)
+    return None
+
+
+def perform_run_bloom_release(
+    workspace: WorkspaceLayout,
+    session_id: str,
+    repository: str,
+    rosdistro: str = 'rolling',
+    track: Optional[str] = None,
+    non_interactive: bool = True,
+    pretend: bool = False,
+    no_web: bool = True,
+    no_pull_request: bool = False,
+    pull_request_only: bool = False,
+    reason: str = '',
+    approval_ticket_id: Optional[str] = None,
+    dry_run: bool = False,
+    approval_mgr: Optional[ApprovalManager] = None,
+) -> Dict[str, Any]:
+    """
+    Execute `bloom-release` on the host for a ROS repository after maintainer approval.
+    Always requires an explicit maintainer approval ticket (`action='bloom_release'`).
+    """
+    import os
+    import re
+    import subprocess
+
+    if not reason or not reason.strip():
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': 'Mandatory parameter `reason` must not be empty.',
+        }
+
+    raw_repo = (repository or '').strip().strip('/')
+    repo_name = raw_repo.split('/')[-1] if '/' in raw_repo else raw_repo
+    cleaned_distro = (rosdistro or 'rolling').strip()
+    cleaned_track = (track or cleaned_distro).strip()
+
+    safe_ident = re.compile(r'^[A-Za-z0-9_.-]+$')
+    if not repo_name or not safe_ident.match(repo_name) or repo_name.startswith('-'):
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': f"Invalid repository name for bloom-release: '{repository}'.",
+        }
+    if not cleaned_distro or not safe_ident.match(cleaned_distro) or cleaned_distro.startswith('-'):
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': f"Invalid rosdistro name for bloom-release: '{rosdistro}'.",
+        }
+    if not cleaned_track or not safe_ident.match(cleaned_track) or cleaned_track.startswith('-'):
+        return {
+            'success': False,
+            'status': 'REJECTED',
+            'error': f"Invalid track name for bloom-release: '{track}'.",
+        }
+
+    session_dir = workspace.sessions_dir / session_id
+    timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
+    approval_mgr = approval_mgr or ApprovalManager(workspace.audit_dir / 'approvals.json')
+
+    target_label = f"{repo_name} ({cleaned_distro}/{cleaned_track})"
+    use_pretend = bool(pretend or dry_run)
+
+    ticket_ok = False
+    if approval_ticket_id and approval_mgr.is_approved(approval_ticket_id):
+        req_obj = approval_mgr.get_request(approval_ticket_id)
+        if req_obj and req_obj.action == 'bloom_release' and req_obj.target == target_label:
+            ticket_ok = True
+
+    if not ticket_ok:
+        req = approval_mgr.create_request(
+            session_id=session_id,
+            action='bloom_release',
+            target=target_label,
+            reason=reason,
+            details={
+                'repository': repo_name,
+                'rosdistro': cleaned_distro,
+                'track': cleaned_track,
+                'non_interactive': non_interactive,
+                'pretend': use_pretend,
+                'pull_request_only': pull_request_only,
+                'no_pull_request': no_pull_request,
+            },
+        )
+        timeline.log_action(
+            action='bloom_release',
+            target=target_label,
+            reason=reason,
+            status='PENDING_APPROVAL',
+            details={
+                'ticket_id': req.ticket_id,
+                'repository': repo_name,
+                'rosdistro': cleaned_distro,
+                'track': cleaned_track,
+                'pretend': use_pretend,
+            },
+        )
+        return {
+            'success': False,
+            'status': 'PENDING_APPROVAL',
+            'ticket_id': req.ticket_id,
+            'target': target_label,
+            'message': (
+                f"Running 'bloom-release' for '{target_label}' requires maintainer approval. "
+                f"Created approval ticket '{req.ticket_id}'."
+            ),
+        }
+
+    bloom_bin = _find_bloom_release_executable()
+    if not bloom_bin:
+        err = (
+            "Executable 'bloom-release' was not found on the host. "
+            "Install bloom via 'pip install --user --break-system-packages bloom'."
+        )
+        timeline.log_action(
+            action='bloom_release',
+            target=target_label,
+            reason=reason,
+            status='FAILED',
+            details={'error': err},
+        )
+        return {'success': False, 'status': 'FAILED', 'error': err}
+
+    cmd: List[str] = [
+        bloom_bin,
+        '--rosdistro', cleaned_distro,
+        '--track', cleaned_track,
+    ]
+    if non_interactive:
+        cmd.append('--non-interactive')
+    if no_web:
+        cmd.append('--no-web')
+    if use_pretend:
+        cmd.append('--pretend')
+    if no_pull_request:
+        cmd.append('--no-pull-request')
+    if pull_request_only:
+        cmd.append('--pull-request-only')
+    cmd.append(repo_name)
+
+    bloom_env = {
+        **os.environ,
+        'GIT_TERMINAL_PROMPT': '0',
+        'BLOOM_NO_WEBBROWSER': '1',
+    }
+    if non_interactive:
+        bloom_env['BLOOM_DONT_ASK_FOR_DOCS'] = '1'
+        bloom_env['BLOOM_DONT_ASK_FOR_SOURCE'] = '1'
+        bloom_env['BLOOM_DONT_ASK_FOR_MAINTENANCE_STATUS'] = '1'
+
+    local_bin_str = str(Path.home() / '.local' / 'bin')
+    curr_path = bloom_env.get('PATH', '')
+    if local_bin_str not in curr_path.split(os.pathsep):
+        bloom_env['PATH'] = f"{local_bin_str}{os.pathsep}{curr_path}" if curr_path else local_bin_str
+
+    default_sock = Path.home() / '.ssh' / 'ssh_auth_sock'
+    if (
+        (not bloom_env.get('SSH_AUTH_SOCK') or not Path(bloom_env['SSH_AUTH_SOCK']).exists())
+        and default_sock.exists()
+    ):
+        bloom_env['SSH_AUTH_SOCK'] = str(default_sock)
+
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            stdin=subprocess.DEVNULL,
+            env=bloom_env,
+        )
+    except subprocess.TimeoutExpired:
+        err = 'bloom-release timed out after 600 seconds.'
+        timeline.log_action(
+            action='bloom_release',
+            target=target_label,
+            reason=reason,
+            status='FAILED',
+            details={'error': err},
+        )
+        return {'success': False, 'status': 'FAILED', 'error': err}
+    except Exception as e:
+        err = f'bloom-release execution failed: {e}'
+        timeline.log_action(
+            action='bloom_release',
+            target=target_label,
+            reason=reason,
+            status='FAILED',
+            details={'error': err},
+        )
+        return {'success': False, 'status': 'FAILED', 'error': err}
+
+    combined_output = ((res.stdout or '') + '\n' + (res.stderr or '')).strip()
+    ansi_stripped = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', combined_output)
+    pr_matches = re.findall(r'https://github\.com/[^\s"\'\)]+/pull/\d+', ansi_stripped)
+    rosdistro_pr_url = pr_matches[-1] if pr_matches else None
+
+    ok = (res.returncode == 0)
+    status_str = 'APPROVED' if ok else 'FAILED'
+
+    if ok and rosdistro_pr_url and session_dir.is_dir() and not use_pretend:
+        meta = read_session_metadata(session_dir)
+        existing_urls = list(meta.get('rosdistro_pr_urls') or [])
+        if rosdistro_pr_url not in existing_urls:
+            existing_urls.append(rosdistro_pr_url)
+        write_session_metadata(
+            session_dir,
+            {
+                'last_rosdistro_pr_url': rosdistro_pr_url,
+                'rosdistro_pr_urls': existing_urls,
+            },
+        )
+
+    timeline.log_action(
+        action='bloom_release',
+        target=target_label,
+        reason=reason,
+        status=status_str,
+        details={
+            'repository': repo_name,
+            'rosdistro': cleaned_distro,
+            'track': cleaned_track,
+            'pretend': use_pretend,
+            'rosdistro_pr_url': rosdistro_pr_url,
+            'returncode': res.returncode,
+        },
+    )
+
+    return {
+        'success': ok,
+        'status': status_str,
+        'target': target_label,
+        'repository': repo_name,
+        'rosdistro': cleaned_distro,
+        'track': cleaned_track,
+        'pretend': use_pretend,
+        'rosdistro_pr_url': rosdistro_pr_url,
+        'returncode': res.returncode,
+        'output': ansi_stripped,
+    }
+
+
 def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
     """Create and configure the Host MCP Server Gateway with safety rules and tools."""
     if not workspace.is_initialized():
@@ -1141,20 +1578,24 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
         reason: str = '',
         approval_ticket_id: Optional[str] = None,
         dry_run: bool = False,
+        tag: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Push a branch to a Git remote with safety policy validation and audit logging.
+        Push a branch (or a release commit + version tag when `tag` is provided) to a Git remote
+        with safety policy validation and audit logging.
 
         Args:
             session_id: Active session identifier.
-            repo_path: Path to the local git repository or worktree.
-            branch: Branch name to push.
+            repo_path: Path to the local git repository or worktree (e.g. 'launch' or 'src/launch').
+            branch: Branch name to push (or target distro branch when `tag` is set).
             remote: Remote name (default: 'origin').
             force_with_lease: Whether to use --force-with-lease (required for force pushes).
             force: Whether force push is requested.
             reason: MANDATORY explanation for why this push is being executed.
             approval_ticket_id: Ticket ID if this action required prior maintainer approval.
             dry_run: If True, validate policy without executing network git push.
+            tag: Optional release version tag (e.g. '3.10.2') created by `catkin_prepare_release --no-push`.
+                When set, delegates to `push_release` (requires maintainer approval ticket).
         """
         return perform_git_push(
             workspace=workspace,
@@ -1168,6 +1609,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             approval_ticket_id=approval_ticket_id,
             dry_run=dry_run,
             approval_mgr=approval_mgr,
+            tag=tag,
         )
 
     # 3. launch_jenkins_ci
@@ -2111,6 +2553,96 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             'conversation_link': format_conversation_link(session_id, conv_id),
             'session_dir_link': format_session_dir_link(session_id, session_dir),
         }
+
+    # 29. push_release
+    @server.tool()
+    def push_release(
+        session_id: str,
+        target_branch: str,
+        tag: str,
+        reason: str = '',
+        repo_path: str = '',
+        remote: str = 'origin',
+        approval_ticket_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Push a local release commit (created by `catkin_prepare_release --no-push`) and its version tag
+        (`refs/tags/<tag>`) to the upstream distro branch (`target_branch`).
+        Always requires an explicit maintainer approval ticket (`action='release_push'`).
+
+        Args:
+            session_id: Active session identifier.
+            target_branch: Target upstream release/distro branch (e.g. 'rolling').
+            tag: Version tag created by `catkin_prepare_release --no-push` (e.g. '3.10.2').
+            reason: MANDATORY explanation for pushing this release commit and tag.
+            repo_path: Optional repository path or name (e.g. 'launch' or 'src/launch').
+            remote: Remote name (default: 'origin').
+            approval_ticket_id: Approval ticket ID approved by the maintainer.
+            dry_run: If True, run `git push --dry-run` instead of pushing to the remote.
+        """
+        return perform_push_release(
+            workspace=workspace,
+            session_id=session_id,
+            repo_path=repo_path,
+            target_branch=target_branch,
+            tag=tag,
+            remote=remote,
+            reason=reason,
+            approval_ticket_id=approval_ticket_id,
+            dry_run=dry_run,
+            approval_mgr=approval_mgr,
+        )
+
+    # 30. run_bloom_release
+    @server.tool()
+    def run_bloom_release(
+        session_id: str,
+        repository: str,
+        rosdistro: str = 'rolling',
+        track: Optional[str] = None,
+        non_interactive: bool = True,
+        pretend: bool = False,
+        no_pull_request: bool = False,
+        pull_request_only: bool = False,
+        reason: str = '',
+        approval_ticket_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Execute `bloom-release` on the host for a ROS repository after the release commit and tag
+        have been pushed upstream. Always requires an explicit maintainer approval ticket
+        (`action='bloom_release'`).
+
+        Args:
+            session_id: Active session identifier.
+            repository: ROS distro repository name (e.g. 'launch' or 'launch_ros').
+            rosdistro: Target ROS distribution (default: 'rolling').
+            track: Optional release track name (defaults to `rosdistro`).
+            non_interactive: Pass `--non-interactive` (`-y`) to `bloom-release` (default: True).
+            pretend: Pass `--pretend` (`-s`) to `bloom-release` (default: False).
+            no_pull_request: Pass `--no-pull-request` to `bloom-release` (default: False).
+            pull_request_only: Pass `--pull-request-only` (`-p`) to `bloom-release` (default: False).
+            reason: MANDATORY explanation for running `bloom-release`.
+            approval_ticket_id: Approval ticket ID approved by the maintainer.
+            dry_run: Alias for `pretend=True`.
+        """
+        return perform_run_bloom_release(
+            workspace=workspace,
+            session_id=session_id,
+            repository=repository,
+            rosdistro=rosdistro,
+            track=track,
+            non_interactive=non_interactive,
+            pretend=pretend,
+            no_web=True,
+            no_pull_request=no_pull_request,
+            pull_request_only=pull_request_only,
+            reason=reason,
+            approval_ticket_id=approval_ticket_id,
+            dry_run=dry_run,
+            approval_mgr=approval_mgr,
+        )
 
     return server
 

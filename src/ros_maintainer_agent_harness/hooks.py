@@ -407,6 +407,24 @@ def is_forbidden_session_command(command_line: str, session_id: str) -> Optional
                 "or use 'ros-maintainer-harness' CLI / MCP tools. If a tool or container fails, "
                 "STOP immediately and ask the user for help instead of trying to bypass or debug it."
             )
+        if exe in ('bloom-release', 'git-bloom-release'):
+            return (
+                f"Direct '{exe}' invocation inside container 'ros-harness-{session_id}' is disabled "
+                "because containers do not hold release push or rosdistro credentials. "
+                f"Use 'ros-maintainer-harness release bloom <repository> -s {session_id} --rosdistro <distro> "
+                "-m \"...\"' or the 'run_bloom_release' MCP tool to run bloom-release on the host "
+                "with maintainer approval."
+            )
+        if exe == 'catkin_prepare_release':
+            if '--no-push' not in seg and '-h' not in seg and '--help' not in seg:
+                return (
+                    f"Running 'catkin_prepare_release' without '--no-push' in session '{session_id}' is disabled "
+                    "because the session container does not hold git push credentials. "
+                    "Run 'catkin_prepare_release --no-push ...' inside the container to create the local release "
+                    f"commit and tag, then use 'ros-maintainer-harness release push -s {session_id} "
+                    "-b <distro_branch> -t <tag> -m \"...\"' (or MCP 'push_release') to push the release "
+                    "commit and tag from the host."
+                )
 
     lower_cmd = stripped.lower()
     if 'ci_for_pr.py' in lower_cmd or 'ros-github-scripts' in lower_cmd:
