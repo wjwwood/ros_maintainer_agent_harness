@@ -306,6 +306,49 @@ class TestContainerHooks(unittest.TestCase):
                 f"Expected allow for {allowed_path}",
             )
 
+        # 5b. Wrapper-prefixed forbidden commands (sudo, timeout, env) and compound passthrough bypasses are denied
+        for bypass_cmd in (
+            'sudo docker ps',
+            'timeout 5 docker exec ros-harness-pr-rclcpp-160 ls',
+            'env FOO=1 podman ps',
+            'ros-maintainer-harness session exec pr-rclcpp-160 -- true; docker ps',
+        ):
+            bypass_payload = {
+                'conversationId': 'spoke-conv-1234',
+                'workspacePaths': [str(self.ws_root)],
+                'toolCall': {
+                    'name': 'run_command',
+                    'arguments': {
+                        'CommandLine': bypass_cmd,
+                        'Cwd': str(self.session.session_dir),
+                    },
+                },
+            }
+            res_bypass = evaluate_pre_tool_use(bypass_payload, workspace_root=self.ws_root)
+            self.assertEqual(
+                res_bypass.get('decision'), 'deny', f"Expected deny for bypass command: {bypass_cmd}"
+            )
+
+        # 5c. Spoofed /memory/ path traversal or non-home /memory/ path with forbidden basename is denied
+        for spoofed_memory_path in (
+            '/home/user/memory/../../.gemini/config/mcp_config.json',
+            '/tmp/memory/ci_for_pr.py',
+        ):
+            spoof_view_payload = {
+                'conversationId': 'spoke-conv-1234',
+                'workspacePaths': [str(self.ws_root)],
+                'toolCall': {
+                    'name': 'view_file',
+                    'arguments': {
+                        'AbsolutePath': spoofed_memory_path,
+                    },
+                },
+            }
+            res_spoof = evaluate_pre_tool_use(spoof_view_payload, workspace_root=self.ws_root)
+            self.assertEqual(
+                res_spoof.get('decision'), 'deny', f"Expected deny for spoofed path: {spoofed_memory_path}"
+            )
+
         # 6. Bare ros-maintainer-harness host command gets ~/.local/bin injected when missing from PATH
         bare_harness_payload = {
             'conversationId': 'spoke-conv-1234',

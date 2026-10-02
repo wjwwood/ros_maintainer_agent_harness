@@ -22,7 +22,6 @@ from typing import List, Optional, Tuple
 
 from .approval import ApprovalManager
 from .audit import format_audit_record, read_audit_records
-from .ci import CITracker, JenkinsManager
 from .devcontainer import (
     check_token_and_environment,
     exec_in_session_container,
@@ -35,16 +34,6 @@ from .hooks import (
     evaluate_pre_tool_use,
     install_hooks_config,
 )
-from .hub import (
-    format_conversation_link,
-    format_session_dir_link,
-    get_next_actions,
-    get_workspace_status,
-    read_session_metadata,
-    start_session_conversation,
-    VALID_SESSION_STATUSES,
-    write_session_metadata,
-)
 from .instructions import write_workspace_agent_instructions
 from .mcp_config import (
     get_agent_launch_info,
@@ -52,20 +41,76 @@ from .mcp_config import (
     write_session_mcp_configs,
 )
 from .rules import MaintainerRules
-from .scaffolder import scaffold_session_from_pr
-from .server import (
-    perform_create_pull_request,
-    perform_edit_pull_request,
-    perform_find_restarted_ci,
-    perform_git_push,
-    perform_launch_jenkins_ci,
-    perform_push_release,
-    perform_run_bloom_release,
-    run_server,
-)
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
-from .worktree import SessionManager
+from .worktree import (
+    read_session_metadata,
+    SessionManager,
+    write_session_metadata,
+)
+
+VALID_SESSION_STATUSES = (
+    'active',
+    'investigating',
+    'local_tests_passing',
+    'waiting_for_ci',
+    'needs_review',
+    'ready_to_merge',
+    'blocked',
+    'done',
+)
+
+_LAZY_SERVER_ATTRS = {
+    'perform_create_pull_request',
+    'perform_edit_pull_request',
+    'perform_find_restarted_ci',
+    'perform_git_push',
+    'perform_launch_jenkins_ci',
+    'perform_push_release',
+    'perform_run_bloom_release',
+    'run_server',
+}
+
+_LAZY_CI_ATTRS = {
+    'CITracker',
+    'JenkinsManager',
+}
+
+_LAZY_HUB_ATTRS = {
+    'format_conversation_link',
+    'format_session_dir_link',
+    'get_next_actions',
+    'get_workspace_status',
+    'start_session_conversation',
+}
+
+_LAZY_SCAFFOLDER_ATTRS = {
+    'scaffold_session_from_pr',
+}
+
+
+def __getattr__(name: str):
+    if name in _LAZY_SERVER_ATTRS:
+        from . import server as _srv
+        val = getattr(_srv, name)
+        globals()[name] = val
+        return val
+    if name in _LAZY_CI_ATTRS:
+        from . import ci as _ci
+        val = getattr(_ci, name)
+        globals()[name] = val
+        return val
+    if name in _LAZY_HUB_ATTRS:
+        from . import hub as _hub
+        val = getattr(_hub, name)
+        globals()[name] = val
+        return val
+    if name in _LAZY_SCAFFOLDER_ATTRS:
+        from . import scaffolder as _scaf
+        val = getattr(_scaf, name)
+        globals()[name] = val
+        return val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def get_default_workspace_path() -> Path:
@@ -390,6 +435,8 @@ def handle_session_mcp_config(args: argparse.Namespace) -> int:
 
 
 def handle_session_from_pr(args: argparse.Namespace) -> int:
+    from .scaffolder import scaffold_session_from_pr
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
 
@@ -535,6 +582,8 @@ def handle_session_down(args: argparse.Namespace) -> int:
 
 
 def handle_session_start_conversation(args: argparse.Namespace) -> int:
+    from .hub import start_session_conversation
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
 
@@ -565,6 +614,8 @@ def handle_session_start_conversation(args: argparse.Namespace) -> int:
 
 
 def handle_session_status(args: argparse.Namespace) -> int:
+    from .hub import format_conversation_link, format_session_dir_link
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     mgr = SessionManager(layout)
@@ -607,6 +658,8 @@ def handle_session_status(args: argparse.Namespace) -> int:
 
 
 def handle_status(args: argparse.Namespace) -> int:
+    from .hub import get_workspace_status
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     status = get_workspace_status(layout, check_containers=not args.no_containers)
@@ -650,6 +703,8 @@ def handle_status(args: argparse.Namespace) -> int:
 
 
 def handle_next(args: argparse.Namespace) -> int:
+    from .hub import get_next_actions
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     res = get_next_actions(
@@ -697,6 +752,8 @@ def handle_rules(args: argparse.Namespace) -> int:
 
 
 def handle_serve(args: argparse.Namespace) -> int:
+    from .server import run_server
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     if not layout.is_initialized():
@@ -824,6 +881,8 @@ def handle_approval(args: argparse.Namespace) -> int:
 
 
 def handle_ci(args: argparse.Namespace) -> int:
+    from .ci import CITracker, JenkinsManager
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     ci_tracker = CITracker(layout.ci_runs_path)
@@ -948,6 +1007,8 @@ def handle_ci(args: argparse.Namespace) -> int:
             for er in args.extra_repos:
                 extra_repos.extend([item.strip() for item in er.split(',') if item.strip()])
 
+        from .server import perform_launch_jenkins_ci
+
         res = perform_launch_jenkins_ci(
             workspace=layout,
             session_id=args.session,
@@ -988,6 +1049,8 @@ def handle_ci(args: argparse.Namespace) -> int:
         return 0 if res.get('success') else 1
 
     elif args.ci_action == 'find-restarted':
+        from .server import perform_find_restarted_ci
+
         target_url = args.pr_opt or args.target
         if not target_url and args.session:
             session_dir = layout.sessions_dir / args.session
@@ -1016,6 +1079,8 @@ def handle_ci(args: argparse.Namespace) -> int:
 
 
 def handle_git_push(args: argparse.Namespace) -> int:
+    from .server import perform_git_push
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     res = perform_git_push(
@@ -1051,6 +1116,8 @@ def handle_git_push(args: argparse.Namespace) -> int:
 
 
 def handle_release(args: argparse.Namespace) -> int:
+    from .server import perform_push_release, perform_run_bloom_release
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
 
@@ -1131,6 +1198,8 @@ def handle_release(args: argparse.Namespace) -> int:
 
 
 def handle_create_pr(args: argparse.Namespace) -> int:
+    from .server import perform_create_pull_request
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     res = perform_create_pull_request(
@@ -1174,6 +1243,8 @@ def handle_create_pr(args: argparse.Namespace) -> int:
 
 
 def handle_edit_pr(args: argparse.Namespace) -> int:
+    from .server import perform_edit_pull_request
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     pr_url = getattr(args, 'pr_opt', None) or getattr(args, 'pr_target', None)

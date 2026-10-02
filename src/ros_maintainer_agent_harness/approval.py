@@ -40,6 +40,7 @@ class ApprovalRequest:
     resolved_at: Optional[str] = None
     resolved_by: Optional[str] = None
     resolution_comment: Optional[str] = None
+    consumed_at: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -58,11 +59,14 @@ class ApprovalRequest:
             resolved_at=data.get('resolved_at'),
             resolved_by=data.get('resolved_by'),
             resolution_comment=data.get('resolution_comment'),
+            consumed_at=data.get('consumed_at'),
         )
 
 
 class ApprovalManager:
     """Manages maintainer approval tickets for high-stakes actions."""
+
+    DEFAULT_TTL_SECONDS = 86400.0  # 24 hours
 
     def __init__(self, approvals_file: Path):
         self.approvals_file = approvals_file
@@ -144,6 +148,7 @@ class ApprovalManager:
         req.resolved_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         req.resolved_by = maintainer
         req.resolution_comment = comment
+        req.consumed_at = None
         self._save_requests(requests)
         return req
 
@@ -166,6 +171,51 @@ class ApprovalManager:
         self._save_requests(requests)
         return req
 
-    def is_approved(self, ticket_id: str) -> bool:
+    def consume_ticket(self, ticket_id: str) -> Optional[ApprovalRequest]:
+        """Mark an approved ticket as consumed after execution so it cannot be replayed."""
+        requests = self._load_requests()
+        req = requests.get(ticket_id)
+        if req is None:
+            return None
+        req.consumed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self._save_requests(requests)
+        return req
+
+    def is_approved(
+        self,
+        ticket_id: str,
+        action: Optional[str] = None,
+        target: Optional[str] = None,
+        session_id: Optional[str] = None,
+        max_age_seconds: Optional[float] = DEFAULT_TTL_SECONDS,
+        allow_consumed: bool = False,
+    ) -> bool:
+        """
+        Check whether `ticket_id` is APPROVED, matches any supplied `action`/`target`/`session_id`
+        bindings, has not expired (`max_age_seconds`), and has not already been consumed
+        (unless `allow_consumed=True`, e.g. for dry-run checks).
+        """
         req = self.get_request(ticket_id)
-        return req is not None and req.status == ApprovalStatus.APPROVED
+        if req is None or req.status != ApprovalStatus.APPROVED:
+            return False
+        if req.consumed_at and not allow_consumed:
+            return False
+        if action is not None and req.action != action:
+            return False
+        if target is not None and req.target != target:
+            return False
+        if session_id is not None and req.session_id and req.session_id != session_id:
+            return False
+        if max_age_seconds is not None and max_age_seconds > 0:
+            ts_str = req.resolved_at or req.created_at
+            if ts_str:
+                try:
+                    ts = datetime.datetime.fromisoformat(ts_str)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=datetime.timezone.utc)
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    if (now - ts).total_seconds() > max_age_seconds:
+                        return False
+                except Exception:
+                    pass
+        return True

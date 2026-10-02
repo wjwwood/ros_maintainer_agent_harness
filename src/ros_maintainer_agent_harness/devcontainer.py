@@ -245,7 +245,7 @@ def generate_devcontainer_config(
         "workspaceFolder": "/workspace",
         "workspaceMount": f"source={session_dir},target=/workspace,type=bind",
         "mounts": [
-            f"source={tools_dir},target=/workspace/tools,type=bind",
+            f"source={tools_dir},target=/workspace/tools,type=bind,readonly",
             f"source={shared_repos_dir},target={shared_repos_dir},type=bind",
         ],
         "containerEnv": {
@@ -397,7 +397,7 @@ def start_session_container(
         '--add-host=host.docker.internal:host-gateway',
         '--security-opt=seccomp=unconfined',
         '-v', f"{session_dir}:/workspace",
-        '-v', f"{tools_dir}:/workspace/tools",
+        '-v', f"{tools_dir}:/workspace/tools:ro",
         '-v', f"{shared_repos_dir}:{shared_repos_dir}",
     ]
     if rules_file.exists():

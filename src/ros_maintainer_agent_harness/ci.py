@@ -686,6 +686,11 @@ class JenkinsManager:
 
         if use_live and repo and pr_num:
             auth_pair = self._resolve_github_auth()
+            if not auth_pair and not in_test_harness:
+                raise RuntimeError(
+                    "Cannot launch Jenkins CI: no host GitHub authentication token found "
+                    "(configure `gh auth login` or `ROS_CI_GITHUB_TOKEN` on the host)."
+                )
             if auth_pair:
                 username, token = auth_pair
                 gist_info = self.create_ci_gist(
@@ -759,6 +764,35 @@ class JenkinsManager:
                         f"Jenkins buildWithParameters failed (HTTP {trigger_resp.status_code}): "
                         f"{trigger_resp.text[:200]}"
                     )
+
+                # If Jenkins returned a queue item Location header (.../queue/item/<id>/),
+                # query it to resolve the exact executable build number/URL.
+                queue_loc = (trigger_resp.headers or {}).get('Location', '')
+                if '/queue/item/' in queue_loc:
+                    queue_api_url = f"{queue_loc.rstrip('/')}/api/json"
+                    for _ in range(4):
+                        try:
+                            q_resp = self.session.get(
+                                queue_api_url,
+                                auth=(username, token),
+                                timeout=10,
+                            )
+                            if q_resp.status_code == 200:
+                                q_data = q_resp.json() or {}
+                                executable = q_data.get('executable') or {}
+                                exec_num = executable.get('number')
+                                exec_url = executable.get('url')
+                                if exec_num is not None:
+                                    build_num = int(exec_num)
+                                    job_url = (
+                                        f"{exec_url.rstrip('/')}/"
+                                        if exec_url
+                                        else f"{self.ci_server}/job/{job_name}/{build_num}/"
+                                    )
+                                    break
+                        except Exception:
+                            pass
+                        time.sleep(1.0)
 
                 # 2. Poll ci_launcher console output briefly to extract child job links & badges
                 child_jobs: List[Dict[str, Any]] = []
@@ -1071,7 +1105,7 @@ class JenkinsManager:
                 # Scan for compiler and test error patterns
                 error_lines = []
                 for idx, line in enumerate(lines):
-                    if re.search(r'\b(error:|fatal error:|FAILED:|CMake Error|FAILURES!)\b', line, re.IGNORECASE):
+                    if re.search(r'(?:^|\s)(error:|fatal error:|FAILED:|CMake Error|FAILURES!)', line, re.IGNORECASE):
                         # Include 2 lines of context before and after
                         start = max(0, idx - 2)
                         end = min(len(lines), idx + 3)
@@ -1176,7 +1210,7 @@ class CIMonitorService:
         jenkins_mgr: JenkinsManager,
         sessions_dir: Path,
         audit_log_path: Optional[Path] = None,
-        poll_interval_seconds: float = 10.0,
+        poll_interval_seconds: float = 60.0,
         on_complete_callback: Optional[Callable[[CIRunRecord], None]] = None,
     ):
         self.tracker = tracker

@@ -41,52 +41,78 @@ This architecture is intended to raise the bar against accidental misuse and min
 
 Certain rules are non-configurable invariants enforced directly in code:
 
-1. **No Direct Base Branch Pushes**: Pushes to base branches (`main`, `master`, `rolling`, `jazzy`, `iron`, `humble`, etc.) are unconditionally rejected.
+1. **No Direct Base Branch Pushes**: Pushes to base branches (`main`, `master`, `rolling`, `jazzy`, `iron`, `humble`, etc.) are unconditionally rejected unless performed via the explicit ticket-gated `release push` (`push_release`) workflow for a verified local version tag.
 2. **No Conversational Commenting**: The gateway does not expose a tool for posting freeform comments on GitHub issues or PRs. This prevents the agent from hallucinating or impersonating the maintainer in public discussions.
 3. **No Auto-Merging**: Merging pull requests is strictly reserved for the human maintainer.
-4. **Approval Required for PR Creation**: Opening a pull request always requires an interactive maintainer approval ticket.
+4. **Pre-Filled Browser Review or Ticket Approval for PR Creation**: By default (`default_creation_mode: "web_url"`), `create_pull_request` returns a pre-filled GitHub `/compare/...` URL so the maintainer can inspect the diff and description in the browser before clicking "Create pull request". Submitting a PR directly via the GitHub REST API (`web_url=False` / `--api`) or editing an existing PR (`edit_pull_request`) always requires an interactive maintainer approval ticket.
 
 ---
 
 ## 3. Configurable Policies (`config/policy.yaml`)
 
-Policies are currently configured workspace-wide in `config/policy.yaml`. 
-
-*(Note: In the current implementation, policies apply across all sessions in a workspace. A planned future enhancement is **per-session policy scoping**, which will allow constraining a specific session to only push to its target PR branch, preventing a session working on PR A from accidentally modifying branches for PR B).*
+Policies are configured workspace-wide in `config/policy.yaml`:
 
 ```yaml
-version: 1
+version: "1.0"
+maintainer:
+  github_username: "wjwwood"
 
-git:
-  # Regex patterns for allowable feature branches to push
-  allowed_branch_patterns:
-    - "^wjwwood/.*$"
-    - "^fix/.*$"
-    - "^feature/.*$"
-    - "^pr-[0-9]+$"
+policies:
+  git_push:
+    # Regex patterns for allowable feature branches to push
+    allowed_branch_patterns:
+      - "^wjwwood/.*$"
+      - "^fix/.*$"
+      - "^feature/.*$"
+      - "^backport/.*$"
+      - "^pr-[0-9]+$"
 
-  # Restrict git push operations to specific GitHub organizations/repos
-  allowed_repositories:
-    - "ros2/*"
-    - "ros-tooling/*"
-    - "wjwwood/*"
+    # Protected base branches (cannot be pushed via normal git_push)
+    protected_base_branches:
+      - "main"
+      - "master"
+      - "rolling"
+      - "jazzy"
+      - "iron"
+      - "humble"
+      - "kilted"
+      - "lyrical"
+      - "noetic"
 
-  # Require interactive maintainer approval before pushing to 3rd-party contributor forks
-  require_fork_approval: true
+    # Restrict git push operations to specific GitHub organizations/repos
+    allowed_repositories:
+      - "ros2/*"
+      - "ros/*"
+      - "ament/*"
+      - "osrf/*"
+      - "gazebosim/*"
 
-  # Require git push to use --force-with-lease instead of --force
-  enforce_force_with_lease: true
+    # Require git push to use --force-with-lease instead of --force
+    require_force_with_lease: true
+    allow_raw_force: false
 
-jenkins:
-  # Maximum concurrent Jenkins builds allowed per PR
-  max_concurrent_runs_per_pr: 2
+    # Require interactive maintainer approval before pushing to 3rd-party contributor forks
+    require_approval_for_external_forks: true
 
-  # Cooldown period (in seconds) between triggering builds on the same PR
-  cooldown_seconds: 300
+  jenkins_ci:
+    ci_server: "https://ci.ros2.org"
+    # Maximum concurrent Jenkins builds allowed per PR
+    max_concurrent_runs_per_pr: 2
+    # Cooldown period (in seconds) between triggering builds on the same PR
+    cooldown_seconds: 300
+    # Automatically cancel older running builds when a new build is launched for the same PR
+    auto_cancel_superseded: true
 
-  # Automatically cancel older running builds when a new build is launched for the same PR
-  auto_cancel_superseded: true
+  pull_request:
+    # Default PR creation mode: "web_url" (pre-filled GitHub compare link) or "api"
+    default_creation_mode: "web_url"
+    # Require interactive maintainer approval when creating/editing PRs via the GitHub API
+    require_maintainer_approval: true
+    allow_auto_merge: false
+    allow_freeform_comments: false
 ```
+
+*(Note: Legacy top-level keys `git:` and `jenkins:`, as well as `require_fork_approval` and `enforce_force_with_lease`, are also accepted as aliases for backward compatibility).*
 
 ### Checking Policy Compliance
 You can test whether a hypothetical action complies with the policy:
@@ -99,9 +125,9 @@ ros-maintainer-harness policy check --branch wjwwood/my-feature --repo ros2/rclc
 
 ## 4. Maintainer Approval Workflow
 
-For sensitive operations (such as pushing to an external contributor's fork or creating a PR), the gateway creates an approval ticket rather than immediately executing the request.
+For sensitive operations (such as pushing to an external contributor's fork, pushing a release commit and tag, running `bloom-release`, or creating/editing a PR via the GitHub API), the gateway creates an approval ticket rather than immediately executing the request.
 
-1. **Ticket Creation**: The gateway writes a pending ticket to `audit/approvals.json` and returns `PENDING_APPROVAL` with a unique request ID (e.g. `req-1234abcd`).
+1. **Ticket Creation**: The gateway writes a pending ticket to `audit/approvals.json` and returns `PENDING_APPROVAL` with a unique request ID (e.g. `req-1234abcd`). Each ticket is strictly bound to its originating `session_id`, `action`, and `target`, expires after 24 hours by default, and is marked consumed (`consumed_at`) upon execution so it cannot be replayed or repurposed for another action.
 2. **Reviewing Tickets**:
    ```bash
    ros-maintainer-harness approval list --status PENDING
@@ -114,16 +140,16 @@ For sensitive operations (such as pushing to an external contributor's fork or c
    # Or reject
    ros-maintainer-harness approval reject req-1234abcd --comment "Commit message does not follow DCO"
    ```
-4. **Execution**: Once approved, the agent retries the operation, and the gateway executes it using the maintainer's host credentials.
+4. **Execution**: Once approved, the agent retries the operation with `--ticket req-1234abcd`, and the gateway executes it using the maintainer's host credentials and marks the ticket consumed.
 
 ---
 
 ## 5. Action Audit Logging (`audit/audit.jsonl`)
 
-Every attempt to interact with a remote system (whether allowed, denied, or rejected) is recorded in `audit/audit.jsonl`.
+Every attempt to interact with a remote system (whether allowed, denied, or rejected) is recorded in `audit/audit.jsonl` with a tamper-evident SHA-256 hash chain.
 
 ### Mandatory Reason Strings
-Every guarded tool (`git_push`, `launch_jenkins_ci`, `create_pull_request`) requires the agent to supply a `reason` string explaining why it is taking that action. Requests without a valid reason are rejected.
+Every guarded tool (`git_push`, `push_release`, `run_bloom_release`, `launch_jenkins_ci`, `create_pull_request`, `edit_pull_request`) requires the agent to supply a `reason` string explaining why it is taking that action. Requests without a valid reason are rejected.
 
 ### Inspecting the Audit Trail
 ```bash
@@ -133,11 +159,12 @@ ros-maintainer-harness audit show -n 20
 Each log record is a JSON object containing:
 - `timestamp`: UTC ISO timestamp
 - `session_id`: Originating session identifier
-- `action`: Operation name (e.g. `git_push`, `launch_jenkins_ci`)
-- `status`: Outcome (`ALLOWED`, `DENIED`, `REJECTED`, `PENDING_APPROVAL`, `APPROVED`)
+- `action`: Operation name (e.g. `git_push`, `release_push`, `bloom_release`, `launch_jenkins_ci`)
+- `status`: Outcome (`DENIED`, `REJECTED`, `PENDING_APPROVAL`, `WEB_URL_READY`, `APPROVED`, `FAILED`)
 - `target`: Target repository, branch, or job URL
 - `reason`: Explanation provided by the agent
-- `metadata`: Additional details (e.g. commit SHAs, author, approval ticket ID)
+- `details`: Additional details (e.g. `commit_sha`, `tag`, `ticket_id`, `output`)
+- `prev_hash` & `record_hash`: SHA-256 hash chain linking each record to its predecessor
 
 ---
 

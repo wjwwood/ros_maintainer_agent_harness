@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import datetime
-import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -93,9 +92,8 @@ class TimelineLogger:
         }
 
         if self.audit_log_path:
-            self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.audit_log_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(record) + '\n')
+            from .audit import append_audit_record
+            record = append_audit_record(self.audit_log_path, record)
 
         return record
 
