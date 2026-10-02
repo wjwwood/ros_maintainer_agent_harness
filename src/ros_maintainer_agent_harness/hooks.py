@@ -15,6 +15,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
@@ -183,33 +184,77 @@ def resolve_session_for_hook(
 
 
 def _first_executable_in_segment(segment: str) -> Optional[str]:
-    """Extract the binary basename from a single shell command segment."""
+    """Extract the binary basename from a single shell command segment, stripping common wrapper prefixes."""
     try:
         tokens = shlex.split(segment, posix=True)
     except ValueError:
         tokens = segment.strip().split()
     idx = 0
-    in_env = False
+    wrapper_mode: Optional[str] = None
     while idx < len(tokens):
         tok = tokens[idx]
         idx += 1
         # Skip env assignments like PATH=... or FOO=bar
         if '=' in tok and not tok.startswith('-') and not tok.startswith('/'):
             continue
-        if tok == 'env':
-            in_env = True
+        base_tok = Path(tok.replace('\\', '/')).name
+        if base_tok.lower().endswith('.exe'):
+            base_tok = base_tok[:-4]
+
+        if wrapper_mode == 'env':
+            if tok.startswith('-'):
+                if tok in ('-u', '--unset', '-C', '--chdir', '-S', '--split-string') and idx < len(tokens):
+                    idx += 1
+                continue
+            wrapper_mode = None
+        elif wrapper_mode == 'sudo':
+            if tok.startswith('-'):
+                if tok in ('-u', '--user', '-g', '--group', '-C', '-D', '-h', '-p', '-r', '-t') and idx < len(tokens):
+                    idx += 1
+                continue
+            wrapper_mode = None
+        elif wrapper_mode == 'timeout':
+            if tok.startswith('-'):
+                if tok in ('-k', '--kill-after', '-s', '--signal') and idx < len(tokens):
+                    idx += 1
+                continue
+            # First non-option token after timeout is the duration (e.g. '5' or '10s')
+            wrapper_mode = None
             continue
-        if in_env and tok.startswith('-'):
-            if tok in ('-u', '--unset', '-C', '--chdir', '-S', '--split-string') and idx < len(tokens):
+        elif wrapper_mode == 'nice':
+            if tok.startswith('-'):
+                if tok in ('-n', '--adjustment') and idx < len(tokens):
+                    idx += 1
+                continue
+            wrapper_mode = None
+
+        if base_tok in ('env', 'sudo', 'timeout', 'nice'):
+            wrapper_mode = base_tok
+            continue
+        if base_tok in ('command', 'nohup', 'exec', 'builtin', 'time', 'stdbuf', 'ionice'):
+            while idx < len(tokens) and tokens[idx].startswith('-'):
                 idx += 1
             continue
-        if tok in ('command', 'nohup'):
-            continue
-        name = Path(tok.replace('\\', '/')).name
-        if name.lower().endswith('.exe'):
-            name = name[:-4]
-        return name
+        return base_tok
     return None
+
+
+def _is_single_heredoc_session_exec(stripped: str) -> bool:
+    """Return True if `stripped` is a single `rmah-session-exec <<'EOF'\\n...\\nEOF` invocation."""
+    lines = stripped.split('\n')
+    if len(lines) < 2:
+        return False
+    first_line = lines[0].strip()
+    last_line = lines[-1].strip()
+    if last_line != 'EOF':
+        return False
+    if not first_line.endswith("<<'EOF'") and not first_line.endswith('<<"EOF"'):
+        return False
+    header_without_heredoc = first_line[:first_line.rfind('<<')].strip()
+    header_segs = _split_top_level_segments(header_without_heredoc, include_pipe=True)
+    if len(header_segs) != 1:
+        return False
+    return _first_executable_in_segment(header_segs[0]) == 'rmah-session-exec'
 
 
 def _split_top_level_segments(command_line: str, include_pipe: bool = False) -> List[str]:
@@ -338,6 +383,102 @@ def _contains_shell_substitution(command_line: str) -> bool:
     return False
 
 
+ALLOWED_SESSION_HARNESS_SUBCOMMANDS: Dict[str, Optional[set]] = {
+    'session': {'exec', 'status', 'up', 'down', 'list', 'devcontainer', None},
+    'ci': {'launch', 'status', 'summary', 'cancel', 'find-restarted', 'list', None},
+    'git-push': None,
+    'release': {'push', 'bloom', None},
+    'create-pr': None,
+    'edit-pr': None,
+    'status': None,
+    'next': None,
+    'doctor': None,
+    'audit': None,
+    'policy': {'show', 'check', None},
+    'rules': {'show', 'list', None},
+    'approval': {'list', 'show', 'status', None},
+}
+
+
+def _extract_harness_subcommand_tokens(segment: str) -> Optional[Tuple[Optional[str], Optional[str]]]:
+    """
+    If `segment` invokes `ros-maintainer-harness`, return `(subcommand, subaction)`.
+    Returns `None` if `segment` does not invoke `ros-maintainer-harness`.
+    """
+    try:
+        tokens = shlex.split(segment, posix=True)
+    except ValueError:
+        tokens = segment.split()
+
+    harness_idx: Optional[int] = None
+    for idx, tok in enumerate(tokens):
+        base_tok = Path(tok.replace('\\', '/')).name
+        if base_tok.lower().endswith('.exe'):
+            base_tok = base_tok[:-4]
+        if base_tok == 'ros-maintainer-harness':
+            harness_idx = idx
+            break
+
+    if harness_idx is None:
+        return None
+
+    subcmd: Optional[str] = None
+    subaction: Optional[str] = None
+    i = harness_idx + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok == '--':
+            break
+        if tok in ('-w', '--workspace', '-d', '--workdir', '--timeout'):
+            i += 2
+            continue
+        if tok.startswith(('-w=', '--workspace=', '-d=', '--workdir=', '--timeout=')):
+            i += 1
+            continue
+        if tok.startswith('-'):
+            i += 1
+            continue
+        if subcmd is None:
+            subcmd = tok
+        elif subaction is None:
+            subaction = tok
+            break
+        i += 1
+
+    return (subcmd, subaction)
+
+
+def _check_session_harness_subcommand(segment: str, session_id: str) -> Optional[str]:
+    """
+    Verify that a `ros-maintainer-harness` invocation from a session conversation uses an allowed
+    subcommand/action (blocking self-approval via `approval approve`, `token-setup`, `mcp-install`, etc.).
+    """
+    parsed = _extract_harness_subcommand_tokens(segment)
+    if parsed is None:
+        return None
+    subcmd, subaction = parsed
+    if subcmd is None:
+        return None
+
+    if subcmd not in ALLOWED_SESSION_HARNESS_SUBCOMMANDS:
+        return (
+            f"Host subcommand 'ros-maintainer-harness {subcmd}' is restricted to the human maintainer "
+            f"or Hub coordinator and cannot be invoked from session '{session_id}'. "
+            "Ask the user to run administrative workspace commands on the host."
+        )
+
+    allowed_actions = ALLOWED_SESSION_HARNESS_SUBCOMMANDS[subcmd]
+    if allowed_actions is not None and subaction not in allowed_actions:
+        return (
+            f"Host subcommand 'ros-maintainer-harness {subcmd} {subaction}' is restricted to the human maintainer "
+            f"or Hub coordinator and cannot be invoked from session '{session_id}'. "
+            "Ask the user to approve pending tickets or run administrative workspace commands."
+        )
+
+    return None
+
+
 def is_host_passthrough_command(command_line: str) -> bool:
     """
     Return True if `command_line` is purely a host-control command
@@ -348,10 +489,7 @@ def is_host_passthrough_command(command_line: str) -> bool:
     if not stripped:
         return True
 
-    first_exe = _first_executable_in_segment(stripped)
-    if first_exe == 'rmah-session-exec':
-        return True
-    if first_exe == 'ros-maintainer-harness' and 'session exec' in stripped:
+    if _is_single_heredoc_session_exec(stripped):
         return True
 
     if _contains_shell_substitution(stripped):
@@ -377,17 +515,29 @@ def is_host_passthrough_command(command_line: str) -> bool:
 def is_forbidden_session_command(command_line: str, session_id: str) -> Optional[str]:
     """
     Check if a command inside a maintainer session is attempting to invoke `docker`/`podman` directly,
-    extract host credentials (`gh auth token`), or bypass the harness (`ci_for_pr.py`).
+    extract host credentials (`gh auth token`), bypass the harness (`ci_for_pr.py`), or invoke
+    restricted host-only subcommands (`approval approve`, `token-setup`, `mcp-install`).
     """
     stripped = (command_line or '').strip()
     if not stripped:
         return None
 
+    if _is_single_heredoc_session_exec(stripped):
+        return None
+
+    segments = _split_top_level_segments(stripped, include_pipe=True)
+    if len(segments) == 1:
+        only_exe = _first_executable_in_segment(segments[0])
+        if only_exe == 'rmah-session-exec' and not _contains_shell_substitution(segments[0]):
+            return None
+        if (
+            only_exe == 'ros-maintainer-harness'
+            and _extract_harness_subcommand_tokens(segments[0]) == ('session', 'exec')
+            and not _contains_shell_substitution(segments[0])
+        ):
+            return None
+
     first_exe = _first_executable_in_segment(stripped)
-    if first_exe == 'rmah-session-exec':
-        return None
-    if first_exe == 'ros-maintainer-harness' and 'session exec' in stripped:
-        return None
     if first_exe == 'ros-maintainer-harness' and _contains_shell_substitution(stripped):
         return (
             "Unquoted shell command substitution ($(...) or backticks inside double quotes) "
@@ -396,9 +546,12 @@ def is_forbidden_session_command(command_line: str, session_id: str) -> Optional
             "or pass --body-file <path>."
         )
 
-    segments = _split_top_level_segments(stripped, include_pipe=True)
     for seg in segments:
         exe = _first_executable_in_segment(seg)
+        if exe == 'ros-maintainer-harness':
+            subcmd_err = _check_session_harness_subcommand(seg, session_id)
+            if subcmd_err:
+                return subcmd_err
         if exe in ('docker', 'podman'):
             return (
                 f"Direct '{exe}' invocation is disabled in session '{session_id}'. "
@@ -452,9 +605,14 @@ def is_forbidden_session_file_read(file_path: str, session_id: str) -> Optional[
     if not file_path:
         return None
     norm = file_path.replace('\\', '/')
-    if '/memory/' in norm:
-        return None
     basename = Path(norm).name
+
+    # Allow legitimate memory files under ~/memory/... or /home/<user>/memory/... (provided no '..' traversal)
+    blocked_mem_names = ('mcp_config.json', 'hooks.json', 'transcript.jsonl', 'transcript_full.jsonl')
+    if '..' not in norm.split('/') and basename not in blocked_mem_names:
+        home_mem = str(Path.home() / 'memory').replace('\\', '/') + '/'
+        if norm.startswith(home_mem) or re.match(r'^/(?:home|Users|usr/local/google/home)/[^/]+/memory/', norm):
+            return None
 
     forbidden_Substrings = (
         'ros_maintainer_agent_harness',

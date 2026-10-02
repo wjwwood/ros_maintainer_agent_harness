@@ -129,6 +129,7 @@ def execute_git_push(
     branch: str,
     remote: str = 'origin',
     force_with_lease: bool = False,
+    force: bool = False,
     dry_run: bool = False,
 ) -> Tuple[bool, str]:
     """
@@ -145,29 +146,37 @@ def execute_git_push(
     if not repo_dir.exists():
         return (False, f"Repository directory '{repo_dir}' does not exist.")
 
-    refspec = branch
-    if ':' not in branch:
-        current_branch = get_current_branch(repo_dir)
-        has_local_ref = False
-        try:
-            chk = subprocess.run(
-                git_safe_cmd(repo_dir, 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}'),
-                cwd=str(repo_dir),
-                capture_output=True,
-                timeout=10,
-                env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
-            )
-            has_local_ref = (chk.returncode == 0)
-        except Exception:
-            pass
-        if not has_local_ref or (
-            current_branch and current_branch != branch and current_branch.startswith('pr-')
-        ):
-            refspec = f'HEAD:refs/heads/{branch}'
+    cleaned_branch = (branch or '').strip()
+    if not cleaned_branch or ':' in cleaned_branch or cleaned_branch.startswith('-'):
+        return (
+            False,
+            f"Invalid branch name '{branch}': refspec syntax (':') and leading dashes are forbidden.",
+        )
+
+    refspec = cleaned_branch
+    current_branch = get_current_branch(repo_dir)
+    has_local_ref = False
+    try:
+        chk = subprocess.run(
+            git_safe_cmd(repo_dir, 'show-ref', '--verify', '--quiet', f'refs/heads/{cleaned_branch}'),
+            cwd=str(repo_dir),
+            capture_output=True,
+            timeout=10,
+            env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
+        )
+        has_local_ref = (chk.returncode == 0)
+    except Exception:
+        pass
+    if not has_local_ref or (
+        current_branch and current_branch != cleaned_branch and current_branch.startswith('pr-')
+    ):
+        refspec = f'HEAD:refs/heads/{cleaned_branch}'
 
     cmd = git_safe_cmd(repo_dir, 'push')
     if force_with_lease:
         cmd.append('--force-with-lease')
+    elif force:
+        cmd.append('--force')
     if dry_run:
         cmd.append('--dry-run')
     cmd.extend(['--', remote, refspec])

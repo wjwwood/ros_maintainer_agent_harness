@@ -259,9 +259,11 @@ class SessionManager:
         if worktree_target.exists():
             return worktree_target
 
+        from .git_ops import git_safe_cmd
+
         # Check if the branch already exists in the repo
         branch_check = subprocess.run(
-            ['git', 'rev-parse', '--verify', f'refs/heads/{branch_name}'],
+            git_safe_cmd(repo_dir, 'rev-parse', '--verify', f'refs/heads/{branch_name}'),
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
@@ -269,10 +271,10 @@ class SessionManager:
 
         if branch_check.returncode == 0:
             # Branch exists; checkout existing branch in worktree
-            cmd = ['git', 'worktree', 'add', '--', str(worktree_target), branch_name]
+            cmd = git_safe_cmd(repo_dir, 'worktree', 'add', '--', str(worktree_target), branch_name)
         else:
             # Create new branch based on base_ref
-            cmd = ['git', 'worktree', 'add', '-b', branch_name, '--', str(worktree_target), base_ref]
+            cmd = git_safe_cmd(repo_dir, 'worktree', 'add', '-b', branch_name, '--', str(worktree_target), base_ref)
 
         res = subprocess.run(cmd, cwd=str(repo_dir), capture_output=True, text=True)
         if res.returncode != 0:
@@ -396,9 +398,10 @@ class SessionManager:
         except Exception:
             pass
 
+        from .git_ops import git_safe_cmd
+
         src_dir = session_dir / 'src'
         if src_dir.exists():
-            from .git_ops import git_safe_cmd
             for sub in src_dir.iterdir():
                 if sub.is_dir() and (sub / '.git').exists():
                     # Attempt clean git worktree remove
@@ -409,4 +412,14 @@ class SessionManager:
                     )
 
         shutil.rmtree(session_dir, ignore_errors=True)
+
+        if self.workspace.shared_repos_dir.exists():
+            for repo_dir in self.workspace.shared_repos_dir.iterdir():
+                if repo_dir.is_dir() and (repo_dir / '.git').exists():
+                    subprocess.run(
+                        git_safe_cmd(repo_dir, 'worktree', 'prune'),
+                        cwd=str(repo_dir),
+                        capture_output=True,
+                    )
+
         return True

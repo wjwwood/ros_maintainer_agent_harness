@@ -87,7 +87,13 @@ class HarnessPolicy:
         allow_distro_branch: bool = False,
     ) -> bool:
         """Check if branch name matches allowed patterns and does not match blocked base branches."""
-        if not branch_name or '..' in branch_name or '//' in branch_name:
+        if (
+            not branch_name
+            or ':' in branch_name
+            or '..' in branch_name
+            or '//' in branch_name
+            or branch_name.startswith('-')
+        ):
             return False
 
         if not allow_distro_branch:
@@ -144,6 +150,16 @@ class HarnessPolicy:
         Returns:
             (is_allowed: bool, reason: str, requires_approval: bool)
         """
+        if not branch_name or ':' in branch_name or branch_name.startswith('-'):
+            return (
+                False,
+                (
+                    f"Branch '{branch_name}' does not match allowed branch naming patterns "
+                    "(refspec syntax ':' and leading dashes are forbidden)."
+                ),
+                False,
+            )
+
         is_ext_fork = bool(repo_full_name and self.is_external_fork(repo_full_name))
 
         # 1. Invariant: Check base and blocked branch patterns on non-external-fork repositories.
@@ -196,22 +212,27 @@ class HarnessPolicy:
                 False,
             )
 
-        # 5. Check repository allowlist
-        if self.git_push.allowed_repositories:
-            if not repo_full_name or not repo_full_name.strip():
+        # 5. Check repository allowlist (empty list denies all)
+        if not self.git_push.allowed_repositories:
+            return (
+                False,
+                "Repository allowlist is empty; no repositories are permitted by policy.",
+                False,
+            )
+        if not repo_full_name or not repo_full_name.strip():
+            return (
+                False,
+                "Repository allowlist is enforced but target repository name is unknown or unspecified.",
+                True,
+            )
+        if not self.is_repository_allowed(repo_full_name):
+            # Also allow user's own fork if configured
+            if not (self.github_username and repo_full_name.startswith(f"{self.github_username}/")):
                 return (
                     False,
-                    "Repository allowlist is enforced but target repository name is unknown or unspecified.",
-                    True,
+                    f"Repository '{repo_full_name}' is not in allowed repositories policy list.",
+                    False,
                 )
-            if not self.is_repository_allowed(repo_full_name):
-                # Also allow user's own fork if configured
-                if not (self.github_username and repo_full_name.startswith(f"{self.github_username}/")):
-                    return (
-                        False,
-                        f"Repository '{repo_full_name}' is not in allowed repositories policy list.",
-                        False,
-                    )
 
         return (True, "Push policy validation succeeded.", False)
 
@@ -254,7 +275,7 @@ class HarnessPolicy:
         base_branch: str = 'rolling',
     ) -> Tuple[bool, str, bool]:
         """
-        Validate pull request creation (Invariant: requires maintainer approval).
+        Validate pull request creation (Invariant: API creation requires maintainer approval).
 
         Returns:
             (is_allowed: bool, reason: str, requires_approval: bool)
@@ -266,7 +287,7 @@ class HarnessPolicy:
                 False,
             )
 
-        # Invariant: PR creation always requires maintainer approval
+        # Invariant: PR creation via API always requires maintainer approval
         return (
             True,
             f"Creating PR against '{repo_full_name}' ({base_branch}) requires explicit maintainer approval.",
@@ -275,14 +296,75 @@ class HarnessPolicy:
 
 
 def load_policy(config_path: Path) -> HarnessPolicy:
-    """Load policy configuration from a YAML file."""
+    """Load policy configuration from a YAML file with schema validation and legacy key support."""
+    import warnings
+
     if not config_path.exists():
         return HarnessPolicy()
 
     with open(config_path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f) or {}
 
-    git_push_data = data.get('policies', {}).get('git_push', {})
+    if not isinstance(data, dict):
+        warnings.warn(f"Invalid policy.yaml format in {config_path}: expected a mapping.", stacklevel=2)
+        return HarnessPolicy()
+
+    known_top_keys = {
+        'version', 'identity', 'github_username', 'policies', 'git', 'jenkins', 'pull_request', 'server',
+    }
+    unknown_top = set(data.keys()) - known_top_keys
+    if unknown_top:
+        warnings.warn(
+            f"Unknown top-level keys in {config_path}: {sorted(unknown_top)}",
+            stacklevel=2,
+        )
+
+    policies_block = data.get('policies') or {}
+    if isinstance(policies_block, dict):
+        known_policy_keys = {'git_push', 'git', 'jenkins_ci', 'jenkins', 'pull_request', 'server'}
+        unknown_pol = set(policies_block.keys()) - known_policy_keys
+        if unknown_pol:
+            warnings.warn(
+                f"Unknown keys under 'policies' in {config_path}: {sorted(unknown_pol)}",
+                stacklevel=2,
+            )
+    else:
+        policies_block = {}
+
+    git_push_data = (
+        policies_block.get('git_push')
+        or policies_block.get('git')
+        or data.get('git')
+        or {}
+    )
+    known_git_keys = {
+        'allowed_branch_patterns',
+        'blocked_branch_patterns',
+        'allowed_repositories',
+        'require_approval_for_external_forks',
+        'require_fork_approval',
+        'require_force_with_lease',
+        'enforce_force_with_lease',
+    }
+    if isinstance(git_push_data, dict):
+        unknown_git = set(git_push_data.keys()) - known_git_keys
+        if unknown_git:
+            warnings.warn(
+                f"Unknown git_push policy keys in {config_path}: {sorted(unknown_git)}",
+                stacklevel=2,
+            )
+    else:
+        git_push_data = {}
+
+    req_fork_approval = git_push_data.get(
+        'require_approval_for_external_forks',
+        git_push_data.get('require_fork_approval', True),
+    )
+    req_fwl = git_push_data.get(
+        'require_force_with_lease',
+        git_push_data.get('enforce_force_with_lease', True),
+    )
+
     git_push_policy = GitPushPolicy(
         allowed_branch_patterns=git_push_data.get(
             'allowed_branch_patterns', list(DEFAULT_ALLOWED_BRANCH_PATTERNS)
@@ -293,13 +375,32 @@ def load_policy(config_path: Path) -> HarnessPolicy:
         allowed_repositories=git_push_data.get(
             'allowed_repositories', list(DEFAULT_ALLOWED_REPOSITORIES)
         ),
-        require_approval_for_external_forks=git_push_data.get(
-            'require_approval_for_external_forks', True
-        ),
-        require_force_with_lease=git_push_data.get('require_force_with_lease', True),
+        require_approval_for_external_forks=bool(req_fork_approval),
+        require_force_with_lease=bool(req_fwl),
     )
 
-    jenkins_data = data.get('policies', {}).get('jenkins_ci', {})
+    jenkins_data = (
+        policies_block.get('jenkins_ci')
+        or policies_block.get('jenkins')
+        or data.get('jenkins')
+        or {}
+    )
+    known_jenkins_keys = {
+        'ci_server',
+        'max_concurrent_runs_per_pr',
+        'cooldown_seconds',
+        'auto_cancel_superseded',
+    }
+    if isinstance(jenkins_data, dict):
+        unknown_jenkins = set(jenkins_data.keys()) - known_jenkins_keys
+        if unknown_jenkins:
+            warnings.warn(
+                f"Unknown jenkins_ci policy keys in {config_path}: {sorted(unknown_jenkins)}",
+                stacklevel=2,
+            )
+    else:
+        jenkins_data = {}
+
     jenkins_policy = JenkinsCIPolicy(
         ci_server=jenkins_data.get('ci_server', 'https://ci.ros2.org'),
         max_concurrent_runs_per_pr=jenkins_data.get('max_concurrent_runs_per_pr', 1),
@@ -307,21 +408,21 @@ def load_policy(config_path: Path) -> HarnessPolicy:
         auto_cancel_superseded=jenkins_data.get('auto_cancel_superseded', True),
     )
 
-    pr_data = data.get('policies', {}).get('pull_request', {})
+    pr_data = policies_block.get('pull_request') or data.get('pull_request') or {}
     pr_policy = PullRequestPolicy(
         default_creation_mode=pr_data.get('default_creation_mode', 'web_url'),
     )
 
-    server_data = data.get('policies', {}).get('server', {})
+    server_data = policies_block.get('server') or data.get('server') or {}
     server_config = ServerConfig(
         host=server_data.get('host', '127.0.0.1'),
         port=server_data.get('port', 8765),
         transport=server_data.get('transport', 'sse'),
     )
 
-    identity_data = data.get('identity', {})
+    identity_data = data.get('identity') or {}
     return HarnessPolicy(
-        github_username=identity_data.get('github_username', ''),
+        github_username=identity_data.get('github_username') or data.get('github_username', ''),
         signing_key_id=identity_data.get('signing_key_id'),
         git_push=git_push_policy,
         jenkins_ci=jenkins_policy,

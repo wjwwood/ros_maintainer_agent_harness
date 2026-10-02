@@ -796,6 +796,175 @@ class TestMCPServer(unittest.TestCase):
             with patch('subprocess.run', return_value=mock_proc):
                 self.assertEqual(handle_release(rel_bloom_args), 0)
 
+    def test_approval_ticket_binding_and_single_use_and_audit_chain(self):
+        from ros_maintainer_agent_harness.audit import verify_audit_chain
+
+        # 1. Request an approval ticket for creating PR via API on ros2/rclcpp
+        req = self._call('create_pull_request', {
+            'session_id': 'session-bind-1',
+            'repo': 'ros2/rclcpp',
+            'title': 'Fix timer race',
+            'body': (
+                '## Description\nFix timer race.\n\n'
+                '### Is this user-facing behavior change?\nNo.\n\n'
+                '### Did you use Generative AI?\nYes, Gemini\n'
+            ),
+            'head': 'wjwwood:fix_timer',
+            'base': 'rolling',
+            'reason': 'Open PR via API',
+            'web_url': False,
+        })
+        self.assertEqual(req['status'], 'PENDING_APPROVAL')
+        ticket_id = req['ticket_id']
+
+        self._call('respond_approval_request', {
+            'ticket_id': ticket_id,
+            'approve': True,
+            'maintainer': 'wjwwood',
+        })
+
+        # 2. Attempting to use that ticket for a different repo/target or session is rejected
+        #    (falls back to PENDING_APPROVAL with a newly minted ticket rather than executing)
+        wrong_target = self._call('create_pull_request', {
+            'session_id': 'session-bind-1',
+            'repo': 'ros2/rmw',
+            'title': 'Fix timer race',
+            'body': (
+                '## Description\nFix timer race.\n\n'
+                '### Is this user-facing behavior change?\nNo.\n\n'
+                '### Did you use Generative AI?\nYes, Gemini\n'
+            ),
+            'head': 'wjwwood:fix_timer',
+            'base': 'rolling',
+            'reason': 'Try ticket on different repo',
+            'web_url': False,
+            'approval_ticket_id': ticket_id,
+            'dry_run': True,
+        })
+        self.assertFalse(wrong_target['success'])
+        self.assertEqual(wrong_target['status'], 'PENDING_APPROVAL')
+        self.assertNotEqual(wrong_target['ticket_id'], ticket_id)
+
+        wrong_session = self._call('create_pull_request', {
+            'session_id': 'session-other',
+            'repo': 'ros2/rclcpp',
+            'title': 'Fix timer race',
+            'body': (
+                '## Description\nFix timer race.\n\n'
+                '### Is this user-facing behavior change?\nNo.\n\n'
+                '### Did you use Generative AI?\nYes, Gemini\n'
+            ),
+            'head': 'wjwwood:fix_timer',
+            'base': 'rolling',
+            'reason': 'Try ticket on different session',
+            'web_url': False,
+            'approval_ticket_id': ticket_id,
+            'dry_run': True,
+        })
+        self.assertFalse(wrong_session['success'])
+        self.assertEqual(wrong_session['status'], 'PENDING_APPROVAL')
+        self.assertNotEqual(wrong_session['ticket_id'], ticket_id)
+
+        # 2b. Using the ticket with matching target & session succeeds on dry_run without consuming it,
+        #     then succeeds on non-dry-run and consumes the ticket so a second non-dry-run is rejected.
+        with patch(
+            'ros_maintainer_agent_harness.server._execute_github_create_pr',
+            return_value={'success': True, 'pr_number': 123, 'pr_url': 'https://github.com/ros2/rclcpp/pull/123'},
+        ):
+            ok_exec = self._call('create_pull_request', {
+                'session_id': 'session-bind-1',
+                'repo': 'ros2/rclcpp',
+                'title': 'Fix timer race',
+                'body': (
+                    '## Description\nFix timer race.\n\n'
+                    '### Is this user-facing behavior change?\nNo.\n\n'
+                    '### Did you use Generative AI?\nYes, Gemini\n'
+                ),
+                'head': 'wjwwood:fix_timer',
+                'base': 'rolling',
+                'reason': 'Open PR via API',
+                'web_url': False,
+                'approval_ticket_id': ticket_id,
+                'dry_run': False,
+            })
+            self.assertTrue(ok_exec['success'])
+            self.assertEqual(ok_exec['status'], 'APPROVED')
+
+            reused = self._call('create_pull_request', {
+                'session_id': 'session-bind-1',
+                'repo': 'ros2/rclcpp',
+                'title': 'Fix timer race',
+                'body': (
+                    '## Description\nFix timer race.\n\n'
+                    '### Is this user-facing behavior change?\nNo.\n\n'
+                    '### Did you use Generative AI?\nYes, Gemini\n'
+                ),
+                'head': 'wjwwood:fix_timer',
+                'base': 'rolling',
+                'reason': 'Attempt to reuse consumed ticket',
+                'web_url': False,
+                'approval_ticket_id': ticket_id,
+                'dry_run': False,
+            })
+            self.assertFalse(reused['success'])
+            self.assertEqual(reused['status'], 'PENDING_APPROVAL')
+
+        # 3. Untracked PR shorthand on get_ci_status returns clean NOT_FOUND instead of requests InvalidSchema error
+        untracked_ci = self._call('get_ci_status', {'job_url': 'ros2/rclcpp#99999'})
+        self.assertEqual(untracked_ci['status'], 'NOT_FOUND')
+
+        # 4. Per-session PR branch/repo scoping on git_push:
+        #    When a session is scoped to ros2/rclcpp#160 (head_ref='feature/pr_160'), pushing to its own head_ref
+        #    or a maintainer-prefixed branch ('wjwwood/test') is allowed without approval, while pushing to an
+        #    unrelated branch ('fix/other_pr') requires maintainer approval.
+        from ros_maintainer_agent_harness.worktree import write_session_metadata
+        scoped_remote = self.ws_root / 'ros2' / 'rclcpp_scoped.git'
+        subprocess.run(['git', 'init', '--bare', str(scoped_remote)], check=True)
+        scoped_session_dir = self.workspace.sessions_dir / 'pr-rclcpp-160-scoped'
+        scoped_wt = scoped_session_dir / 'src' / 'rclcpp'
+        scoped_wt.mkdir(parents=True, exist_ok=True)
+        subprocess.run(['git', 'init', '-b', 'feature/pr_160'], cwd=str(scoped_wt), check=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=str(scoped_wt), check=True)
+        subprocess.run(['git', 'config', 'user.name', 'Tester'], cwd=str(scoped_wt), check=True)
+        subprocess.run(['git', 'remote', 'add', 'origin', str(scoped_remote)], cwd=str(scoped_wt), check=True)
+        (scoped_wt / 'a.txt').write_text('scoped test')
+        subprocess.run(['git', 'add', '.'], cwd=str(scoped_wt), check=True)
+        subprocess.run(['git', 'commit', '-m', 'Initial scoped commit'], cwd=str(scoped_wt), check=True)
+        write_session_metadata(
+            scoped_session_dir,
+            {
+                'session_id': 'pr-rclcpp-160-scoped',
+                'pr_ref': 'ros2/rclcpp_scoped#160',
+                'base_repo': 'ros2/rclcpp_scoped',
+                'head_ref': 'feature/pr_160',
+            },
+        )
+
+        own_branch_push = self._call('git_push', {
+            'session_id': 'pr-rclcpp-160-scoped',
+            'repo_path': str(scoped_wt),
+            'branch': 'feature/pr_160',
+            'reason': 'Push to session own PR head branch',
+            'dry_run': True,
+        })
+        self.assertTrue(own_branch_push['success'])
+        self.assertEqual(own_branch_push['status'], 'APPROVED')
+
+        other_branch_push = self._call('git_push', {
+            'session_id': 'pr-rclcpp-160-scoped',
+            'repo_path': str(scoped_wt),
+            'branch': 'fix/unrelated_pr_branch',
+            'reason': 'Attempt push to unrelated branch from scoped PR session',
+            'dry_run': True,
+        })
+        self.assertFalse(other_branch_push['success'])
+        self.assertEqual(other_branch_push['status'], 'PENDING_APPROVAL')
+        self.assertIn('scoped to PR', other_branch_push['message'])
+
+        # 5. Verify SHA-256 hash chain on audit.jsonl
+        valid_chain, chain_msg = verify_audit_chain(self.workspace.audit_log_path)
+        self.assertTrue(valid_chain, chain_msg)
+
 
 if __name__ == '__main__':
     unittest.main()
