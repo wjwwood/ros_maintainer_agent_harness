@@ -306,11 +306,13 @@ def handle_session_devcontainer(args: argparse.Namespace) -> int:
         return 1
 
     session_dir = mgr.get_session_dir(args.session_id)
+    writable_shared = bool(getattr(args, 'writable_shared_repos', False))
     config_file = write_devcontainer_config(
         session_dir=session_dir,
         workspace_root=layout.root,
         distro=args.distro or 'rolling',
         custom_image=args.image,
+        writable_shared_repos=writable_shared,
     )
     print(f"✅ Generated .devcontainer configuration at: {config_file}")
     return 0
@@ -496,6 +498,7 @@ def handle_session_up(args: argparse.Namespace) -> int:
     session_dir = mgr.get_session_dir(args.session_id)
     info = mgr.get_session_info(args.session_id)
     distro = args.distro or (info.distro if info and info.distro else 'rolling')
+    writable_shared = getattr(args, 'writable_shared_repos', None)
 
     print(f"🐳 Starting sandbox container for session '{args.session_id}' (distro: {distro})...")
     res = start_session_container(
@@ -504,12 +507,14 @@ def handle_session_up(args: argparse.Namespace) -> int:
         workspace_root=layout.root,
         distro=distro,
         custom_image=args.image,
+        writable_shared_repos=writable_shared,
     )
     if not res.get('success'):
         print(f"Error starting container: {res.get('error')}", file=sys.stderr)
         return 1
 
-    print(f"✅ Container '{res.get('container_name')}' is {res.get('status')} ({res.get('runtime')}).")
+    mode_str = 'writable shared_repos' if res.get('writable_shared_repos') else 'read-only shared_repos'
+    print(f"✅ Container '{res.get('container_name')}' is {res.get('status')} ({res.get('runtime')}, {mode_str}).")
     return 0
 
 
@@ -1388,6 +1393,10 @@ def parse_args():
     s_devcontainer.add_argument('session_id', type=str, help='Session ID')
     s_devcontainer.add_argument('--distro', type=str, default='rolling', help='Target ROS distro (default: rolling)')
     s_devcontainer.add_argument('--image', type=str, default=None, help='Custom Docker image override')
+    s_devcontainer.add_argument(
+        '--writable-shared-repos', action='store_true', default=False,
+        help='Mount shared_repos/ read-write (default: read-only)',
+    )
 
     # session list
     session_subparsers.add_parser('list', help='List active sessions')
@@ -1442,6 +1451,14 @@ def parse_args():
     s_up.add_argument('session_id', type=str, help='Session ID')
     s_up.add_argument('--distro', type=str, default=None, help='Optional ROS distro override')
     s_up.add_argument('--image', type=str, default=None, help='Optional container image override')
+    s_up.add_argument(
+        '--writable-shared-repos', dest='writable_shared_repos', action='store_true', default=None,
+        help='Mount shared_repos/ read-write inside container (e.g. after pre-build security review)',
+    )
+    s_up.add_argument(
+        '--read-only-shared-repos', dest='writable_shared_repos', action='store_false',
+        help='Mount shared_repos/ read-only inside container (default)',
+    )
 
     # session exec
     s_exec = session_subparsers.add_parser('exec', help='Execute a command inside the session sandbox container')

@@ -67,12 +67,23 @@ class TestDevcontainer(unittest.TestCase):
             self.assertEqual(config['containerEnv']['ROS_MAINTAINER_SESSION_ID'], 'session-pr-160')
             self.assertIn('--add-host=host.docker.internal:host-gateway', config['runArgs'])
 
-            # Verify mount of maintainer_rules.md and shared_repos
+            # Verify mount of maintainer_rules.md and shared_repos (read-only by default, writable when requested)
             mounts = config['mounts']
             rules_mount = any('MAINTAINER_RULES.md' in m for m in mounts)
-            shared_mount = any('shared_repos' in m for m in mounts)
+            shared_ro_mount = any('shared_repos' in m and m.endswith(',readonly') for m in mounts)
             self.assertTrue(rules_mount)
-            self.assertTrue(shared_mount)
+            self.assertTrue(shared_ro_mount)
+
+            config_rw = generate_devcontainer_config(
+                session_dir=session_dir,
+                workspace_root=ws_root,
+                distro='jazzy',
+                writable_shared_repos=True,
+            )
+            shared_rw_mount = any(
+                'shared_repos' in m and not m.endswith(',readonly') for m in config_rw['mounts']
+            )
+            self.assertTrue(shared_rw_mount)
 
     def test_write_devcontainer_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:

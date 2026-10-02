@@ -913,7 +913,55 @@ class TestMCPServer(unittest.TestCase):
         untracked_ci = self._call('get_ci_status', {'job_url': 'ros2/rclcpp#99999'})
         self.assertEqual(untracked_ci['status'], 'NOT_FOUND')
 
-        # 4. Verify SHA-256 hash chain on audit.jsonl
+        # 4. Per-session PR branch/repo scoping on git_push:
+        #    When a session is scoped to ros2/rclcpp#160 (head_ref='feature/pr_160'), pushing to its own head_ref
+        #    or a maintainer-prefixed branch ('wjwwood/test') is allowed without approval, while pushing to an
+        #    unrelated branch ('fix/other_pr') requires maintainer approval.
+        from ros_maintainer_agent_harness.worktree import write_session_metadata
+        scoped_remote = self.ws_root / 'ros2' / 'rclcpp_scoped.git'
+        subprocess.run(['git', 'init', '--bare', str(scoped_remote)], check=True)
+        scoped_session_dir = self.workspace.sessions_dir / 'pr-rclcpp-160-scoped'
+        scoped_wt = scoped_session_dir / 'src' / 'rclcpp'
+        scoped_wt.mkdir(parents=True, exist_ok=True)
+        subprocess.run(['git', 'init', '-b', 'feature/pr_160'], cwd=str(scoped_wt), check=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=str(scoped_wt), check=True)
+        subprocess.run(['git', 'config', 'user.name', 'Tester'], cwd=str(scoped_wt), check=True)
+        subprocess.run(['git', 'remote', 'add', 'origin', str(scoped_remote)], cwd=str(scoped_wt), check=True)
+        (scoped_wt / 'a.txt').write_text('scoped test')
+        subprocess.run(['git', 'add', '.'], cwd=str(scoped_wt), check=True)
+        subprocess.run(['git', 'commit', '-m', 'Initial scoped commit'], cwd=str(scoped_wt), check=True)
+        write_session_metadata(
+            scoped_session_dir,
+            {
+                'session_id': 'pr-rclcpp-160-scoped',
+                'pr_ref': 'ros2/rclcpp_scoped#160',
+                'base_repo': 'ros2/rclcpp_scoped',
+                'head_ref': 'feature/pr_160',
+            },
+        )
+
+        own_branch_push = self._call('git_push', {
+            'session_id': 'pr-rclcpp-160-scoped',
+            'repo_path': str(scoped_wt),
+            'branch': 'feature/pr_160',
+            'reason': 'Push to session own PR head branch',
+            'dry_run': True,
+        })
+        self.assertTrue(own_branch_push['success'])
+        self.assertEqual(own_branch_push['status'], 'APPROVED')
+
+        other_branch_push = self._call('git_push', {
+            'session_id': 'pr-rclcpp-160-scoped',
+            'repo_path': str(scoped_wt),
+            'branch': 'fix/unrelated_pr_branch',
+            'reason': 'Attempt push to unrelated branch from scoped PR session',
+            'dry_run': True,
+        })
+        self.assertFalse(other_branch_push['success'])
+        self.assertEqual(other_branch_push['status'], 'PENDING_APPROVAL')
+        self.assertIn('scoped to PR', other_branch_push['message'])
+
+        # 5. Verify SHA-256 hash chain on audit.jsonl
         valid_chain, chain_msg = verify_audit_chain(self.workspace.audit_log_path)
         self.assertTrue(valid_chain, chain_msg)
 

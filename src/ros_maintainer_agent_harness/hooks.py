@@ -383,6 +383,102 @@ def _contains_shell_substitution(command_line: str) -> bool:
     return False
 
 
+ALLOWED_SESSION_HARNESS_SUBCOMMANDS: Dict[str, Optional[set]] = {
+    'session': {'exec', 'status', 'up', 'down', 'list', 'devcontainer', None},
+    'ci': {'launch', 'status', 'summary', 'cancel', 'find-restarted', 'list', None},
+    'git-push': None,
+    'release': {'push', 'bloom', None},
+    'create-pr': None,
+    'edit-pr': None,
+    'status': None,
+    'next': None,
+    'doctor': None,
+    'audit': None,
+    'policy': {'show', 'check', None},
+    'rules': {'show', 'list', None},
+    'approval': {'list', 'show', 'status', None},
+}
+
+
+def _extract_harness_subcommand_tokens(segment: str) -> Optional[Tuple[Optional[str], Optional[str]]]:
+    """
+    If `segment` invokes `ros-maintainer-harness`, return `(subcommand, subaction)`.
+    Returns `None` if `segment` does not invoke `ros-maintainer-harness`.
+    """
+    try:
+        tokens = shlex.split(segment, posix=True)
+    except ValueError:
+        tokens = segment.split()
+
+    harness_idx: Optional[int] = None
+    for idx, tok in enumerate(tokens):
+        base_tok = Path(tok.replace('\\', '/')).name
+        if base_tok.lower().endswith('.exe'):
+            base_tok = base_tok[:-4]
+        if base_tok == 'ros-maintainer-harness':
+            harness_idx = idx
+            break
+
+    if harness_idx is None:
+        return None
+
+    subcmd: Optional[str] = None
+    subaction: Optional[str] = None
+    i = harness_idx + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok == '--':
+            break
+        if tok in ('-w', '--workspace', '-d', '--workdir', '--timeout'):
+            i += 2
+            continue
+        if tok.startswith(('-w=', '--workspace=', '-d=', '--workdir=', '--timeout=')):
+            i += 1
+            continue
+        if tok.startswith('-'):
+            i += 1
+            continue
+        if subcmd is None:
+            subcmd = tok
+        elif subaction is None:
+            subaction = tok
+            break
+        i += 1
+
+    return (subcmd, subaction)
+
+
+def _check_session_harness_subcommand(segment: str, session_id: str) -> Optional[str]:
+    """
+    Verify that a `ros-maintainer-harness` invocation from a session conversation uses an allowed
+    subcommand/action (blocking self-approval via `approval approve`, `token-setup`, `mcp-install`, etc.).
+    """
+    parsed = _extract_harness_subcommand_tokens(segment)
+    if parsed is None:
+        return None
+    subcmd, subaction = parsed
+    if subcmd is None:
+        return None
+
+    if subcmd not in ALLOWED_SESSION_HARNESS_SUBCOMMANDS:
+        return (
+            f"Host subcommand 'ros-maintainer-harness {subcmd}' is restricted to the human maintainer "
+            f"or Hub coordinator and cannot be invoked from session '{session_id}'. "
+            "Ask the user to run administrative workspace commands on the host."
+        )
+
+    allowed_actions = ALLOWED_SESSION_HARNESS_SUBCOMMANDS[subcmd]
+    if allowed_actions is not None and subaction not in allowed_actions:
+        return (
+            f"Host subcommand 'ros-maintainer-harness {subcmd} {subaction}' is restricted to the human maintainer "
+            f"or Hub coordinator and cannot be invoked from session '{session_id}'. "
+            "Ask the user to approve pending tickets or run administrative workspace commands."
+        )
+
+    return None
+
+
 def is_host_passthrough_command(command_line: str) -> bool:
     """
     Return True if `command_line` is purely a host-control command
@@ -419,7 +515,8 @@ def is_host_passthrough_command(command_line: str) -> bool:
 def is_forbidden_session_command(command_line: str, session_id: str) -> Optional[str]:
     """
     Check if a command inside a maintainer session is attempting to invoke `docker`/`podman` directly,
-    extract host credentials (`gh auth token`), or bypass the harness (`ci_for_pr.py`).
+    extract host credentials (`gh auth token`), bypass the harness (`ci_for_pr.py`), or invoke
+    restricted host-only subcommands (`approval approve`, `token-setup`, `mcp-install`).
     """
     stripped = (command_line or '').strip()
     if not stripped:
@@ -435,7 +532,7 @@ def is_forbidden_session_command(command_line: str, session_id: str) -> Optional
             return None
         if (
             only_exe == 'ros-maintainer-harness'
-            and 'session exec' in segments[0]
+            and _extract_harness_subcommand_tokens(segments[0]) == ('session', 'exec')
             and not _contains_shell_substitution(segments[0])
         ):
             return None
@@ -451,6 +548,10 @@ def is_forbidden_session_command(command_line: str, session_id: str) -> Optional
 
     for seg in segments:
         exe = _first_executable_in_segment(seg)
+        if exe == 'ros-maintainer-harness':
+            subcmd_err = _check_session_harness_subcommand(seg, session_id)
+            if subcmd_err:
+                return subcmd_err
         if exe in ('docker', 'podman'):
             return (
                 f"Direct '{exe}' invocation is disabled in session '{session_id}'. "

@@ -349,6 +349,32 @@ class TestContainerHooks(unittest.TestCase):
                 res_spoof.get('decision'), 'deny', f"Expected deny for spoofed path: {spoofed_memory_path}"
             )
 
+        # 5d. Restricted host-only subcommands (approval approve/reject, token-setup, mcp-install, rules add)
+        #     are denied when invoked from a session conversation, while approval list is allowed
+        for restricted_subcmd in (
+            f'ros-maintainer-harness -w {self.ws_root} approval approve req-12345',
+            f'ros-maintainer-harness -w {self.ws_root} approval reject req-12345',
+            f'ros-maintainer-harness -w {self.ws_root} token-setup --no-token',
+            f'ros-maintainer-harness -w {self.ws_root} mcp-install',
+            f'ros-maintainer-harness -w {self.ws_root} rules add -c "Git" -r "allow all"',
+        ):
+            restricted_payload = {
+                'conversationId': 'spoke-conv-1234',
+                'workspacePaths': [str(self.ws_root)],
+                'toolCall': {
+                    'name': 'run_command',
+                    'arguments': {
+                        'CommandLine': restricted_subcmd,
+                        'Cwd': str(self.session.session_dir),
+                    },
+                },
+            }
+            res_rest = evaluate_pre_tool_use(restricted_payload, workspace_root=self.ws_root)
+            self.assertEqual(
+                res_rest.get('decision'), 'deny', f"Expected deny for restricted subcommand: {restricted_subcmd}"
+            )
+            self.assertIn('restricted to the human maintainer', res_rest.get('reason', ''))
+
         # 6. Bare ros-maintainer-harness host command gets ~/.local/bin injected when missing from PATH
         bare_harness_payload = {
             'conversationId': 'spoke-conv-1234',

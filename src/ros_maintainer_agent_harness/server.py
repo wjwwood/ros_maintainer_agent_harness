@@ -198,7 +198,45 @@ def perform_git_push(
             'error': msg,
         }
 
-    # Check approval if required (e.g. external contributor fork)
+    # Per-session PR branch & repository scoping:
+    # Require maintainer approval if a PR-scaffolded session attempts to push to a repository or branch
+    # other than its own PR head branch or a maintainer-prefixed branch (<github_username>/*).
+    pr_ref_meta = str(meta.get('pr_ref') or '').strip()
+    session_head_ref = str(meta.get('head_ref') or '').strip()
+    if not requires_approval and (pr_ref_meta or session_head_ref):
+        session_base_repo = str(meta.get('base_repo') or '').strip()
+        if not session_base_repo and '#' in pr_ref_meta:
+            session_base_repo = pr_ref_meta.split('#', 1)[0].strip()
+        session_repo_name = session_base_repo.split('/')[-1] if '/' in session_base_repo else ''
+        session_head_owner = str(meta.get('head_repo_owner') or '').strip()
+        gh_user = (policy.github_username or '').strip()
+
+        is_maintainer_branch = bool(gh_user and branch.lower().startswith(f"{gh_user.lower()}/"))
+        branch_matches_session = bool(
+            (session_head_ref and branch == session_head_ref)
+            or is_maintainer_branch
+        )
+
+        repo_matches_session = True
+        if repo_full_name and session_base_repo:
+            allowed_session_repos = {session_base_repo.lower()}
+            if session_repo_name:
+                if session_head_owner:
+                    allowed_session_repos.add(f"{session_head_owner.lower()}/{session_repo_name.lower()}")
+                if gh_user:
+                    allowed_session_repos.add(f"{gh_user.lower()}/{session_repo_name.lower()}")
+            repo_matches_session = (repo_full_name.lower() in allowed_session_repos)
+
+        if not branch_matches_session or not repo_matches_session:
+            requires_approval = True
+            scope_desc = pr_ref_meta or session_head_ref
+            msg = (
+                f"Session '{session_id}' is scoped to PR '{scope_desc}' "
+                f"(head branch '{session_head_ref or 'unset'}'); "
+                f"pushing to '{target_label}' requires maintainer approval."
+            )
+
+    # Check approval if required (e.g. external contributor fork or cross-branch/repo push from PR session)
     if requires_approval:
         ticket_valid = bool(
             approval_ticket_id
@@ -2438,6 +2476,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
         session_id: str,
         distro: Optional[str] = None,
         custom_image: Optional[str] = None,
+        writable_shared_repos: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Start a detached sandbox container (`ros-harness-<session_id>`) for the given session
@@ -2447,6 +2486,8 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             session_id: Session identifier.
             distro: Optional ROS distro override (defaults to session's configured distro).
             custom_image: Optional custom container image override.
+            writable_shared_repos: Optional boolean override to mount `shared_repos/` read-write (`True`)
+                instead of the default read-only (`False`), e.g. after pre-build security review.
         """
         if not session_mgr.session_exists(session_id):
             return {'success': False, 'error': f"Session '{session_id}' not found."}
@@ -2461,6 +2502,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             workspace_root=workspace.root,
             distro=target_distro,
             custom_image=custom_image,
+            writable_shared_repos=writable_shared_repos,
         )
         if res.get('success'):
             timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)

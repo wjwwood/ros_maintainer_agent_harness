@@ -228,9 +228,12 @@ def generate_devcontainer_config(
     distro: str = 'rolling',
     custom_image: Optional[str] = None,
     gateway_url: Optional[str] = None,
+    writable_shared_repos: bool = False,
 ) -> Dict[str, Any]:
     """
     Generate a complete devcontainer.json configuration dictionary for a session.
+    By default, `shared_repos/` is mounted read-only (`writable_shared_repos=False`) so untrusted
+    build/test code inside the container cannot mutate shared git objects or refs across sessions.
     """
     session_dir = session_dir.resolve()
     workspace_root = workspace_root.resolve()
@@ -239,6 +242,12 @@ def generate_devcontainer_config(
     rules_file = workspace_root / 'config' / 'maintainer_rules.md'
     image = get_image_for_distro(distro, custom_image)
 
+    shared_mount = (
+        f"source={shared_repos_dir},target={shared_repos_dir},type=bind"
+        if writable_shared_repos
+        else f"source={shared_repos_dir},target={shared_repos_dir},type=bind,readonly"
+    )
+
     config: Dict[str, Any] = {
         "name": f"ROS 2 Maintainer Sandbox ({session_dir.name})",
         "image": image,
@@ -246,7 +255,7 @@ def generate_devcontainer_config(
         "workspaceMount": f"source={session_dir},target=/workspace,type=bind",
         "mounts": [
             f"source={tools_dir},target=/workspace/tools,type=bind,readonly",
-            f"source={shared_repos_dir},target={shared_repos_dir},type=bind",
+            shared_mount,
         ],
         "containerEnv": {
             "PATH": "/workspace/tools/bin:/root/.local/bin:${containerEnv:PATH}",
@@ -254,6 +263,7 @@ def generate_devcontainer_config(
             "ROS_MAINTAINER_SESSION_ID": session_dir.name,
             "ROS_MAINTAINER_GATEWAY_URL": gateway_url or "http://host.docker.internal:8765",
             "PYTHONUNBUFFERED": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
         },
         "runArgs": [
             "--add-host=host.docker.internal:host-gateway",
@@ -296,6 +306,7 @@ def write_devcontainer_config(
     distro: str = 'rolling',
     custom_image: Optional[str] = None,
     gateway_url: Optional[str] = None,
+    writable_shared_repos: bool = False,
 ) -> Path:
     """
     Write the devcontainer.json configuration to the session's .devcontainer directory.
@@ -310,6 +321,7 @@ def write_devcontainer_config(
         distro=distro,
         custom_image=custom_image,
         gateway_url=gateway_url,
+        writable_shared_repos=writable_shared_repos,
     )
 
     with open(config_file, 'w', encoding='utf-8') as f:
@@ -358,11 +370,18 @@ def start_session_container(
     custom_image: Optional[str] = None,
     gateway_url: Optional[str] = None,
     runtime: Optional[str] = None,
+    writable_shared_repos: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Start a detached sandbox container for the given session so commands and builds
     can be executed inside it via `session exec` or the MCP `exec_in_session` tool.
+
+    By default, `shared_repos/` is mounted read-only (`:ro`). Pass `writable_shared_repos=True`
+    (or `ros-maintainer-harness session up <session_id> --writable-shared-repos`) to mount
+    `shared_repos/` read-write when explicitly requested or after pre-build review.
     """
+    from .worktree import read_session_metadata, write_session_metadata
+
     rt = runtime or detect_container_runtime()
     if not rt:
         return {
@@ -370,17 +389,41 @@ def start_session_container(
             'error': 'No container runtime (docker or podman) found on PATH.',
         }
 
+    session_meta = read_session_metadata(session_dir) if session_dir.is_dir() else {}
+    mode_changed = False
+    if writable_shared_repos is None:
+        use_writable_shared = bool(session_meta.get('writable_shared_repos', False))
+    else:
+        use_writable_shared = bool(writable_shared_repos)
+        if session_dir.is_dir():
+            prev_mode = bool(session_meta.get('writable_shared_repos', False))
+            if prev_mode != use_writable_shared:
+                mode_changed = True
+            write_session_metadata(session_dir, {'writable_shared_repos': use_writable_shared})
+            try:
+                write_devcontainer_config(
+                    session_dir=session_dir,
+                    workspace_root=workspace_root,
+                    distro=distro,
+                    custom_image=custom_image,
+                    gateway_url=gateway_url,
+                    writable_shared_repos=use_writable_shared,
+                )
+            except Exception:
+                pass
+
     status_info = get_container_status(session_id, runtime=rt)
     container_name = status_info['container_name']
-    if status_info['running']:
+    if status_info['running'] and not mode_changed and writable_shared_repos is None:
         return {
             'success': True,
             'status': 'already_running',
             'container_name': container_name,
             'runtime': rt,
+            'writable_shared_repos': use_writable_shared,
         }
 
-    # Remove any exited container with the same name
+    # Remove any exited container (or running container when mount mode was explicitly changed)
     subprocess.run([rt, 'rm', '-f', container_name], capture_output=True, text=True)
 
     session_dir = session_dir.resolve()
@@ -390,6 +433,12 @@ def start_session_container(
     rules_file = workspace_root / 'config' / 'maintainer_rules.md'
     image = get_image_for_distro(distro, custom_image)
 
+    shared_vol = (
+        f"{shared_repos_dir}:{shared_repos_dir}"
+        if use_writable_shared
+        else f"{shared_repos_dir}:{shared_repos_dir}:ro"
+    )
+
     cmd = [
         rt, 'run', '-d',
         '--name', container_name,
@@ -398,7 +447,7 @@ def start_session_container(
         '--security-opt=seccomp=unconfined',
         '-v', f"{session_dir}:/workspace",
         '-v', f"{tools_dir}:/workspace/tools:ro",
-        '-v', f"{shared_repos_dir}:{shared_repos_dir}",
+        '-v', shared_vol,
     ]
     if rules_file.exists():
         cmd.extend(['-v', f"{rules_file}:/workspace/MAINTAINER_RULES.md:ro"])
@@ -415,6 +464,7 @@ def start_session_container(
         'ROS_MAINTAINER_SESSION_ID': session_id,
         'ROS_MAINTAINER_GATEWAY_URL': gateway_url or 'http://host.docker.internal:8765',
         'PYTHONUNBUFFERED': '1',
+        'GIT_OPTIONAL_LOCKS': '0',
     }
     for k, v in container_env.items():
         cmd.extend(['-e', f"{k}={v}"])
@@ -470,6 +520,7 @@ def start_session_container(
         'runtime': rt,
         'image': image,
         'distro': distro,
+        'writable_shared_repos': use_writable_shared,
     }
 
 
