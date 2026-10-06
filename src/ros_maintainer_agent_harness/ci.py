@@ -686,6 +686,11 @@ class JenkinsManager:
 
         if use_live and repo and pr_num:
             auth_pair = self._resolve_github_auth()
+            if not auth_pair and not in_test_harness:
+                raise RuntimeError(
+                    "Cannot launch Jenkins CI: no host GitHub authentication token found "
+                    "(configure `gh auth login` or `ROS_CI_GITHUB_TOKEN` on the host)."
+                )
             if auth_pair:
                 username, token = auth_pair
                 gist_info = self.create_ci_gist(
@@ -759,6 +764,35 @@ class JenkinsManager:
                         f"Jenkins buildWithParameters failed (HTTP {trigger_resp.status_code}): "
                         f"{trigger_resp.text[:200]}"
                     )
+
+                # If Jenkins returned a queue item Location header (.../queue/item/<id>/),
+                # query it to resolve the exact executable build number/URL.
+                queue_loc = (trigger_resp.headers or {}).get('Location', '')
+                if '/queue/item/' in queue_loc:
+                    queue_api_url = f"{queue_loc.rstrip('/')}/api/json"
+                    for _ in range(4):
+                        try:
+                            q_resp = self.session.get(
+                                queue_api_url,
+                                auth=(username, token),
+                                timeout=10,
+                            )
+                            if q_resp.status_code == 200:
+                                q_data = q_resp.json() or {}
+                                executable = q_data.get('executable') or {}
+                                exec_num = executable.get('number')
+                                exec_url = executable.get('url')
+                                if exec_num is not None:
+                                    build_num = int(exec_num)
+                                    job_url = (
+                                        f"{exec_url.rstrip('/')}/"
+                                        if exec_url
+                                        else f"{self.ci_server}/job/{job_name}/{build_num}/"
+                                    )
+                                    break
+                        except Exception:
+                            pass
+                        time.sleep(1.0)
 
                 # 2. Poll ci_launcher console output briefly to extract child job links & badges
                 child_jobs: List[Dict[str, Any]] = []
@@ -1071,7 +1105,7 @@ class JenkinsManager:
                 # Scan for compiler and test error patterns
                 error_lines = []
                 for idx, line in enumerate(lines):
-                    if re.search(r'\b(error:|fatal error:|FAILED:|CMake Error|FAILURES!)\b', line, re.IGNORECASE):
+                    if re.search(r'(?:^|\s)(error:|fatal error:|FAILED:|CMake Error|FAILURES!)', line, re.IGNORECASE):
                         # Include 2 lines of context before and after
                         start = max(0, idx - 2)
                         end = min(len(lines), idx + 3)
@@ -1141,6 +1175,268 @@ class JenkinsManager:
         except Exception as e:
             return {'success': False, 'job_url': cleaned_url, 'error': str(e)}
 
+    @staticmethod
+    def parse_comment_target(target: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
+        """
+        Parse a comment or PR target string into `(repo_full_name, pr_number, comment_id)`.
+        """
+        cleaned = (target or '').strip()
+        m = re.search(
+            r'github\.com/(?P<org>[^/]+)/(?P<repo>[^/#]+)/(?:pull|issues)/(?P<pr>\d+)#issuecomment-(?P<cid>\d+)',
+            cleaned,
+        )
+        if m:
+            return f"{m.group('org')}/{m.group('repo')}", int(m.group('pr')), int(m.group('cid'))
+
+        m = re.search(
+            r'github\.com/(?P<org>[^/]+)/(?P<repo>[^/#]+)/issues/comments/(?P<cid>\d+)',
+            cleaned,
+        )
+        if m:
+            return f"{m.group('org')}/{m.group('repo')}", None, int(m.group('cid'))
+
+        repo, pr_num = parse_pr_url(cleaned)
+        return repo, pr_num, None
+
+    @staticmethod
+    def parse_ci_comment_body(
+        body: str,
+        comment_id: Optional[int] = None,
+        html_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Parse a ROS 2 CI status comment body to extract Gist URL/hash, branch name,
+        `ci_launcher` build number, and per-platform job references.
+        """
+        from urllib.parse import urlparse
+
+        gist_url: Optional[str] = None
+        gist_hash: Optional[str] = None
+        m_gist = re.search(r'Gist:\s*(?P<url>https://gist\.githubusercontent\.com/[^\s)]+)', body)
+        if m_gist:
+            gist_url = m_gist.group('url')
+            parts = urlparse(gist_url).path.strip('/').split('/')
+            if len(parts) >= 2:
+                gist_hash = parts[1]
+
+        branch_name: Optional[str] = None
+        m_branch = re.search(r'Branch:\s*(?P<branch>[^\s)]+)', body)
+        if m_branch:
+            branch_name = m_branch.group('branch')
+
+        launcher_build: Optional[int] = None
+        m_launch = re.search(
+            r'(?:ci_launcher ran:\s*https?://[^/\s]+/job/ci_launcher/|ci_launcher/)(?P<num>\d+)',
+            body,
+        )
+        if m_launch:
+            launcher_build = int(m_launch.group('num'))
+
+        job_pattern = re.compile(
+            r'^(?P<line>\s*\*\s*(?P<platform>[^\[\n]+?)\s*\[!\[Build Status\]\('
+            r'(?P<badge_url>https?://[^)]*?job=(?P<job_name>[a-zA-Z0-9_\-]+)&build=(?P<build_num>\d+)[^)]*)\)'
+            r'\]\((?P<job_url>https?://[^)]+)\))',
+            re.MULTILINE,
+        )
+
+        jobs: List[Dict[str, Any]] = []
+        for m in job_pattern.finditer(body):
+            jobs.append({
+                'platform': m.group('platform').strip(),
+                'job_name': m.group('job_name'),
+                'build_num': int(m.group('build_num')),
+                'badge_url': m.group('badge_url'),
+                'job_url': m.group('job_url'),
+                'full_line': m.group('line'),
+            })
+
+        return {
+            'comment_id': comment_id,
+            'html_url': html_url,
+            'body': body,
+            'gist_url': gist_url,
+            'gist_hash': gist_hash,
+            'branch_name': branch_name,
+            'launcher_build': launcher_build,
+            'jobs': jobs,
+        }
+
+    def find_latest_job_build(
+        self,
+        job_name: str,
+        start_build_num: int,
+        launcher_build: Optional[int] = None,
+        gist_hash: Optional[str] = None,
+        branch_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Search Jenkins build history and active queue for restarted builds of `job_name`
+        matching `launcher_build` upstream lineage or `gist_hash`/`branch_name` parameters.
+        """
+        server = self.ci_server.rstrip('/')
+        url = f"{server}/job/{job_name}/api/json?tree=builds[number,result,building]"
+        try:
+            r = self._get_with_auth_retry(url, timeout=10)
+            if r.status_code != 200:
+                return {
+                    'job_name': job_name,
+                    'build_num': start_build_num,
+                    'status': 'UNKNOWN',
+                    'is_queued': False,
+                }
+            build_list = r.json().get('builds', [])
+        except Exception:
+            return {
+                'job_name': job_name,
+                'build_num': start_build_num,
+                'status': 'ERROR',
+                'is_queued': False,
+            }
+
+        matching_builds: List[Tuple[int, str]] = []
+        for b in build_list:
+            b_num = b.get('number')
+            if not isinstance(b_num, int) or b_num < start_build_num:
+                continue
+
+            b_url = (
+                f"{server}/job/{job_name}/{b_num}/api/json?"
+                "tree=result,building,actions[causes[upstreamBuild,upstreamProject],"
+                "parameters[name,value]]"
+            )
+            try:
+                b_r = self._get_with_auth_retry(b_url, timeout=8)
+                if b_r.status_code != 200:
+                    continue
+                b_data = b_r.json()
+                is_match = False
+                for action in b_data.get('actions') or []:
+                    if not isinstance(action, dict):
+                        continue
+                    if launcher_build is not None and 'causes' in action:
+                        for cause in action.get('causes') or []:
+                            if (
+                                isinstance(cause, dict)
+                                and cause.get('upstreamProject') == 'ci_launcher'
+                                and cause.get('upstreamBuild') == launcher_build
+                            ):
+                                is_match = True
+                    if not is_match and 'parameters' in action:
+                        for param in action.get('parameters') or []:
+                            if not isinstance(param, dict):
+                                continue
+                            p_name = param.get('name')
+                            p_val = param.get('value')
+                            if isinstance(p_val, str):
+                                if gist_hash and p_name == 'CI_ROS2_REPOS_URL' and gist_hash in p_val:
+                                    is_match = True
+                                elif branch_name and p_name == 'CI_BRANCH_TO_TEST' and p_val == branch_name:
+                                    is_match = True
+
+                if is_match:
+                    status = 'RUNNING' if b_data.get('building') else (b_data.get('result') or 'UNKNOWN')
+                    matching_builds.append((b_num, status))
+            except Exception:
+                continue
+
+        if matching_builds:
+            matching_builds.sort(key=lambda x: x[0])
+            latest_num, latest_status = matching_builds[-1]
+            return {
+                'job_name': job_name,
+                'build_num': latest_num,
+                'status': latest_status,
+                'is_queued': False,
+            }
+
+        # Check active Jenkins queue if no newer executed build was found
+        try:
+            q_r = self._get_with_auth_retry(f"{server}/queue/api/json", timeout=8)
+            if q_r.status_code == 200:
+                q_items = q_r.json().get('items', [])
+                job_queue = [
+                    item for item in q_items
+                    if isinstance(item, dict) and (item.get('task') or {}).get('name') == job_name
+                ]
+                for idx, item in enumerate(job_queue):
+                    is_queue_match = False
+                    for action in item.get('actions') or []:
+                        if not isinstance(action, dict):
+                            continue
+                        for cause in action.get('causes') or []:
+                            if (
+                                isinstance(cause, dict)
+                                and launcher_build is not None
+                                and cause.get('upstreamProject') == 'ci_launcher'
+                                and cause.get('upstreamBuild') == launcher_build
+                            ):
+                                is_queue_match = True
+                    for cause in item.get('causes') or []:
+                        if (
+                            isinstance(cause, dict)
+                            and launcher_build is not None
+                            and cause.get('upstreamProject') == 'ci_launcher'
+                            and cause.get('upstreamBuild') == launcher_build
+                        ):
+                            is_queue_match = True
+
+                    params_str = str(item.get('params') or '')
+                    if gist_hash and gist_hash in params_str:
+                        is_queue_match = True
+                    elif branch_name and f"CI_BRANCH_TO_TEST={branch_name}" in params_str:
+                        is_queue_match = True
+
+                    if is_queue_match:
+                        return {
+                            'job_name': job_name,
+                            'build_num': None,
+                            'status': 'QUEUED',
+                            'is_queued': True,
+                            'queue_item_id': item.get('id'),
+                            'queue_position': idx + 1,
+                        }
+        except Exception:
+            pass
+
+        return {
+            'job_name': job_name,
+            'build_num': start_build_num,
+            'status': 'UNKNOWN',
+            'is_queued': False,
+        }
+
+    @staticmethod
+    def update_ci_comment_markdown(
+        original_body: str,
+        jobs: List[Dict[str, Any]],
+        results: Dict[str, Dict[str, Any]],
+    ) -> str:
+        """Update job build numbers and badge/job URLs in a GitHub CI status comment."""
+        updated_body = original_body
+        for job in jobs:
+            j_name = job['job_name']
+            old_num = job['build_num']
+            res = results.get(j_name)
+            if not res or not res.get('build_num') or res['build_num'] == old_num:
+                continue
+
+            old_str = str(old_num)
+            new_str = str(res['build_num'])
+            new_badge_url = re.sub(
+                rf'build={re.escape(old_str)}',
+                f'build={new_str}',
+                job['badge_url'],
+            )
+            new_job_url = re.sub(
+                rf'/{re.escape(j_name)}/{re.escape(old_str)}/?',
+                f'/{j_name}/{new_str}/',
+                job['job_url'],
+            )
+            new_line = f"* {job['platform']} [![Build Status]({new_badge_url})]({new_job_url})"
+            updated_body = updated_body.replace(job['full_line'], new_line)
+
+        return updated_body
+
     def find_restarted_ci(
         self,
         pr_or_comment_url: str,
@@ -1148,19 +1444,156 @@ class JenkinsManager:
         dry_run: bool = False,
     ) -> Dict[str, Any]:
         """
-        Check for restarted/rescheduled jobs on Jenkins for a PR or comment.
+        Check for restarted/rescheduled jobs on Jenkins for a PR or comment by inspecting the
+        GitHub CI comment and querying Jenkins build history and queue (`ci.ros2.org`).
         """
-        repo, pr_num = parse_pr_url(pr_or_comment_url)
+        repo, pr_num, comment_id = self.parse_comment_target(pr_or_comment_url)
+        if dry_run:
+            return {
+                'success': True,
+                'target': pr_or_comment_url,
+                'repo': repo,
+                'pr_num': pr_num,
+                'comment_id': comment_id,
+                'restarted_jobs_found': 0,
+                'restarted_jobs': [],
+                'queued_jobs': [],
+                'updated_comment': False,
+                'message': f"[DRY RUN] Checked Jenkins CI status for {pr_or_comment_url}. No rescheduled jobs pending.",
+                'dry_run': True,
+            }
+
+        auth_pair = self._resolve_github_auth()
+        gh_headers = {'Accept': 'application/vnd.github+json'}
+        if auth_pair:
+            gh_headers['Authorization'] = f"token {auth_pair[1]}"
+
+        comment_data: Optional[Dict[str, Any]] = None
+        if repo:
+            try:
+                if comment_id is not None:
+                    c_url = f"https://api.github.com/repos/{repo}/issues/comments/{comment_id}"
+                    c_resp = self.session.get(c_url, headers=gh_headers, timeout=15)
+                    if c_resp.status_code == 200:
+                        comment_data = c_resp.json()
+                elif pr_num is not None:
+                    c_url = f"https://api.github.com/repos/{repo}/issues/{pr_num}/comments?per_page=100"
+                    c_resp = self.session.get(c_url, headers=gh_headers, timeout=15)
+                    if c_resp.status_code == 200 and isinstance(c_resp.json(), list):
+                        for item in reversed(c_resp.json()):
+                            body_txt = str(item.get('body') or '')
+                            if 'ci_launcher' in body_txt or 'ci_linux' in body_txt or '[![Build Status]' in body_txt:
+                                comment_data = item
+                                break
+            except Exception as e:
+                logger.debug(f"Failed to fetch GitHub CI comment for {pr_or_comment_url}: {e}")
+
+        if not comment_data or not comment_data.get('body'):
+            return {
+                'success': True,
+                'target': pr_or_comment_url,
+                'repo': repo,
+                'pr_num': pr_num,
+                'restarted_jobs_found': 0,
+                'restarted_jobs': [],
+                'queued_jobs': [],
+                'updated_comment': False,
+                'message': f"Checked Jenkins CI status for {pr_or_comment_url}. No rescheduled jobs pending.",
+                'dry_run': False,
+            }
+
+        ci_info = self.parse_ci_comment_body(
+            body=str(comment_data.get('body') or ''),
+            comment_id=comment_data.get('id') or comment_id,
+            html_url=comment_data.get('html_url'),
+        )
+        jobs = ci_info.get('jobs') or []
+        if not jobs:
+            return {
+                'success': True,
+                'target': pr_or_comment_url,
+                'repo': repo,
+                'pr_num': pr_num,
+                'comment_id': ci_info.get('comment_id'),
+                'restarted_jobs_found': 0,
+                'restarted_jobs': [],
+                'queued_jobs': [],
+                'updated_comment': False,
+                'message': f"No platform CI job badges found in comment on {pr_or_comment_url}.",
+                'dry_run': False,
+            }
+
+        results_by_job: Dict[str, Dict[str, Any]] = {}
+        restarted_jobs: List[Dict[str, Any]] = []
+        queued_jobs: List[Dict[str, Any]] = []
+
+        for job in jobs:
+            j_name = job['job_name']
+            old_num = job['build_num']
+            res = self.find_latest_job_build(
+                job_name=j_name,
+                start_build_num=old_num,
+                launcher_build=ci_info.get('launcher_build'),
+                gist_hash=ci_info.get('gist_hash'),
+                branch_name=ci_info.get('branch_name'),
+            )
+            results_by_job[j_name] = res
+            if res.get('is_queued'):
+                queued_jobs.append({
+                    'platform': job['platform'],
+                    'job_name': j_name,
+                    'initial_build': old_num,
+                    'queue_item_id': res.get('queue_item_id'),
+                    'queue_position': res.get('queue_position'),
+                })
+            elif res.get('build_num') and res['build_num'] != old_num:
+                new_num = res['build_num']
+                new_url = f"{self.ci_server.rstrip('/')}/job/{j_name}/{new_num}/"
+                restarted_jobs.append({
+                    'platform': job['platform'],
+                    'job_name': j_name,
+                    'initial_build': old_num,
+                    'latest_build': new_num,
+                    'status': res.get('status'),
+                    'job_url': new_url,
+                })
+
+        updated_body = self.update_ci_comment_markdown(ci_info['body'], jobs, results_by_job)
+        comment_updated = False
+        if restarted_jobs and update_comment and ci_info.get('comment_id') and repo and auth_pair:
+            try:
+                patch_url = f"https://api.github.com/repos/{repo}/issues/comments/{ci_info['comment_id']}"
+                p_resp = self.session.patch(
+                    patch_url,
+                    headers=gh_headers,
+                    json={'body': updated_body},
+                    timeout=15,
+                )
+                if p_resp.status_code == 200:
+                    comment_updated = True
+            except Exception as e:
+                logger.warning(f"Failed to update GitHub comment #{ci_info.get('comment_id')}: {e}")
+
         return {
             'success': True,
             'target': pr_or_comment_url,
             'repo': repo,
             'pr_num': pr_num,
-            'restarted_jobs_found': 0,
-            'queued_jobs': [],
-            'updated_comment': update_comment,
-            'message': f"Checked Jenkins CI status for {pr_or_comment_url}. No rescheduled jobs pending.",
-            'dry_run': dry_run,
+            'comment_id': ci_info.get('comment_id'),
+            'comment_url': ci_info.get('html_url'),
+            'launcher_build': ci_info.get('launcher_build'),
+            'restarted_jobs_found': len(restarted_jobs),
+            'restarted_jobs': restarted_jobs,
+            'queued_jobs': queued_jobs,
+            'updated_comment': comment_updated,
+            'updated_comment_markdown': updated_body if restarted_jobs else None,
+            'message': (
+                f"Found {len(restarted_jobs)} restarted job(s) and {len(queued_jobs)} queued job(s) "
+                f"for {pr_or_comment_url}."
+                if (restarted_jobs or queued_jobs)
+                else f"Checked Jenkins CI status for {pr_or_comment_url}. No rescheduled jobs pending."
+            ),
+            'dry_run': False,
         }
 
 
@@ -1176,7 +1609,7 @@ class CIMonitorService:
         jenkins_mgr: JenkinsManager,
         sessions_dir: Path,
         audit_log_path: Optional[Path] = None,
-        poll_interval_seconds: float = 10.0,
+        poll_interval_seconds: float = 60.0,
         on_complete_callback: Optional[Callable[[CIRunRecord], None]] = None,
     ):
         self.tracker = tracker

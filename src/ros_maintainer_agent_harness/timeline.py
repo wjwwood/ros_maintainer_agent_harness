@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import datetime
-import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -43,13 +42,17 @@ class TimelineLogger:
         """
         Record a status update or milestone note to timeline.md.
         """
+        from .audit import redact_credentials
+
         self.init_timeline()
         time_str = self._current_time_str()
+        safe_msg = redact_credentials(message.strip())
 
         if milestone:
-            entry = f"- **[{time_str}]** 🏆 **Milestone**: {milestone} — {message.strip()}\n"
+            safe_milestone = redact_credentials(milestone.strip())
+            entry = f"- **[{time_str}]** 🏆 **Milestone**: {safe_milestone} — {safe_msg}\n"
         else:
-            entry = f"- **[{time_str}]** **Status**: {message.strip()}\n"
+            entry = f"- **[{time_str}]** **Status**: {safe_msg}\n"
 
         with open(self.timeline_path, 'a', encoding='utf-8') as f:
             f.write(entry)
@@ -71,13 +74,19 @@ class TimelineLogger:
         """
         Record a policy-guarded action to both timeline.md and audit.jsonl.
         """
+        from .audit import append_audit_record, redact_credentials, redact_sensitive_data
+
         self.init_timeline()
         now = datetime.datetime.now(datetime.timezone.utc)
         iso_timestamp = now.isoformat()
         time_str = now.strftime('%H:%M:%S')
 
+        safe_target = redact_credentials(target)
+        safe_reason = redact_credentials(reason.strip())
+        safe_details = redact_sensitive_data(details or {})
+
         # 1. Append to timeline.md
-        timeline_entry = f"- **[{time_str}]** **Action ({action})**: `{target}` [{status}] — *{reason.strip()}*\n"
+        timeline_entry = f"- **[{time_str}]** **Action ({action})**: `{safe_target}` [{status}] — *{safe_reason}*\n"
         with open(self.timeline_path, 'a', encoding='utf-8') as f:
             f.write(timeline_entry)
 
@@ -87,15 +96,13 @@ class TimelineLogger:
             "session_id": self.session_id,
             "action": action,
             "status": status,
-            "target": target,
-            "reason": reason.strip(),
-            "details": details or {},
+            "target": safe_target,
+            "reason": safe_reason,
+            "details": safe_details,
         }
 
         if self.audit_log_path:
-            self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.audit_log_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(record) + '\n')
+            record = append_audit_record(self.audit_log_path, record)
 
         return record
 

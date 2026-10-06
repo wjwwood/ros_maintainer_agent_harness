@@ -45,6 +45,7 @@ from .git_ops import (
     execute_git_push,
     execute_release_push,
     extract_repo_full_name,
+    get_current_commit_sha,
     get_repo_remote_url,
     git_safe_cmd,
     verify_release_tag,
@@ -167,6 +168,7 @@ def perform_git_push(
     remote_url = get_repo_remote_url(repo_dir, remote)
     repo_full_name = extract_repo_full_name(remote_url)
     target_label = f"{repo_full_name or str(repo_dir)}:{branch}"
+    commit_sha = get_current_commit_sha(repo_dir)
 
     # Policy validation
     allowed, msg, requires_approval = policy.validate_git_push(
@@ -188,7 +190,7 @@ def perform_git_push(
             target=target_label,
             reason=reason,
             status='DENIED',
-            details={'error': msg, 'force_with_lease': force_with_lease},
+            details={'error': msg, 'force_with_lease': force_with_lease, 'commit_sha': commit_sha},
         )
         return {
             'success': False,
@@ -196,22 +198,75 @@ def perform_git_push(
             'error': msg,
         }
 
-    # Check approval if required (e.g. external contributor fork)
+    # Per-session PR branch & repository scoping:
+    # Require maintainer approval if a PR-scaffolded session attempts to push to a repository or branch
+    # other than its own PR head branch or a maintainer-prefixed branch (<github_username>/*).
+    pr_ref_meta = str(meta.get('pr_ref') or '').strip()
+    session_head_ref = str(meta.get('head_ref') or '').strip()
+    if not requires_approval and (pr_ref_meta or session_head_ref):
+        session_base_repo = str(meta.get('base_repo') or '').strip()
+        if not session_base_repo and '#' in pr_ref_meta:
+            session_base_repo = pr_ref_meta.split('#', 1)[0].strip()
+        session_repo_name = session_base_repo.split('/')[-1] if '/' in session_base_repo else ''
+        session_head_owner = str(meta.get('head_repo_owner') or '').strip()
+        gh_user = (policy.github_username or '').strip()
+
+        is_maintainer_branch = bool(gh_user and branch.lower().startswith(f"{gh_user.lower()}/"))
+        branch_matches_session = bool(
+            (session_head_ref and branch == session_head_ref)
+            or is_maintainer_branch
+        )
+
+        repo_matches_session = True
+        if repo_full_name and session_base_repo:
+            allowed_session_repos = {session_base_repo.lower()}
+            if session_repo_name:
+                if session_head_owner:
+                    allowed_session_repos.add(f"{session_head_owner.lower()}/{session_repo_name.lower()}")
+                if gh_user:
+                    allowed_session_repos.add(f"{gh_user.lower()}/{session_repo_name.lower()}")
+            repo_matches_session = (repo_full_name.lower() in allowed_session_repos)
+
+        if not branch_matches_session or not repo_matches_session:
+            requires_approval = True
+            scope_desc = pr_ref_meta or session_head_ref
+            msg = (
+                f"Session '{session_id}' is scoped to PR '{scope_desc}' "
+                f"(head branch '{session_head_ref or 'unset'}'); "
+                f"pushing to '{target_label}' requires maintainer approval."
+            )
+
+    # Check approval if required (e.g. external contributor fork or cross-branch/repo push from PR session)
     if requires_approval:
-        if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
+        ticket_valid = bool(
+            approval_ticket_id
+            and approval_mgr.is_approved(
+                approval_ticket_id,
+                action='git_push',
+                target=target_label,
+                session_id=session_id,
+                allow_consumed=dry_run,
+            )
+        )
+        if not ticket_valid:
             req = approval_mgr.create_request(
                 session_id=session_id,
                 action='git_push',
                 target=target_label,
                 reason=reason,
-                details={'remote': remote, 'force_with_lease': force_with_lease},
+                details={
+                    'remote': remote,
+                    'force_with_lease': force_with_lease,
+                    'force': force,
+                    'commit_sha': commit_sha,
+                },
             )
             timeline.log_action(
                 action='git_push',
                 target=target_label,
                 reason=reason,
                 status='PENDING_APPROVAL',
-                details={'ticket_id': req.ticket_id, 'info': msg},
+                details={'ticket_id': req.ticket_id, 'info': msg, 'commit_sha': commit_sha},
             )
             return {
                 'success': False,
@@ -220,14 +275,20 @@ def perform_git_push(
                 'message': f"{msg} Created approval ticket '{req.ticket_id}'.",
             }
 
+    # Repair any root-owned .git refs inside a running session container before host push
+    _repair_session_repo_ownership_if_needed(session_id, repo_dir, remote)
+
     # Execute push
     success, out = execute_git_push(
         repo_dir=repo_dir,
         branch=branch,
         remote=remote,
         force_with_lease=force_with_lease,
+        force=force,
         dry_run=dry_run,
     )
+    if requires_approval and approval_ticket_id and success and not dry_run:
+        approval_mgr.consume_ticket(approval_ticket_id)
 
     status_str = 'APPROVED' if success else 'FAILED'
     timeline.log_action(
@@ -235,16 +296,51 @@ def perform_git_push(
         target=target_label,
         reason=reason,
         status=status_str,
-        details={'output': out, 'force_with_lease': force_with_lease, 'dry_run': dry_run},
+        details={
+            'output': out,
+            'force_with_lease': force_with_lease,
+            'force': force,
+            'commit_sha': commit_sha,
+            'dry_run': dry_run,
+        },
     )
 
     return {
         'success': success,
         'status': status_str,
         'target': target_label,
+        'commit_sha': commit_sha,
         'output': out,
         'dry_run': dry_run,
     }
+
+
+def _repair_session_repo_ownership_if_needed(session_id: str, repo_dir: Path, remote: str = 'origin') -> None:
+    """
+    If `.git/refs/remotes/<remote>` in `repo_dir` is owned by root (from a container command)
+    and the session container is running, restore host user ownership before pushing on the host.
+    """
+    import os
+    from .devcontainer import exec_in_session_container, get_container_status
+    from .git_ops import is_remote_tracking_writable
+
+    if not session_id or is_remote_tracking_writable(repo_dir, remote):
+        return
+    if not (hasattr(os, 'getuid') and hasattr(os, 'getgid') and os.getuid() != 0):
+        return
+    try:
+        st = get_container_status(session_id)
+        if st.get('running'):
+            uid = os.getuid()
+            gid = os.getgid()
+            exec_in_session_container(
+                session_id=session_id,
+                command=f"find /workspace/src -user 0 -exec chown -h {uid}:{gid} {{}} + 2>/dev/null || true",
+                auto_start=False,
+                timeout=30,
+            )
+    except Exception:
+        pass
 
 
 def perform_push_release(
@@ -320,11 +416,16 @@ def perform_push_release(
         )
         return {'success': False, 'status': 'REJECTED', 'error': tag_msg}
 
-    ticket_ok = False
-    if approval_ticket_id and approval_mgr.is_approved(approval_ticket_id):
-        req_obj = approval_mgr.get_request(approval_ticket_id)
-        if req_obj and req_obj.action == 'release_push' and req_obj.target == target_label:
-            ticket_ok = True
+    ticket_ok = bool(
+        approval_ticket_id
+        and approval_mgr.is_approved(
+            approval_ticket_id,
+            action='release_push',
+            target=target_label,
+            session_id=session_id,
+            allow_consumed=dry_run,
+        )
+    )
 
     if not ticket_ok:
         req = approval_mgr.create_request(
@@ -364,6 +465,8 @@ def perform_push_release(
             ),
         }
 
+    _repair_session_repo_ownership_if_needed(session_id, repo_dir, remote)
+
     success, out = execute_release_push(
         repo_dir=repo_dir,
         target_branch=cleaned_branch,
@@ -371,6 +474,8 @@ def perform_push_release(
         remote=remote,
         dry_run=dry_run,
     )
+    if approval_ticket_id and success and not dry_run:
+        approval_mgr.consume_ticket(approval_ticket_id)
 
     status_str = 'APPROVED' if success else 'FAILED'
     timeline.log_action(
@@ -464,7 +569,17 @@ def perform_launch_jenkins_ci(
     )
 
     if not allowed:
-        if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
+        ticket_valid = bool(
+            approval_ticket_id
+            and approval_mgr.is_approved(
+                approval_ticket_id,
+                action='launch_jenkins_ci',
+                target=pr_url,
+                session_id=session_id,
+                allow_consumed=dry_run,
+            )
+        )
+        if not ticket_valid:
             req = approval_mgr.create_request(
                 session_id=session_id,
                 action='launch_jenkins_ci',
@@ -501,6 +616,8 @@ def perform_launch_jenkins_ci(
         comment=comment,
         dry_run=dry_run,
     )
+    if not allowed and approval_ticket_id and not dry_run:
+        approval_mgr.consume_ticket(approval_ticket_id)
 
     timeline.log_action(
         action='launch_jenkins_ci',
@@ -1027,18 +1144,29 @@ def perform_create_pull_request(
             out_web['template_warnings'] = template_warnings
         return out_web
 
+    target_label = f"{repo}:{head}->{base}"
     if requires_approval:
-        if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
+        ticket_valid = bool(
+            approval_ticket_id
+            and approval_mgr.is_approved(
+                approval_ticket_id,
+                action='create_pull_request',
+                target=target_label,
+                session_id=session_id,
+                allow_consumed=dry_run,
+            )
+        )
+        if not ticket_valid:
             req = approval_mgr.create_request(
                 session_id=session_id,
                 action='create_pull_request',
-                target=f"{repo}:{head}->{base}",
+                target=target_label,
                 reason=reason,
                 details={'title': title, 'body': body, 'head': head, 'base': base},
             )
             timeline.log_action(
                 action='create_pull_request',
-                target=f"{repo}:{head}->{base}",
+                target=target_label,
                 reason=reason,
                 status='PENDING_APPROVAL',
                 details={'ticket_id': req.ticket_id},
@@ -1068,7 +1196,7 @@ def perform_create_pull_request(
             err = gh_res.get('error', 'Failed to create Pull Request on GitHub')
             timeline.log_action(
                 action='create_pull_request',
-                target=f"{repo}:{head}->{base}",
+                target=target_label,
                 reason=reason,
                 status='FAILED',
                 details={'error': err},
@@ -1080,6 +1208,8 @@ def perform_create_pull_request(
             }
         pr_html_url = gh_res['pr_url']
         pr_number = gh_res.get('pr_number')
+        if requires_approval and approval_ticket_id:
+            approval_mgr.consume_ticket(approval_ticket_id)
 
     if session_dir.is_dir() and pr_html_url and pr_number and not dry_run:
         write_session_metadata(
@@ -1093,7 +1223,7 @@ def perform_create_pull_request(
 
     timeline.log_action(
         action='create_pull_request',
-        target=f"{repo}:{head}->{base}",
+        target=target_label,
         reason=reason,
         status='APPROVED',
         details={'mode': 'api', 'pr_url': pr_html_url, 'pr_number': pr_number, 'dry_run': dry_run},
@@ -1208,7 +1338,17 @@ def perform_edit_pull_request(
         return {'success': False, 'status': 'DENIED', 'error': msg}
 
     if requires_approval:
-        if not approval_ticket_id or not approval_mgr.is_approved(approval_ticket_id):
+        ticket_valid = bool(
+            approval_ticket_id
+            and approval_mgr.is_approved(
+                approval_ticket_id,
+                action='edit_pull_request',
+                target=target_label,
+                session_id=session_id,
+                allow_consumed=dry_run,
+            )
+        )
+        if not ticket_valid:
             req = approval_mgr.create_request(
                 session_id=session_id,
                 action='edit_pull_request',
@@ -1257,6 +1397,8 @@ def perform_edit_pull_request(
                 'error': err,
             }
         pr_html_url = gh_res.get('pr_url', pr_html_url)
+        if requires_approval and approval_ticket_id:
+            approval_mgr.consume_ticket(approval_ticket_id)
 
     timeline.log_action(
         action='edit_pull_request',
@@ -1359,11 +1501,16 @@ def perform_run_bloom_release(
     target_label = f"{repo_name} ({cleaned_distro}/{cleaned_track})"
     use_pretend = bool(pretend or dry_run)
 
-    ticket_ok = False
-    if approval_ticket_id and approval_mgr.is_approved(approval_ticket_id):
-        req_obj = approval_mgr.get_request(approval_ticket_id)
-        if req_obj and req_obj.action == 'bloom_release' and req_obj.target == target_label:
-            ticket_ok = True
+    ticket_ok = bool(
+        approval_ticket_id
+        and approval_mgr.is_approved(
+            approval_ticket_id,
+            action='bloom_release',
+            target=target_label,
+            session_id=session_id,
+            allow_consumed=use_pretend,
+        )
+    )
 
     if not ticket_ok:
         req = approval_mgr.create_request(
@@ -1459,6 +1606,8 @@ def perform_run_bloom_release(
     ):
         bloom_env['SSH_AUTH_SOCK'] = str(default_sock)
 
+    from .audit import redact_credentials
+
     try:
         res = subprocess.run(
             cmd,
@@ -1479,7 +1628,7 @@ def perform_run_bloom_release(
         )
         return {'success': False, 'status': 'FAILED', 'error': err}
     except Exception as e:
-        err = f'bloom-release execution failed: {e}'
+        err = redact_credentials(f'bloom-release execution failed: {e}')
         timeline.log_action(
             action='bloom_release',
             target=target_label,
@@ -1490,11 +1639,13 @@ def perform_run_bloom_release(
         return {'success': False, 'status': 'FAILED', 'error': err}
 
     combined_output = ((res.stdout or '') + '\n' + (res.stderr or '')).strip()
-    ansi_stripped = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', combined_output)
+    ansi_stripped = redact_credentials(re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', combined_output))
     pr_matches = re.findall(r'https://github\.com/[^\s"\'\)]+/pull/\d+', ansi_stripped)
     rosdistro_pr_url = pr_matches[-1] if pr_matches else None
 
     ok = (res.returncode == 0)
+    if approval_ticket_id and ok and not use_pretend:
+        approval_mgr.consume_ticket(approval_ticket_id)
     status_str = 'APPROVED' if ok else 'FAILED'
 
     if ok and rosdistro_pr_url and session_dir.is_dir() and not use_pretend:
@@ -2083,11 +2234,14 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
                 run = runs[0]
 
         target_url = run.job_url if run else job_url_or_id
-        if not target_url:
+        if not target_url or not target_url.startswith(('http://', 'https://')):
             return {
                 'success': False,
                 'status': 'NOT_FOUND',
-                'error': 'No CI run found matching the provided parameters.',
+                'error': (
+                    f"No tracked Jenkins CI run found for '{target_url or pr_url or session_id}'. "
+                    "Pass a full Jenkins build URL or launch CI first."
+                ),
             }
 
         if wait_for_completion:
@@ -2150,6 +2304,15 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
         """
         run = ci_tracker.get_run(job_url_or_id)
         target_url = run.job_url if run else job_url_or_id
+        if not target_url or not target_url.startswith(('http://', 'https://')):
+            return {
+                'success': False,
+                'status': 'NOT_FOUND',
+                'error': (
+                    f"No tracked Jenkins CI run found for '{job_url_or_id}'. "
+                    "Pass a full Jenkins build URL or launch CI first."
+                ),
+            }
 
         build_info = jenkins_mgr.fetch_build_status(target_url)
         test_report = jenkins_mgr.fetch_test_report(target_url)
@@ -2199,6 +2362,15 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
 
         run = ci_tracker.get_run(job_url_or_id)
         target_url = run.job_url if run else job_url_or_id
+        if not target_url or not target_url.startswith(('http://', 'https://')):
+            return {
+                'success': False,
+                'status': 'NOT_FOUND',
+                'error': (
+                    f"No tracked Jenkins CI run found for '{job_url_or_id}'. "
+                    "Pass a full Jenkins build URL."
+                ),
+            }
         sess_id = session_id or (run.session_id if run else None)
 
         res = jenkins_mgr.cancel_job(target_url)
@@ -2339,6 +2511,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
         session_id: str,
         distro: Optional[str] = None,
         custom_image: Optional[str] = None,
+        writable_shared_repos: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Start a detached sandbox container (`ros-harness-<session_id>`) for the given session
@@ -2348,6 +2521,8 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             session_id: Session identifier.
             distro: Optional ROS distro override (defaults to session's configured distro).
             custom_image: Optional custom container image override.
+            writable_shared_repos: Optional boolean override to mount `shared_repos/` read-write (`True`)
+                instead of the default read-only (`False`), e.g. after pre-build security review.
         """
         if not session_mgr.session_exists(session_id):
             return {'success': False, 'error': f"Session '{session_id}' not found."}
@@ -2362,6 +2537,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             workspace_root=workspace.root,
             distro=target_distro,
             custom_image=custom_image,
+            writable_shared_repos=writable_shared_repos,
         )
         if res.get('success'):
             timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
@@ -2666,7 +2842,7 @@ def run_server(
             jenkins_mgr=jenkins_mgr,
             sessions_dir=workspace.sessions_dir,
             audit_log_path=workspace.audit_log_path,
-            poll_interval_seconds=10.0,
+            poll_interval_seconds=60.0,
         )
         monitor_service.start()
 

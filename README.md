@@ -42,10 +42,10 @@ A core principle of this setup is **local-first verification**: the agent perfor
 
 ### Installation
 
-Install the package in editable mode:
+Install a non-editable snapshot into `~/.local` (recommended so live `PreToolUse` hooks are isolated from in-progress source edits):
 
 ```bash
-pip install -e .
+pip install --user .
 ```
 
 Prerequisites:

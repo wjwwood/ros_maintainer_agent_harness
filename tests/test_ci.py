@@ -441,6 +441,91 @@ class TestCI(unittest.TestCase):
                 self.assertEqual(mock_resolve.call_count, 1)
                 self.assertEqual(mock_get.call_count, 2)
 
+    def test_find_restarted_ci_live_discovery_and_comment_update(self):
+        mgr = JenkinsManager(
+            ci_server='https://ci.ros2.org',
+            auth=('testuser', 'testtoken'),
+        )
+        comment_body = (
+            "Gist: https://gist.githubusercontent.com/testuser/abcdef123456/raw/ros2.repos\n"
+            "BUILD args: --packages-above-and-dependencies rclcpp\n"
+            "TEST args: --packages-above rclcpp\n"
+            "ROS Distro: rolling\n"
+            "Job: ci_launcher\n"
+            "ci_launcher ran: https://ci.ros2.org/job/ci_launcher/38000\n"
+            "* Linux [![Build Status](http://ci.ros2.org/buildStatus/icon?job=ci_linux&build=25001)]"
+            "(http://ci.ros2.org/job/ci_linux/25001/)\n"
+            "* Windows [![Build Status](http://ci.ros2.org/buildStatus/icon?job=ci_windows&build=26001)]"
+            "(http://ci.ros2.org/job/ci_windows/26001/)\n"
+        )
+
+        def fake_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            if 'api.github.com/repos/ros2/rclcpp/issues/160/comments' in url:
+                resp.json.return_value = [
+                    {
+                        'id': 987654,
+                        'html_url': 'https://github.com/ros2/rclcpp/pull/160#issuecomment-987654',
+                        'body': comment_body,
+                    }
+                ]
+            elif '/job/ci_linux/api/json' in url:
+                resp.json.return_value = {
+                    'builds': [
+                        {'number': 25005, 'result': 'SUCCESS', 'building': False},
+                        {'number': 25001, 'result': 'ABORTED', 'building': False},
+                    ]
+                }
+            elif '/job/ci_linux/25005/api/json' in url:
+                resp.json.return_value = {
+                    'building': False,
+                    'result': 'SUCCESS',
+                    'actions': [
+                        {'causes': [{'upstreamProject': 'ci_launcher', 'upstreamBuild': 38000}]},
+                    ],
+                }
+            elif '/job/ci_linux/25001/api/json' in url:
+                resp.json.return_value = {
+                    'building': False,
+                    'result': 'ABORTED',
+                    'actions': [
+                        {'causes': [{'upstreamProject': 'ci_launcher', 'upstreamBuild': 38000}]},
+                    ],
+                }
+            elif '/job/ci_windows/api/json' in url:
+                resp.json.return_value = {'builds': []}
+            elif '/queue/api/json' in url:
+                resp.json.return_value = {
+                    'items': [
+                        {
+                            'id': 444,
+                            'task': {'name': 'ci_windows'},
+                            'causes': [{'upstreamProject': 'ci_launcher', 'upstreamBuild': 38000}],
+                            'params': 'CI_ROS2_REPOS_URL=https://gist.githubusercontent.com/testuser/abcdef123456',
+                        }
+                    ]
+                }
+            return resp
+
+        mock_patch_resp = MagicMock()
+        mock_patch_resp.status_code = 200
+
+        with patch.object(mgr.session, 'get', side_effect=fake_get):
+            with patch.object(mgr.session, 'patch', return_value=mock_patch_resp) as mock_patch:
+                res = mgr.find_restarted_ci('ros2/rclcpp#160', update_comment=True, dry_run=False)
+                self.assertTrue(res['success'])
+                self.assertEqual(res['restarted_jobs_found'], 1)
+                self.assertEqual(res['restarted_jobs'][0]['job_name'], 'ci_linux')
+                self.assertEqual(res['restarted_jobs'][0]['initial_build'], 25001)
+                self.assertEqual(res['restarted_jobs'][0]['latest_build'], 25005)
+                self.assertEqual(len(res['queued_jobs']), 1)
+                self.assertEqual(res['queued_jobs'][0]['job_name'], 'ci_windows')
+                self.assertEqual(res['queued_jobs'][0]['queue_item_id'], 444)
+                self.assertTrue(res['updated_comment'])
+                self.assertIn('/ci_linux/25005/', res['updated_comment_markdown'])
+                self.assertEqual(mock_patch.call_count, 1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -22,7 +22,6 @@ from typing import List, Optional, Tuple
 
 from .approval import ApprovalManager
 from .audit import format_audit_record, read_audit_records
-from .ci import CITracker, JenkinsManager
 from .devcontainer import (
     check_token_and_environment,
     exec_in_session_container,
@@ -35,16 +34,6 @@ from .hooks import (
     evaluate_pre_tool_use,
     install_hooks_config,
 )
-from .hub import (
-    format_conversation_link,
-    format_session_dir_link,
-    get_next_actions,
-    get_workspace_status,
-    read_session_metadata,
-    start_session_conversation,
-    VALID_SESSION_STATUSES,
-    write_session_metadata,
-)
 from .instructions import write_workspace_agent_instructions
 from .mcp_config import (
     get_agent_launch_info,
@@ -52,20 +41,82 @@ from .mcp_config import (
     write_session_mcp_configs,
 )
 from .rules import MaintainerRules
-from .scaffolder import scaffold_session_from_pr
-from .server import (
-    perform_create_pull_request,
-    perform_edit_pull_request,
-    perform_find_restarted_ci,
-    perform_git_push,
-    perform_launch_jenkins_ci,
-    perform_push_release,
-    perform_run_bloom_release,
-    run_server,
-)
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
-from .worktree import SessionManager
+from .worktree import (
+    read_session_metadata,
+    SessionManager,
+    write_session_metadata,
+)
+
+VALID_SESSION_STATUSES = (
+    'active',
+    'investigating',
+    'local_tests_passing',
+    'waiting_for_ci',
+    'needs_review',
+    'ready_to_merge',
+    'blocked',
+    'done',
+)
+
+_LAZY_SERVER_ATTRS = {
+    'perform_create_pull_request',
+    'perform_edit_pull_request',
+    'perform_find_restarted_ci',
+    'perform_git_push',
+    'perform_launch_jenkins_ci',
+    'perform_push_release',
+    'perform_run_bloom_release',
+    'run_server',
+}
+
+_LAZY_CI_ATTRS = {
+    'CITracker',
+    'JenkinsManager',
+}
+
+_LAZY_HUB_ATTRS = {
+    'format_conversation_link',
+    'format_session_dir_link',
+    'get_next_actions',
+    'get_workspace_status',
+    'start_session_conversation',
+}
+
+_LAZY_SCAFFOLDER_ATTRS = {
+    'scaffold_session_from_pr',
+}
+
+
+def __getattr__(name: str):
+    if name in _LAZY_SERVER_ATTRS:
+        from . import server as _srv
+        val = getattr(_srv, name)
+        globals()[name] = val
+        return val
+    if name in _LAZY_CI_ATTRS:
+        from . import ci as _ci
+        val = getattr(_ci, name)
+        globals()[name] = val
+        return val
+    if name in _LAZY_HUB_ATTRS:
+        from . import hub as _hub
+        val = getattr(_hub, name)
+        globals()[name] = val
+        return val
+    if name in _LAZY_SCAFFOLDER_ATTRS:
+        from . import scaffolder as _scaf
+        val = getattr(_scaf, name)
+        globals()[name] = val
+        return val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _lazy(name: str):
+    if name in globals():
+        return globals()[name]
+    return __getattr__(name)
 
 
 def get_default_workspace_path() -> Path:
@@ -261,11 +312,13 @@ def handle_session_devcontainer(args: argparse.Namespace) -> int:
         return 1
 
     session_dir = mgr.get_session_dir(args.session_id)
+    writable_shared = bool(getattr(args, 'writable_shared_repos', False))
     config_file = write_devcontainer_config(
         session_dir=session_dir,
         workspace_root=layout.root,
         distro=args.distro or 'rolling',
         custom_image=args.image,
+        writable_shared_repos=writable_shared,
     )
     print(f"✅ Generated .devcontainer configuration at: {config_file}")
     return 0
@@ -390,6 +443,8 @@ def handle_session_mcp_config(args: argparse.Namespace) -> int:
 
 
 def handle_session_from_pr(args: argparse.Namespace) -> int:
+    scaffold_session_from_pr = _lazy('scaffold_session_from_pr')
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
 
@@ -449,6 +504,7 @@ def handle_session_up(args: argparse.Namespace) -> int:
     session_dir = mgr.get_session_dir(args.session_id)
     info = mgr.get_session_info(args.session_id)
     distro = args.distro or (info.distro if info and info.distro else 'rolling')
+    writable_shared = getattr(args, 'writable_shared_repos', None)
 
     print(f"🐳 Starting sandbox container for session '{args.session_id}' (distro: {distro})...")
     res = start_session_container(
@@ -457,12 +513,14 @@ def handle_session_up(args: argparse.Namespace) -> int:
         workspace_root=layout.root,
         distro=distro,
         custom_image=args.image,
+        writable_shared_repos=writable_shared,
     )
     if not res.get('success'):
         print(f"Error starting container: {res.get('error')}", file=sys.stderr)
         return 1
 
-    print(f"✅ Container '{res.get('container_name')}' is {res.get('status')} ({res.get('runtime')}).")
+    mode_str = 'writable shared_repos' if res.get('writable_shared_repos') else 'read-only shared_repos'
+    print(f"✅ Container '{res.get('container_name')}' is {res.get('status')} ({res.get('runtime')}, {mode_str}).")
     return 0
 
 
@@ -535,6 +593,8 @@ def handle_session_down(args: argparse.Namespace) -> int:
 
 
 def handle_session_start_conversation(args: argparse.Namespace) -> int:
+    start_session_conversation = _lazy('start_session_conversation')
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
 
@@ -565,6 +625,9 @@ def handle_session_start_conversation(args: argparse.Namespace) -> int:
 
 
 def handle_session_status(args: argparse.Namespace) -> int:
+    format_conversation_link = _lazy('format_conversation_link')
+    format_session_dir_link = _lazy('format_session_dir_link')
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     mgr = SessionManager(layout)
@@ -607,6 +670,8 @@ def handle_session_status(args: argparse.Namespace) -> int:
 
 
 def handle_status(args: argparse.Namespace) -> int:
+    get_workspace_status = _lazy('get_workspace_status')
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     status = get_workspace_status(layout, check_containers=not args.no_containers)
@@ -650,6 +715,8 @@ def handle_status(args: argparse.Namespace) -> int:
 
 
 def handle_next(args: argparse.Namespace) -> int:
+    get_next_actions = _lazy('get_next_actions')
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     res = get_next_actions(
@@ -697,6 +764,8 @@ def handle_rules(args: argparse.Namespace) -> int:
 
 
 def handle_serve(args: argparse.Namespace) -> int:
+    run_server = _lazy('run_server')
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     if not layout.is_initialized():
@@ -824,6 +893,9 @@ def handle_approval(args: argparse.Namespace) -> int:
 
 
 def handle_ci(args: argparse.Namespace) -> int:
+    CITracker = _lazy('CITracker')
+    JenkinsManager = _lazy('JenkinsManager')
+
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     ci_tracker = CITracker(layout.ci_runs_path)
@@ -948,7 +1020,7 @@ def handle_ci(args: argparse.Namespace) -> int:
             for er in args.extra_repos:
                 extra_repos.extend([item.strip() for item in er.split(',') if item.strip()])
 
-        res = perform_launch_jenkins_ci(
+        res = _lazy('perform_launch_jenkins_ci')(
             workspace=layout,
             session_id=args.session,
             pr_url=pr_url,
@@ -997,7 +1069,7 @@ def handle_ci(args: argparse.Namespace) -> int:
             print("Error: PR or comment URL must be provided.", file=sys.stderr)
             return 1
 
-        res = perform_find_restarted_ci(
+        res = _lazy('perform_find_restarted_ci')(
             workspace=layout,
             session_id=args.session,
             pr_or_comment_url=target_url,
@@ -1018,7 +1090,7 @@ def handle_ci(args: argparse.Namespace) -> int:
 def handle_git_push(args: argparse.Namespace) -> int:
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
-    res = perform_git_push(
+    res = _lazy('perform_git_push')(
         workspace=layout,
         session_id=args.session,
         repo_path=args.repo_path,
@@ -1055,7 +1127,7 @@ def handle_release(args: argparse.Namespace) -> int:
     layout = WorkspaceLayout(ws_path)
 
     if args.release_action == 'push':
-        res = perform_push_release(
+        res = _lazy('perform_push_release')(
             workspace=layout,
             session_id=args.session,
             repo_path=args.repo_path,
@@ -1090,7 +1162,7 @@ def handle_release(args: argparse.Namespace) -> int:
         if not repository:
             print("Error: Provide repository name (e.g. 'launch' or 'launch_ros').", file=sys.stderr)
             return 1
-        res = perform_run_bloom_release(
+        res = _lazy('perform_run_bloom_release')(
             workspace=layout,
             session_id=args.session,
             repository=repository,
@@ -1133,7 +1205,7 @@ def handle_release(args: argparse.Namespace) -> int:
 def handle_create_pr(args: argparse.Namespace) -> int:
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
-    res = perform_create_pull_request(
+    res = _lazy('perform_create_pull_request')(
         workspace=layout,
         session_id=args.session,
         repo=args.repo,
@@ -1177,7 +1249,7 @@ def handle_edit_pr(args: argparse.Namespace) -> int:
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     pr_url = getattr(args, 'pr_opt', None) or getattr(args, 'pr_target', None)
-    res = perform_edit_pull_request(
+    res = _lazy('perform_edit_pull_request')(
         workspace=layout,
         session_id=args.session,
         repo=args.repo,
@@ -1317,6 +1389,10 @@ def parse_args():
     s_devcontainer.add_argument('session_id', type=str, help='Session ID')
     s_devcontainer.add_argument('--distro', type=str, default='rolling', help='Target ROS distro (default: rolling)')
     s_devcontainer.add_argument('--image', type=str, default=None, help='Custom Docker image override')
+    s_devcontainer.add_argument(
+        '--writable-shared-repos', action='store_true', default=False,
+        help='Mount shared_repos/ read-write (default: read-only)',
+    )
 
     # session list
     session_subparsers.add_parser('list', help='List active sessions')
@@ -1371,6 +1447,14 @@ def parse_args():
     s_up.add_argument('session_id', type=str, help='Session ID')
     s_up.add_argument('--distro', type=str, default=None, help='Optional ROS distro override')
     s_up.add_argument('--image', type=str, default=None, help='Optional container image override')
+    s_up.add_argument(
+        '--writable-shared-repos', dest='writable_shared_repos', action='store_true', default=None,
+        help='Mount shared_repos/ read-write inside container (e.g. after pre-build security review)',
+    )
+    s_up.add_argument(
+        '--read-only-shared-repos', dest='writable_shared_repos', action='store_false',
+        help='Mount shared_repos/ read-only inside container (default)',
+    )
 
     # session exec
     s_exec = session_subparsers.add_parser('exec', help='Execute a command inside the session sandbox container')

@@ -70,6 +70,8 @@ class TestPolicyValidation(unittest.TestCase):
     def test_disallowed_branch_patterns(self):
         invalid_branches = [
             '-option-injection',
+            'wjwwood/feat:rolling',
+            'HEAD:refs/heads/rolling',
             'foo..bar',
             'foo//bar',
             'branch with spaces',
@@ -81,6 +83,42 @@ class TestPolicyValidation(unittest.TestCase):
             allowed, msg, _ = self.policy.validate_git_push(branch_name=branch, repo_full_name='ros2/rclcpp')
             self.assertFalse(allowed)
             self.assertIn("does not match allowed branch naming patterns", msg)
+
+    def test_legacy_policy_yaml_aliases_and_unknown_key_warning(self):
+        import tempfile
+        from pathlib import Path
+        import warnings
+        from ros_maintainer_agent_harness.config import load_policy
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            policy_path = Path(tmpdir) / 'policy.yaml'
+            policy_path.write_text(
+                'github_username: "testuser"\n'
+                'policies:\n'
+                '  git:\n'
+                '    allowed_repositories:\n'
+                '      - "ros2/rclcpp"\n'
+                '    require_fork_approval: false\n'
+                '    enforce_force_with_lease: true\n'
+                '  jenkins:\n'
+                '    max_concurrent_runs_per_pr: 2\n'
+                '    cooldown_seconds: 120\n'
+                '  unknown_policy_section:\n'
+                '    foo: bar\n'
+            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                loaded = load_policy(policy_path)
+                self.assertEqual(loaded.github_username, 'testuser')
+                self.assertEqual(loaded.git_push.allowed_repositories, ['ros2/rclcpp'])
+                self.assertFalse(loaded.git_push.require_approval_for_external_forks)
+                self.assertTrue(loaded.git_push.require_force_with_lease)
+                self.assertEqual(loaded.jenkins_ci.max_concurrent_runs_per_pr, 2)
+                self.assertEqual(loaded.jenkins_ci.cooldown_seconds, 120)
+                self.assertTrue(
+                    any('unknown_policy_section' in str(w.message) for w in caught),
+                    'Expected UserWarning for unknown policy key',
+                )
 
     def test_unspecified_repo_rejected_when_allowlist_enforced(self):
         allowed, msg, req_appr = self.policy.validate_git_push(
