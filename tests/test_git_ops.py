@@ -128,6 +128,9 @@ class TestGitOps(unittest.TestCase):
             # Simulate container root-owned .git/refs/remotes/origin (read-only to host user)
             remotes_dir = repo_path / '.git' / 'refs' / 'remotes' / 'origin'
             remotes_dir.mkdir(parents=True, exist_ok=True)
+            ro_ref = remotes_dir / 'wjwwood_readonly_ref'
+            ro_ref.write_text(f"{sha}\n")
+            ro_ref.chmod(0o444)
             remotes_dir.chmod(0o555)
             try:
                 self.assertFalse(is_remote_tracking_writable(repo_path, 'origin'))
@@ -145,6 +148,7 @@ class TestGitOps(unittest.TestCase):
                 self.assertNotIn('update_ref failed', rel_out)
             finally:
                 remotes_dir.chmod(0o755)
+                ro_ref.chmod(0o644)
 
             raw_stderr = (
                 "To github.com:ros2/launch_ros.git\n"

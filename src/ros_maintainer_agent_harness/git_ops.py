@@ -95,7 +95,7 @@ def is_remote_tracking_writable(repo_dir: Path, remote: str = 'origin') -> bool:
     if remote_refs_dir.is_dir():
         try:
             for item in remote_refs_dir.rglob('*'):
-                if not os.access(item, os.W_OK):
+                if not os.access(item, os.W_OK) or (item.stat().st_mode & 0o222) == 0:
                     return False
         except Exception:
             return False

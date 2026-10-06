@@ -113,6 +113,12 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _lazy(name: str):
+    if name in globals():
+        return globals()[name]
+    return __getattr__(name)
+
+
 def get_default_workspace_path() -> Path:
     env_ws = os.environ.get('ROS_MAINTAINER_WS') or os.environ.get('ROS2_MAINTAINER_WS')
     if env_ws:
@@ -437,7 +443,7 @@ def handle_session_mcp_config(args: argparse.Namespace) -> int:
 
 
 def handle_session_from_pr(args: argparse.Namespace) -> int:
-    from .scaffolder import scaffold_session_from_pr
+    scaffold_session_from_pr = _lazy('scaffold_session_from_pr')
 
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
@@ -587,7 +593,7 @@ def handle_session_down(args: argparse.Namespace) -> int:
 
 
 def handle_session_start_conversation(args: argparse.Namespace) -> int:
-    from .hub import start_session_conversation
+    start_session_conversation = _lazy('start_session_conversation')
 
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
@@ -619,7 +625,8 @@ def handle_session_start_conversation(args: argparse.Namespace) -> int:
 
 
 def handle_session_status(args: argparse.Namespace) -> int:
-    from .hub import format_conversation_link, format_session_dir_link
+    format_conversation_link = _lazy('format_conversation_link')
+    format_session_dir_link = _lazy('format_session_dir_link')
 
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
@@ -663,7 +670,7 @@ def handle_session_status(args: argparse.Namespace) -> int:
 
 
 def handle_status(args: argparse.Namespace) -> int:
-    from .hub import get_workspace_status
+    get_workspace_status = _lazy('get_workspace_status')
 
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
@@ -708,7 +715,7 @@ def handle_status(args: argparse.Namespace) -> int:
 
 
 def handle_next(args: argparse.Namespace) -> int:
-    from .hub import get_next_actions
+    get_next_actions = _lazy('get_next_actions')
 
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
@@ -757,7 +764,7 @@ def handle_rules(args: argparse.Namespace) -> int:
 
 
 def handle_serve(args: argparse.Namespace) -> int:
-    from .server import run_server
+    run_server = _lazy('run_server')
 
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
@@ -886,7 +893,8 @@ def handle_approval(args: argparse.Namespace) -> int:
 
 
 def handle_ci(args: argparse.Namespace) -> int:
-    from .ci import CITracker, JenkinsManager
+    CITracker = _lazy('CITracker')
+    JenkinsManager = _lazy('JenkinsManager')
 
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
@@ -1012,9 +1020,7 @@ def handle_ci(args: argparse.Namespace) -> int:
             for er in args.extra_repos:
                 extra_repos.extend([item.strip() for item in er.split(',') if item.strip()])
 
-        from .server import perform_launch_jenkins_ci
-
-        res = perform_launch_jenkins_ci(
+        res = _lazy('perform_launch_jenkins_ci')(
             workspace=layout,
             session_id=args.session,
             pr_url=pr_url,
@@ -1054,8 +1060,6 @@ def handle_ci(args: argparse.Namespace) -> int:
         return 0 if res.get('success') else 1
 
     elif args.ci_action == 'find-restarted':
-        from .server import perform_find_restarted_ci
-
         target_url = args.pr_opt or args.target
         if not target_url and args.session:
             session_dir = layout.sessions_dir / args.session
@@ -1065,7 +1069,7 @@ def handle_ci(args: argparse.Namespace) -> int:
             print("Error: PR or comment URL must be provided.", file=sys.stderr)
             return 1
 
-        res = perform_find_restarted_ci(
+        res = _lazy('perform_find_restarted_ci')(
             workspace=layout,
             session_id=args.session,
             pr_or_comment_url=target_url,
@@ -1084,11 +1088,9 @@ def handle_ci(args: argparse.Namespace) -> int:
 
 
 def handle_git_push(args: argparse.Namespace) -> int:
-    from .server import perform_git_push
-
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
-    res = perform_git_push(
+    res = _lazy('perform_git_push')(
         workspace=layout,
         session_id=args.session,
         repo_path=args.repo_path,
@@ -1121,13 +1123,11 @@ def handle_git_push(args: argparse.Namespace) -> int:
 
 
 def handle_release(args: argparse.Namespace) -> int:
-    from .server import perform_push_release, perform_run_bloom_release
-
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
 
     if args.release_action == 'push':
-        res = perform_push_release(
+        res = _lazy('perform_push_release')(
             workspace=layout,
             session_id=args.session,
             repo_path=args.repo_path,
@@ -1162,7 +1162,7 @@ def handle_release(args: argparse.Namespace) -> int:
         if not repository:
             print("Error: Provide repository name (e.g. 'launch' or 'launch_ros').", file=sys.stderr)
             return 1
-        res = perform_run_bloom_release(
+        res = _lazy('perform_run_bloom_release')(
             workspace=layout,
             session_id=args.session,
             repository=repository,
@@ -1203,11 +1203,9 @@ def handle_release(args: argparse.Namespace) -> int:
 
 
 def handle_create_pr(args: argparse.Namespace) -> int:
-    from .server import perform_create_pull_request
-
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
-    res = perform_create_pull_request(
+    res = _lazy('perform_create_pull_request')(
         workspace=layout,
         session_id=args.session,
         repo=args.repo,
@@ -1248,12 +1246,10 @@ def handle_create_pr(args: argparse.Namespace) -> int:
 
 
 def handle_edit_pr(args: argparse.Namespace) -> int:
-    from .server import perform_edit_pull_request
-
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     layout = WorkspaceLayout(ws_path)
     pr_url = getattr(args, 'pr_opt', None) or getattr(args, 'pr_target', None)
-    res = perform_edit_pull_request(
+    res = _lazy('perform_edit_pull_request')(
         workspace=layout,
         session_id=args.session,
         repo=args.repo,
