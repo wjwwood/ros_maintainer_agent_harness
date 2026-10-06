@@ -24,13 +24,17 @@ def git_safe_cmd(repo_dir: Path, *args: str) -> list[str]:
     return ['git', '-c', f'safe.directory={repo_dir.resolve()}', *args]
 
 
-def get_repo_remote_url(repo_dir: Path, remote: str = 'origin') -> Optional[str]:
+def get_repo_remote_url(repo_dir: Path, remote: str = 'origin', push: bool = False) -> Optional[str]:
     """Retrieve the URL for a named Git remote."""
     if not repo_dir.exists():
         return None
     try:
+        args = ['remote', 'get-url']
+        if push:
+            args.append('--push')
+        args.extend(['--', remote])
         res = subprocess.run(
-            git_safe_cmd(repo_dir, 'remote', 'get-url', '--', remote),
+            git_safe_cmd(repo_dir, *args),
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
@@ -42,6 +46,83 @@ def get_repo_remote_url(repo_dir: Path, remote: str = 'origin') -> Optional[str]
     except Exception:
         pass
     return None
+
+
+def is_remote_tracking_writable(repo_dir: Path, remote: str = 'origin') -> bool:
+    """
+    Check whether the local remote-tracking ref directory (`refs/remotes/<remote>`)
+    is writable by the current host user.
+
+    When a repository is cloned or fetched as `root` inside a session container,
+    `.git/refs/remotes/<remote>` may be owned by `root:root`, causing `git push <remote>`
+    on the host to print `error: update_ref failed for ref 'refs/remotes/...'` after
+    pushing to the remote server.
+    """
+    if not repo_dir.exists():
+        return False
+    common_dir = repo_dir / '.git'
+    try:
+        res = subprocess.run(
+            git_safe_cmd(repo_dir, 'rev-parse', '--git-common-dir'),
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            cand = Path(res.stdout.strip())
+            common_dir = cand if cand.is_absolute() else (repo_dir / cand).resolve()
+    except Exception:
+        pass
+
+    if not common_dir.exists():
+        return True
+    if not os.access(common_dir, os.W_OK):
+        return False
+
+    packed_refs = common_dir / 'packed-refs'
+    if packed_refs.exists() and not os.access(packed_refs, os.W_OK):
+        return False
+
+    remote_refs_dir = common_dir / 'refs' / 'remotes' / remote
+    check_dir = remote_refs_dir
+    while not check_dir.exists() and check_dir != common_dir and check_dir.parent != check_dir:
+        check_dir = check_dir.parent
+    if check_dir.exists() and not os.access(check_dir, os.W_OK):
+        return False
+
+    if remote_refs_dir.is_dir():
+        try:
+            for item in remote_refs_dir.rglob('*'):
+                if not os.access(item, os.W_OK):
+                    return False
+        except Exception:
+            return False
+
+    return True
+
+
+def strip_harmless_remote_ref_lock_errors(text: str) -> str:
+    """
+    Strip harmless local remote-tracking ref lock error lines emitted by `git push`
+    when `.git/refs/remotes/<remote>` is owned by another user (e.g. container root)
+    after the remote push itself succeeded.
+    """
+    from .audit import redact_credentials
+
+    if not text:
+        return ''
+    filtered_lines = []
+    for line in text.splitlines():
+        if re.match(
+            r"^error:\s+update_ref failed for ref 'refs/remotes/.*cannot lock ref.*Permission denied",
+            line.strip(),
+            flags=re.IGNORECASE,
+        ):
+            continue
+        filtered_lines.append(line)
+    return redact_credentials('\n'.join(filtered_lines).strip())
 
 
 def extract_repo_full_name(remote_url: Optional[str]) -> Optional[str]:
@@ -143,6 +224,8 @@ def execute_git_push(
     Returns:
         (success: bool, output_or_error_message: str)
     """
+    from .audit import redact_credentials
+
     if not repo_dir.exists():
         return (False, f"Repository directory '{repo_dir}' does not exist.")
 
@@ -153,7 +236,7 @@ def execute_git_push(
             f"Invalid branch name '{branch}': refspec syntax (':') and leading dashes are forbidden.",
         )
 
-    refspec = cleaned_branch
+    refspec = f'refs/heads/{cleaned_branch}:refs/heads/{cleaned_branch}'
     current_branch = get_current_branch(repo_dir)
     has_local_ref = False
     try:
@@ -172,14 +255,40 @@ def execute_git_push(
     ):
         refspec = f'HEAD:refs/heads/{cleaned_branch}'
 
+    push_target = remote
+    lease_arg = '--force-with-lease'
+    if not is_remote_tracking_writable(repo_dir, remote):
+        resolved_url = get_repo_remote_url(repo_dir, remote, push=True) or get_repo_remote_url(repo_dir, remote)
+        if resolved_url:
+            if force_with_lease:
+                try:
+                    rev_res = subprocess.run(
+                        git_safe_cmd(
+                            repo_dir, 'rev-parse', '--verify', '--quiet',
+                            f'refs/remotes/{remote}/{cleaned_branch}',
+                        ),
+                        cwd=str(repo_dir),
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
+                    )
+                    if rev_res.returncode == 0 and rev_res.stdout.strip():
+                        lease_arg = f"--force-with-lease=refs/heads/{cleaned_branch}:{rev_res.stdout.strip()}"
+                        push_target = resolved_url
+                except Exception:
+                    pass
+            else:
+                push_target = resolved_url
+
     cmd = git_safe_cmd(repo_dir, 'push')
     if force_with_lease:
-        cmd.append('--force-with-lease')
+        cmd.append(lease_arg)
     elif force:
         cmd.append('--force')
     if dry_run:
         cmd.append('--dry-run')
-    cmd.extend(['--', remote, refspec])
+    cmd.extend(['--', push_target, refspec])
 
     git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
     default_sock = Path.home() / '.ssh' / 'ssh_auth_sock'
@@ -201,13 +310,15 @@ def execute_git_push(
     except subprocess.TimeoutExpired:
         return (False, "git push timed out after 120 seconds.")
     except Exception as e:
-        return (False, f"git push failed: {e}")
+        return (False, redact_credentials(f"git push failed: {e}"))
 
     if res.returncode == 0:
-        msg = res.stdout.strip() or res.stderr.strip() or f"Successfully pushed {branch} to {remote}."
+        out_clean = strip_harmless_remote_ref_lock_errors(res.stdout)
+        err_clean = strip_harmless_remote_ref_lock_errors(res.stderr)
+        msg = out_clean or err_clean or f"Successfully pushed {branch} to {remote}."
         return (True, msg)
     else:
-        err = res.stderr.strip() or res.stdout.strip() or "git push failed with unknown error."
+        err = redact_credentials(res.stderr.strip() or res.stdout.strip() or "git push failed with unknown error.")
         return (False, err)
 
 
@@ -265,6 +376,8 @@ def execute_release_push(
     ``refs/heads/<target_branch>`` and push ``refs/tags/<tag>`` to ``remote``
     (fast-forward only, never force-pushed).
     """
+    from .audit import redact_credentials
+
     valid, msg, tag_commit_sha = verify_release_tag(repo_dir, tag)
     if not valid or not tag_commit_sha:
         return (False, msg)
@@ -277,10 +390,16 @@ def execute_release_push(
     branch_refspec = f'{tag_commit_sha}:refs/heads/{cleaned_branch}'
     tag_refspec = f'refs/tags/{cleaned_tag}:refs/tags/{cleaned_tag}'
 
+    push_target = remote
+    if not is_remote_tracking_writable(repo_dir, remote):
+        resolved_url = get_repo_remote_url(repo_dir, remote, push=True) or get_repo_remote_url(repo_dir, remote)
+        if resolved_url:
+            push_target = resolved_url
+
     cmd = git_safe_cmd(repo_dir, 'push')
     if dry_run:
         cmd.append('--dry-run')
-    cmd.extend(['--', remote, branch_refspec, tag_refspec])
+    cmd.extend(['--', push_target, branch_refspec, tag_refspec])
 
     git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
     default_sock = Path.home() / '.ssh' / 'ssh_auth_sock'
@@ -302,13 +421,17 @@ def execute_release_push(
     except subprocess.TimeoutExpired:
         return (False, "git release push timed out after 120 seconds.")
     except Exception as e:
-        return (False, f"git release push failed: {e}")
+        return (False, redact_credentials(f"git release push failed: {e}"))
 
     if res.returncode == 0:
-        out = res.stdout.strip() or res.stderr.strip() or (
+        out_clean = strip_harmless_remote_ref_lock_errors(res.stdout)
+        err_clean = strip_harmless_remote_ref_lock_errors(res.stderr)
+        out = out_clean or err_clean or (
             f"Successfully pushed {cleaned_branch} ({tag_commit_sha[:8]}) and tag {cleaned_tag} to {remote}."
         )
         return (True, out)
     else:
-        err = res.stderr.strip() or res.stdout.strip() or "git release push failed with unknown error."
+        err = redact_credentials(
+            res.stderr.strip() or res.stdout.strip() or "git release push failed with unknown error."
+        )
         return (False, err)

@@ -275,6 +275,9 @@ def perform_git_push(
                 'message': f"{msg} Created approval ticket '{req.ticket_id}'.",
             }
 
+    # Repair any root-owned .git refs inside a running session container before host push
+    _repair_session_repo_ownership_if_needed(session_id, repo_dir, remote)
+
     # Execute push
     success, out = execute_git_push(
         repo_dir=repo_dir,
@@ -310,6 +313,34 @@ def perform_git_push(
         'output': out,
         'dry_run': dry_run,
     }
+
+
+def _repair_session_repo_ownership_if_needed(session_id: str, repo_dir: Path, remote: str = 'origin') -> None:
+    """
+    If `.git/refs/remotes/<remote>` in `repo_dir` is owned by root (from a container command)
+    and the session container is running, restore host user ownership before pushing on the host.
+    """
+    import os
+    from .devcontainer import exec_in_session_container, get_container_status
+    from .git_ops import is_remote_tracking_writable
+
+    if not session_id or is_remote_tracking_writable(repo_dir, remote):
+        return
+    if not (hasattr(os, 'getuid') and hasattr(os, 'getgid') and os.getuid() != 0):
+        return
+    try:
+        st = get_container_status(session_id)
+        if st.get('running'):
+            uid = os.getuid()
+            gid = os.getgid()
+            exec_in_session_container(
+                session_id=session_id,
+                command=f"find /workspace/src -user 0 -exec chown -h {uid}:{gid} {{}} + 2>/dev/null || true",
+                auto_start=False,
+                timeout=30,
+            )
+    except Exception:
+        pass
 
 
 def perform_push_release(
@@ -433,6 +464,8 @@ def perform_push_release(
                 f"Created approval ticket '{req.ticket_id}'."
             ),
         }
+
+    _repair_session_repo_ownership_if_needed(session_id, repo_dir, remote)
 
     success, out = execute_release_push(
         repo_dir=repo_dir,
@@ -1573,6 +1606,8 @@ def perform_run_bloom_release(
     ):
         bloom_env['SSH_AUTH_SOCK'] = str(default_sock)
 
+    from .audit import redact_credentials
+
     try:
         res = subprocess.run(
             cmd,
@@ -1593,7 +1628,7 @@ def perform_run_bloom_release(
         )
         return {'success': False, 'status': 'FAILED', 'error': err}
     except Exception as e:
-        err = f'bloom-release execution failed: {e}'
+        err = redact_credentials(f'bloom-release execution failed: {e}')
         timeline.log_action(
             action='bloom_release',
             target=target_label,
@@ -1604,7 +1639,7 @@ def perform_run_bloom_release(
         return {'success': False, 'status': 'FAILED', 'error': err}
 
     combined_output = ((res.stdout or '') + '\n' + (res.stderr or '')).strip()
-    ansi_stripped = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', combined_output)
+    ansi_stripped = redact_credentials(re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', combined_output))
     pr_matches = re.findall(r'https://github\.com/[^\s"\'\)]+/pull/\d+', ansi_stripped)
     rosdistro_pr_url = pr_matches[-1] if pr_matches else None
 

@@ -577,13 +577,29 @@ def exec_in_session_container(
                 ),
             }
 
+    chown_trap = ""
+    if hasattr(os, 'getuid') and hasattr(os, 'getgid'):
+        try:
+            uid = os.getuid()
+            gid = os.getgid()
+            if uid != 0:
+                chown_trap = (
+                    f"trap 'find /workspace/src -user 0 -exec chown -h {uid}:{gid} {{}} + "
+                    f"2>/dev/null || true' EXIT; "
+                )
+        except Exception:
+            pass
+
     wrapped_cmd = (
+        f"{chown_trap}"
         "source /opt/ros/$ROS_DISTRO/setup.bash 2>/dev/null || true; "
         "if [ -f /workspace/install/setup.bash ]; then "
         "source /workspace/install/setup.bash 2>/dev/null || true; fi; "
         "export PATH=\"/workspace/tools/bin:/root/.local/bin:$PATH\"; "
         f"{command}"
     )
+
+    from .audit import redact_credentials
 
     try:
         res = subprocess.run(
@@ -595,15 +611,16 @@ def exec_in_session_container(
         return {
             'success': res.returncode == 0,
             'returncode': res.returncode,
-            'stdout': res.stdout,
-            'stderr': res.stderr,
+            'stdout': redact_credentials(res.stdout),
+            'stderr': redact_credentials(res.stderr),
             'container_name': container_name,
         }
     except subprocess.TimeoutExpired as e:
+        raw_out = (e.stdout or '') if isinstance(e.stdout, str) else ''
         return {
             'success': False,
             'returncode': 124,
-            'stdout': (e.stdout or '') if isinstance(e.stdout, str) else '',
+            'stdout': redact_credentials(raw_out),
             'stderr': f"Command timed out after {timeout} seconds.",
             'container_name': container_name,
         }

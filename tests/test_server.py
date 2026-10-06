@@ -724,7 +724,10 @@ class TestMCPServer(unittest.TestCase):
         })
         mock_proc = MagicMock()
         mock_proc.returncode = 0
+        fake_tok = 'gho_' + ('a1b2c3d4e5' * 3)
         mock_proc.stdout = (
+            f'==> git fetch --filter=blob:none https://{fake_tok}:x-oauth-basic@github.com/ros/rosdistro.git '
+            'master:bloom-launch-0 -n\n'
             '==> Generating pull request to distro file located at '
             "'https://raw.githubusercontent.com/ros/rosdistro/master/rolling/distribution.yaml'\n"
             'Pull request opened at: https://github.com/ros/rosdistro/pull/45678\n'
@@ -745,6 +748,8 @@ class TestMCPServer(unittest.TestCase):
         self.assertTrue(bloom_ok['success'])
         self.assertEqual(bloom_ok['status'], 'APPROVED')
         self.assertEqual(bloom_ok['rosdistro_pr_url'], 'https://github.com/ros/rosdistro/pull/45678')
+        self.assertNotIn(fake_tok, bloom_ok['output'])
+        self.assertIn('https://***:***@github.com/ros/rosdistro.git', bloom_ok['output'])
 
         meta = read_session_metadata(session_dir)
         self.assertEqual(
