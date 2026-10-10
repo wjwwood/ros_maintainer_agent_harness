@@ -571,6 +571,8 @@ def start_gateway_service(
 
     child_env = os.environ.copy()
     child_env['ROS_MAINTAINER_STATE_DIR'] = str(sdir)
+    child_env['PYTHONIOENCODING'] = 'utf-8'
+    child_env['PYTHONUTF8'] = '1'
     pkg_parent = str(Path(__file__).resolve().parent.parent)
     existing_pypath = child_env.get('PYTHONPATH', '')
     child_env['PYTHONPATH'] = (

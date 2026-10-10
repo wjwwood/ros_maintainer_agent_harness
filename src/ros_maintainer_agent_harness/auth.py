@@ -103,7 +103,12 @@ def get_default_state_dir() -> Path:
     if xdg_state:
         base = Path(xdg_state).expanduser().resolve()
     else:
-        base = (Path.home() / '.local' / 'state').resolve()
+        try:
+            home_dir = Path.home()
+        except (RuntimeError, OSError):
+            import tempfile
+            home_dir = Path(tempfile.gettempdir())
+        base = (home_dir / '.local' / 'state').resolve()
     return base / 'ros_maintainer_agent_harness'
 
 

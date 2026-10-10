@@ -146,7 +146,7 @@ class TestGatewayAndAuth(unittest.TestCase):
 
                 # Saving new credentials writes to state_dir/credentials.env, never ws_dir/.env
                 saved_path = save_workspace_env_var(ws_dir, 'ROS_HOST_GITHUB_TOKEN', 'ghp_host456')
-                self.assertEqual(saved_path, state_dir / 'credentials.env')
+                self.assertEqual(saved_path.resolve(), (state_dir / 'credentials.env').resolve())
                 self.assertFalse((ws_dir / '.env').exists())
                 self.assertEqual(load_workspace_env(ws_dir).get('ROS_HOST_GITHUB_TOKEN'), 'ghp_host456')
 
