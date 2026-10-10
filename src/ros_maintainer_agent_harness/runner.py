@@ -54,6 +54,7 @@ class CommandRunner(Protocol):
         cwd: Optional[Union[str, Path]] = None,
         timeout: Optional[float] = None,
         input_data: Optional[str] = None,
+        capture_output: bool = True,
     ) -> CommandResult:
         ...
 
@@ -72,10 +73,11 @@ class SubprocessRunner:
         cwd: Optional[Union[str, Path]] = None,
         timeout: Optional[float] = None,
         input_data: Optional[str] = None,
+        capture_output: bool = True,
     ) -> CommandResult:
         argv = [str(part) for part in cmd]
         run_kwargs: Dict[str, Any] = {
-            'capture_output': True,
+            'capture_output': capture_output,
             'text': True,
         }
         if env is not None:
@@ -87,7 +89,15 @@ class SubprocessRunner:
         if input_data is not None:
             run_kwargs['input'] = input_data
 
-        completed = subprocess.run(argv, **run_kwargs)
+        try:
+            completed = subprocess.run(argv, **run_kwargs)
+        except FileNotFoundError as exc:
+            return CommandResult(
+                args=argv,
+                returncode=127,
+                stdout='',
+                stderr=str(exc),
+            )
         return CommandResult(
             args=argv,
             returncode=int(completed.returncode),
@@ -98,8 +108,9 @@ class SubprocessRunner:
 
 ResponseHandler = Union[
     CommandResult,
+    Tuple[int, str, str],
     Exception,
-    Callable[[List[str], RecordedCall], Union[CommandResult, Exception]],
+    Callable[[List[str], RecordedCall], Union[CommandResult, Tuple[int, str, str], Exception]],
 ]
 
 
@@ -166,6 +177,7 @@ class FakeCommandRunner:
         cwd: Optional[Union[str, Path]] = None,
         timeout: Optional[float] = None,
         input_data: Optional[str] = None,
+        capture_output: bool = True,
     ) -> CommandResult:
         argv = [str(part) for part in cmd]
         recorded = RecordedCall(
@@ -185,11 +197,25 @@ class FakeCommandRunner:
                     outcome = handler(argv, recorded)
                     if isinstance(outcome, Exception):
                         raise outcome
+                    if isinstance(outcome, tuple):
+                        return CommandResult(
+                            args=argv,
+                            returncode=int(outcome[0]),
+                            stdout=str(outcome[1]),
+                            stderr=str(outcome[2]),
+                        )
                     return CommandResult(
                         args=argv,
                         returncode=outcome.returncode,
                         stdout=outcome.stdout,
                         stderr=outcome.stderr,
+                    )
+                if isinstance(handler, tuple):
+                    return CommandResult(
+                        args=argv,
+                        returncode=int(handler[0]),
+                        stdout=str(handler[1]),
+                        stderr=str(handler[2]),
                     )
                 return CommandResult(
                     args=argv,

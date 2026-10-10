@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1
+FROM debian:bookworm-slim
+
+ARG TARGETARCH
+ARG HARNESS_VERSION=0.1.0
+ARG HARNESS_GIT_SHA=unknown
+ARG OPENCODE_VERSION=v1.4.3
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+LABEL org.opencontainers.image.title="ros-maintainer-harness-hub" \
+      org.opencontainers.image.description="Unprivileged Maintainer Hub container (no Docker socket)" \
+      org.opencontainers.image.version="${HARNESS_VERSION}" \
+      org.opencontainers.image.revision="${HARNESS_GIT_SHA}" \
+      io.ros-maintainer-harness.version="${HARNESS_VERSION}" \
+      io.ros-maintainer-harness.git-sha="${HARNESS_GIT_SHA}"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    GIT_OPTIONAL_LOCKS=0 \
+    PATH="/opt/harness-venv/bin:/usr/local/bin:/usr/bin:/bin"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        git \
+        jq \
+        python3 \
+        python3-pip \
+        python3-venv \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install architecture-matched static musl OpenCode binary (supports linux/amd64 and linux/arm64)
+RUN set -eux; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+        amd64|x86_64) OC_ARCH="x64-musl" ;; \
+        arm64|aarch64) OC_ARCH="arm64-musl" ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/anomalyco/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-${OC_ARCH}.tar.gz" \
+        -o /tmp/opencode.tar.gz \
+    && tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode \
+    && chmod 0755 /usr/local/bin/opencode \
+    && rm -f /tmp/opencode.tar.gz
+
+# Install ros_maintainer_agent_harness strictly from a pre-built wheel (never from a bind-mounted source tree)
+COPY dist/*.whl /tmp/wheels/
+RUN python3 -m venv /opt/harness-venv \
+    && /opt/harness-venv/bin/pip install --no-cache-dir /tmp/wheels/*.whl \
+    && rm -rf /tmp/wheels
+
+# Create non-root maintainer user
+RUN groupadd --gid "${USER_GID}" maintainer 2>/dev/null || true \
+    && useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --shell /bin/bash maintainer 2>/dev/null || true
+
+USER ${USER_UID}:${USER_GID}
+WORKDIR /home/maintainer
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sleep", "infinity"]

@@ -172,6 +172,10 @@ def handle_doctor(args: argparse.Namespace) -> int:
     ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
     report = check_token_and_environment(ws_path)
 
+    if getattr(args, 'json', False):
+        print(json.dumps(report, indent=2))
+        return 0 if report['ready'] else 1
+
     print(f"=== ROS Maintainer Harness Doctor ({report['workspace_root']}) ===")
     ws_icon = '✅' if report['workspace_initialized'] else '❌'
     rt_icon = '✅' if report['container_runtime'] else '❌'
@@ -179,8 +183,41 @@ def handle_doctor(args: argparse.Namespace) -> int:
     host_icon = '✅' if report['host_token_configured'] else 'ℹ️ '
     mcp_icon = '✅' if report['global_mcp_configured'] else '⚠️ '
 
-    print(f"  {ws_icon} Workspace initialized:       {report['workspace_initialized']}")
+    eng = report.get('engine', {})
+    gw = report.get('gateway_service', {})
+    hub = report.get('hub', {})
+    oc = report.get('opencode', {})
+
+    eng_icon = '✅' if eng.get('reachable') and not eng.get('arch_mismatch') else '⚠️ '
+    gw_icon = '✅' if gw.get('running') and gw.get('version_matches_host') else '⚠️ '
+    hub_icon = '✅' if hub.get('running') and hub.get('mounts_verified') else '⚠️ '
+    oc_icon = '✅' if oc.get('installed') and oc.get('llm_credential_configured') else '⚠️ '
+
+    print(
+        f"  {ws_icon} Workspace initialized:       "
+        f"{report['workspace_initialized']} (v{report.get('host_version', '0.1.0')})"
+    )
     print(f"  {rt_icon} Container runtime:           {report['container_runtime'] or 'NOT FOUND'}")
+    print(
+        f"  {eng_icon} Container engine:            "
+        f"{eng.get('kind', 'unknown')} (reachable: {eng.get('reachable')}, "
+        f"host_arch: {eng.get('host_arch')}, engine_arch: {eng.get('engine_arch')})"
+    )
+    print(
+        f"  {gw_icon} Gateway launch service:      "
+        f"running={gw.get('running')} ({gw.get('bind_host')}:{gw.get('port')}, "
+        f"reachable_from_hub={gw.get('reachable_from_hub')})"
+    )
+    print(
+        f"  {hub_icon} Hub container:               "
+        f"image={hub.get('image_present')}, running={hub.get('running')}, "
+        f"mounts_verified={hub.get('mounts_verified')}"
+    )
+    print(
+        f"  {oc_icon} OpenCode & LLM credentials:  "
+        f"installed={oc.get('installed')} ({oc.get('version') or 'N/A'}), "
+        f"llm_key={oc.get('llm_credential_configured')}"
+    )
     print(
         f"  {tok_icon} Container GitHub token:      "
         f"{report['container_token_configured']} (mode: {report['container_token_mode']})"
@@ -227,9 +264,22 @@ def handle_token_setup(args: argparse.Namespace) -> int:
         print(f"✅ Saved host token (ROS_HOST_GITHUB_TOKEN) to {env_file} (mode 0600)")
         updated = True
 
+    llm_key_arg = getattr(args, 'llm_key', None)
+    if llm_key_arg:
+        if '=' not in llm_key_arg:
+            print("Error: --llm-key must be formatted as KEY=VALUE (e.g. ANTHROPIC_API_KEY=sk-...).", file=sys.stderr)
+            return 1
+        k, v = llm_key_arg.split('=', 1)
+        k = k.strip()
+        v = v.strip()
+        env_file = save_workspace_env_var(ws_path, k, v)
+        print(f"✅ Saved LLM credential ({k}) to {env_file} (mode 0600)")
+        updated = True
+
     if not updated:
         print(
-            "Error: Provide `--container-token <TOKEN>`, `--no-token`, or `--host-token <TOKEN>`.",
+            "Error: Provide `--container-token <TOKEN>`, `--no-token`, `--host-token <TOKEN>`, "
+            "or `--llm-key KEY=VALUE`.",
             file=sys.stderr,
         )
         return 1
@@ -625,6 +675,194 @@ def handle_session_inspect_mounts(args: argparse.Namespace) -> int:
             for drift in report.get('drifts', []):
                 print(f"  - {drift}", file=sys.stderr)
     return 0 if report['verified'] else 1
+
+
+def handle_hub(args: argparse.Namespace) -> int:
+    from .hub_container import (
+        attach_to_hub_opencode,
+        build_hub_image,
+        DEFAULT_HUB_OPENCODE_PORT,
+        get_hub_container_logs,
+        get_hub_container_status,
+        inspect_hub_container_mounts,
+        restart_hub_container,
+        run_hub_shell,
+        start_hub_container,
+        stop_hub_container,
+    )
+
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    action = getattr(args, 'hub_action', None)
+
+    if action == 'build':
+        source_repo = Path(args.source_repo).resolve() if getattr(args, 'source_repo', None) else None
+        res = build_hub_image(
+            source_repo=source_repo,
+            tag=getattr(args, 'tag', None) or 'ros-maintainer-harness-hub:latest',
+            no_cache=bool(getattr(args, 'no_cache', False)),
+            platform=getattr(args, 'platform', None),
+        )
+        if getattr(args, 'json', False):
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get('success'):
+                print(
+                    f"✅ Built Hub image '{res.get('image')}' "
+                    f"(tagged '{res.get('version_tag')}')."
+                )
+            else:
+                print(f"❌ Hub image build failed: {res.get('error')}", file=sys.stderr)
+        return 0 if res.get('success') else 1
+
+    elif action == 'start':
+        if not layout.is_initialized():
+            layout.initialize()
+        res = start_hub_container(
+            workspace_root=ws_path,
+            custom_image=getattr(args, 'image', None),
+            port=int(getattr(args, 'port', DEFAULT_HUB_OPENCODE_PORT) or DEFAULT_HUB_OPENCODE_PORT),
+            start_gateway=bool(getattr(args, 'start_gateway', False)),
+        )
+        if getattr(args, 'json', False):
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get('success'):
+                print(
+                    f"✅ Hub container '{res.get('container_name')}' is {res.get('status')} "
+                    f"(OpenCode: {res.get('opencode_url')})."
+                )
+            else:
+                print(f"❌ Failed to start Hub container: {res.get('error')}", file=sys.stderr)
+        return 0 if res.get('success') else 1
+
+    elif action == 'stop':
+        res = stop_hub_container(workspace_root=ws_path)
+        if getattr(args, 'json', False):
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get('success'):
+                print(f"✅ Stopped and removed Hub container '{res.get('container_name')}'.")
+            else:
+                print(f"❌ Failed to stop Hub container: {res.get('error') or res.get('output')}", file=sys.stderr)
+        return 0 if res.get('success') else 1
+
+    elif action == 'restart':
+        if not layout.is_initialized():
+            layout.initialize()
+        res = restart_hub_container(
+            workspace_root=ws_path,
+            custom_image=getattr(args, 'image', None),
+            port=int(getattr(args, 'port', DEFAULT_HUB_OPENCODE_PORT) or DEFAULT_HUB_OPENCODE_PORT),
+            start_gateway=bool(getattr(args, 'start_gateway', False)),
+        )
+        if getattr(args, 'json', False):
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get('success'):
+                print(
+                    f"✅ Restarted Hub container '{res.get('container_name')}' "
+                    f"(OpenCode: {res.get('opencode_url')})."
+                )
+            else:
+                print(f"❌ Failed to restart Hub container: {res.get('error')}", file=sys.stderr)
+        return 0 if res.get('success') else 1
+
+    elif action == 'status':
+        res = get_hub_container_status(workspace_root=ws_path)
+        if getattr(args, 'json', False):
+            print(json.dumps(res, indent=2))
+        else:
+            icon = '🟢' if res.get('running') else '⚪'
+            print(f"{icon} Hub Container: {res.get('container_name')} (running={res.get('running')})")
+            print(
+                f"  - Image:            {res.get('image')} "
+                f"(v{res.get('image_version') or 'unknown'}, sha={res.get('image_git_sha') or 'unknown'})"
+            )
+            print(f"  - Host version:     v{res.get('host_version')}")
+            print(f"  - Gateway reachable:{res.get('gateway_reachable_from_hub')}")
+            print(f"  - Mounts verified:  {res.get('mounts_verified')}")
+            if res.get('version_mismatch_warning'):
+                print(f"  ⚠️  {res['version_mismatch_warning']}")
+            for d in res.get('drifts', []):
+                print(f"  ❌ Drift: {d}")
+        return 0 if res.get('running') and res.get('mounts_verified') else 1
+
+    elif action == 'logs':
+        res = get_hub_container_logs(
+            tail=int(getattr(args, 'lines', 100) or 100),
+            follow=bool(getattr(args, 'follow', False)),
+        )
+        if res.get('logs'):
+            sys.stdout.write(res['logs'])
+        elif res.get('error'):
+            print(res['error'], file=sys.stderr)
+        return 0 if res.get('success') else 1
+
+    elif action == 'shell':
+        res = run_hub_shell(command=getattr(args, 'command_str', None))
+        if res.get('stdout'):
+            sys.stdout.write(res['stdout'])
+        if res.get('stderr'):
+            sys.stderr.write(res['stderr'])
+        return int(res.get('returncode', 0 if res.get('success') else 1))
+
+    elif action == 'attach':
+        res = attach_to_hub_opencode(workspace_root=ws_path)
+        if not res.get('success') and res.get('error'):
+            print(f"❌ {res['error']}", file=sys.stderr)
+        return 0 if res.get('success') else 1
+
+    elif action == 'inspect-mounts':
+        report = inspect_hub_container_mounts(workspace_root=ws_path)
+        if getattr(args, 'json', False):
+            print(json.dumps(report, indent=2))
+        else:
+            if report['verified']:
+                print(
+                    f"✅ Hub container '{report['container_name']}' mounts verified against expected spec "
+                    f"({len(report['actual_mounts'])} mount(s))."
+                )
+            else:
+                print(f"❌ Hub container '{report['container_name']}' mount verification failed:", file=sys.stderr)
+                for drift in report.get('drifts', []):
+                    print(f"  - {drift}", file=sys.stderr)
+        return 0 if report['verified'] else 1
+
+    print("Run `ros-maintainer-harness hub --help` for hub commands.")
+    return 0
+
+
+def handle_redeploy(args: argparse.Namespace) -> int:
+    from .hub_container import redeploy_snapshot
+
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    source_repo = Path(args.source_repo).resolve() if getattr(args, 'source_repo', None) else None
+    res = redeploy_snapshot(
+        workspace_root=ws_path,
+        source_repo=source_repo,
+        allow_dirty=bool(getattr(args, 'allow_dirty', False)),
+        also_host=bool(getattr(args, 'also_host', False)),
+    )
+    if getattr(args, 'json', False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get('success'):
+            old_v = res.get('old_versions', {})
+            new_v = res.get('new_versions', {})
+            print(
+                f"✅ Redeployed harness snapshot {new_v.get('version')} ({new_v.get('git_sha')}) "
+                f"[image: {new_v.get('version_tag')}]"
+            )
+            print(
+                f"  - Previous versions: host={old_v.get('host')}, "
+                f"gateway={old_v.get('gateway')}, hub={old_v.get('hub')}"
+            )
+            print(f"  - Host non-editable install updated: {new_v.get('host_installed')}")
+            print("  - Active session containers were left untouched.")
+        else:
+            print(f"❌ Redeploy failed: {res.get('error')}", file=sys.stderr)
+    return 0 if res.get('success') else 1
 
 
 def handle_session_start_conversation(args: argparse.Namespace) -> int:
@@ -1506,10 +1744,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
 
     # doctor
-    subparsers.add_parser(
+    doc_parser = subparsers.add_parser(
         'doctor', parents=[ws_parent],
-        help='Check workspace readiness, container runtime, GitHub tokens, and MCP config',
+        help='Check workspace readiness, container engine, gateway service, Hub, OpenCode, tokens, and MCP config',
     )
+    doc_parser.add_argument('--json', action='store_true', help='Output doctor report as JSON')
 
     # status (Hub dashboard)
     st_parser = subparsers.add_parser(
@@ -1535,7 +1774,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     # token-setup
     ts_parser = subparsers.add_parser(
         'token-setup', parents=[ws_parent],
-        help='Configure read-only container GitHub token (or opt into unauthenticated mode) in .env',
+        help='Configure read-only container GitHub token, host GitHub token, or LLM API key in host state',
     )
     ts_parser.add_argument(
         '--container-token', type=str, default=None,
@@ -1548,6 +1787,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ts_parser.add_argument(
         '--host-token', type=str, default=None,
         help='Optional host GitHub token for the MCP gateway (ROS_HOST_GITHUB_TOKEN)',
+    )
+    ts_parser.add_argument(
+        '--llm-key', type=str, default=None,
+        help='LLM provider key in KEY=VALUE format (e.g. ANTHROPIC_API_KEY=sk-...)',
     )
 
     # mcp-install
@@ -1651,6 +1894,98 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     gw_service.add_argument('--port', type=int, default=None, help='Bind port (default: 8765)')
     gw_service.add_argument('--load', action='store_true', help='Run launchctl load -w after writing plist')
     gw_service.add_argument('--json', action='store_true', help='Output JSON result')
+
+    # hub (Unprivileged Maintainer Hub container lifecycle)
+    hub_parser = subparsers.add_parser(
+        'hub', parents=[ws_parent],
+        help='Build and manage the unprivileged Maintainer Hub container (no Docker socket)',
+    )
+    hub_subparsers = hub_parser.add_subparsers(dest='hub_action')
+
+    hb_build = hub_subparsers.add_parser(
+        'build', parents=[ws_parent],
+        help='Build the Maintainer Hub container image from a wheel and packaged Dockerfile.hub',
+    )
+    hb_build.add_argument('--from', dest='source_repo', type=str, default=None, help='Source repository path')
+    hb_build.add_argument(
+        '--tag', type=str, default=None, help='Image tag (default: ros-maintainer-harness-hub:latest)'
+    )
+    hb_build.add_argument('--no-cache', action='store_true', help='Pass --no-cache to docker build')
+    hb_build.add_argument('--platform', type=str, default=None, help='Target platform (e.g. linux/arm64, linux/amd64)')
+    hb_build.add_argument('--json', action='store_true', help='Output JSON result')
+
+    hb_start = hub_subparsers.add_parser(
+        'start', parents=[ws_parent], help='Start the unprivileged Maintainer Hub container'
+    )
+    hb_start.add_argument('--image', type=str, default=None, help='Custom Hub image override')
+    hb_start.add_argument('--port', type=int, default=4096, help='Localhost OpenCode port (default: 4096)')
+    hb_start.add_argument(
+        '--start-gateway', action='store_true', default=False,
+        help='Automatically start the gateway launch service if it is not running',
+    )
+    hb_start.add_argument('--json', action='store_true', help='Output JSON result')
+
+    hb_stop = hub_subparsers.add_parser(
+        'stop', parents=[ws_parent], help='Stop the Maintainer Hub container (leaves session containers running)'
+    )
+    hb_stop.add_argument('--json', action='store_true', help='Output JSON result')
+
+    hb_restart = hub_subparsers.add_parser(
+        'restart', parents=[ws_parent], help='Restart the Maintainer Hub container'
+    )
+    hb_restart.add_argument('--image', type=str, default=None, help='Custom Hub image override')
+    hb_restart.add_argument('--port', type=int, default=4096, help='Localhost OpenCode port (default: 4096)')
+    hb_restart.add_argument(
+        '--start-gateway', action='store_true', default=False,
+        help='Automatically start the gateway launch service if it is not running',
+    )
+    hb_restart.add_argument('--json', action='store_true', help='Output JSON result')
+
+    hb_status = hub_subparsers.add_parser(
+        'status', parents=[ws_parent],
+        help='Show Hub container status, image version, mounts, and gateway reachability',
+    )
+    hb_status.add_argument('--json', action='store_true', help='Output JSON result')
+
+    hb_logs = hub_subparsers.add_parser(
+        'logs', parents=[ws_parent], help='Show or follow Hub container logs'
+    )
+    hb_logs.add_argument('-n', '--lines', type=int, default=100, help='Number of trailing log lines (default: 100)')
+    hb_logs.add_argument('-f', '--follow', action='store_true', help='Follow log output')
+
+    hb_shell = hub_subparsers.add_parser(
+        'shell', parents=[ws_parent], help='Open a debugging shell inside the Hub container'
+    )
+    hb_shell.add_argument('-c', '--command', dest='command_str', type=str, default=None, help='Optional command to run')
+
+    hub_subparsers.add_parser(
+        'attach', parents=[ws_parent], help='Attach OpenCode client on host to the Hub container agent'
+    )
+
+    hb_im = hub_subparsers.add_parser(
+        'inspect-mounts', parents=[ws_parent],
+        help='Inspect running Hub container mounts and verify against launch spec',
+    )
+    hb_im.add_argument('--json', action='store_true', help='Output verification report as JSON')
+
+    # redeploy (Ship tested snapshot without disturbing live session containers)
+    redeploy_parser = subparsers.add_parser(
+        'redeploy', parents=[ws_parent],
+        help='Build a wheel, rebuild Hub image, and restart Gateway and Hub without disturbing session containers',
+    )
+    redeploy_parser.add_argument(
+        '--from', dest='source_repo', type=str, default=None,
+        help='Path to harness repository (default: current harness repository)',
+    )
+    redeploy_parser.add_argument(
+        '--allow-dirty', action='store_true', default=False,
+        help='Allow redeploying from a working tree with uncommitted changes',
+    )
+    redeploy_parser.add_argument(
+        '--also-host', action='store_true', default=False,
+        help='Also install the non-editable wheel snapshot into the host user environment',
+    )
+    redeploy_parser.add_argument('--json', action='store_true', help='Output JSON result')
 
     # session
     session_parser = subparsers.add_parser(
@@ -2194,6 +2529,10 @@ def main():
         return handle_serve(args)
     elif args.command == 'gateway':
         return handle_gateway(args)
+    elif args.command == 'hub':
+        return handle_hub(args)
+    elif args.command == 'redeploy':
+        return handle_redeploy(args)
     elif args.command == 'session':
         if args.session_action == 'create':
             return handle_session_create(args)

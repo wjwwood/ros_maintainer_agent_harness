@@ -19,7 +19,8 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple, Union
+import sys
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from .config import HarnessPolicy, load_policy
 from .runner import CommandRunner, get_default_runner
@@ -786,17 +787,35 @@ def get_container_name(session_id: str) -> str:
     return f"ros-harness-{session_id}"
 
 
+def _normalize_arch(raw_arch: Optional[str]) -> str:
+    val = (raw_arch or '').strip().lower()
+    if val in ('aarch64', 'arm64', 'arm64v8'):
+        return 'arm64'
+    if val in ('x86_64', 'amd64', 'x64'):
+        return 'amd64'
+    return val or 'unknown'
+
+
 def check_token_and_environment(
     workspace_root: Path,
     runner: Optional[CommandRunner] = None,
+    state_dir: Optional[Path] = None,
+    host_arch_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Check workspace readiness: initialization, container runtime, GitHub tokens, and global MCP config.
+    Check workspace readiness: initialization, container engine (OrbStack/Docker/Podman),
+    architecture, gateway launch service, Hub container, session images, OpenCode client,
+    LLM credentials, GitHub tokens, and global MCP config.
     """
+    import platform as py_platform
+    from .gateway import get_gateway_status, get_harness_version, load_state_credentials
+
     active_runner = runner or get_default_runner()
     ws_root = workspace_root.resolve()
     ws_initialized = (ws_root / 'config' / 'policy.yaml').exists()
     runtime = detect_container_runtime(runner=active_runner)
+    host_version = get_harness_version()
+    host_arch = _normalize_arch(host_arch_override or py_platform.machine())
 
     container_token = get_container_github_token(ws_root)
     if container_token is None or container_token == '':
@@ -811,9 +830,11 @@ def check_token_and_environment(
 
     # Check host token / gh auth
     ws_env = load_workspace_env(ws_root)
+    state_creds = load_state_credentials(state_dir=state_dir, workspace_root=ws_root)
     host_token = (
         os.environ.get('ROS_HOST_GITHUB_TOKEN')
         or ws_env.get('ROS_HOST_GITHUB_TOKEN')
+        or state_creds.get('ROS_HOST_GITHUB_TOKEN')
         or os.environ.get('GITHUB_TOKEN')
         or os.environ.get('GH_TOKEN')
     )
@@ -852,27 +873,262 @@ def check_token_and_environment(
     except Exception:
         pass
 
+    def _safe_run(cmd: Sequence[str], timeout: float = 2.0):
+        from .runner import CommandResult
+
+        try:
+            return active_runner.run(cmd, timeout=timeout)
+        except Exception as exc:
+            return CommandResult(
+                args=[str(part) for part in cmd],
+                returncode=1,
+                stdout='',
+                stderr=str(exc),
+            )
+
+    # 1. Container Engine & Architecture Check
+    docker_host = os.environ.get('DOCKER_HOST')
+    docker_context = None
+    engine_reachable = False
+    engine_kind = 'unreachable'
+    engine_arch: Optional[str] = None
+
+    if runtime:
+        if runtime == 'docker':
+            ctx_res = _safe_run(['docker', 'context', 'show'], timeout=2.0)
+            if ctx_res.returncode == 0 and ctx_res.stdout.strip():
+                docker_context = ctx_res.stdout.strip()
+
+        info_res = _safe_run([runtime, 'info', '--format', '{{json .}}'], timeout=2.0)
+        if info_res.returncode == 0 and info_res.stdout.strip():
+            engine_reachable = True
+            raw_info = info_res.stdout.strip()
+            try:
+                info_json = json.loads(raw_info)
+            except Exception:
+                info_json = {}
+            os_str = str(info_json.get('OperatingSystem') or raw_info).lower()
+            name_str = str(info_json.get('Name') or '').lower()
+            ctx_str = (docker_context or '').lower()
+            dh_str = (docker_host or '').lower()
+            if 'orbstack' in os_str or 'orbstack' in name_str or 'orbstack' in ctx_str or 'orbstack' in dh_str:
+                engine_kind = 'orbstack'
+            elif 'docker desktop' in os_str or 'desktop-linux' in ctx_str:
+                engine_kind = 'docker-desktop'
+            elif runtime == 'podman':
+                engine_kind = 'podman'
+            else:
+                engine_kind = 'linux-docker'
+            raw_daemon_arch = info_json.get('Architecture')
+            if raw_daemon_arch:
+                engine_arch = _normalize_arch(str(raw_daemon_arch))
+
+    arch_mismatch = bool(engine_arch and host_arch != 'unknown' and engine_arch != host_arch)
+
+    engine_report = {
+        'runtime': runtime,
+        'reachable': engine_reachable,
+        'kind': engine_kind,
+        'docker_host': docker_host,
+        'context': docker_context,
+        'host_arch': host_arch,
+        'engine_arch': engine_arch,
+        'arch_mismatch': arch_mismatch,
+    }
+
+    # 2. Gateway Launch Service Check
+    gw_status = get_gateway_status(ws_root, state_dir=state_dir)
+    gw_running = bool(gw_status.get('running'))
+    gw_version = gw_status.get('version')
+    gw_version_matches = bool(not gw_version or gw_version == host_version)
+
+    # 3. Hub Container Check
+    hub_image_present = False
+    hub_running = False
+    hub_image_version: Optional[str] = None
+    hub_mounts_verified = False
+    hub_no_docker_socket = True
+    hub_config_ro = False
+    hub_audit_ro = False
+    hub_drifts: List[str] = []
+    gw_reachable_from_hub = False
+
+    if runtime and engine_reachable:
+        img_res = _safe_run([runtime, 'image', 'inspect', DEFAULT_HUB_IMAGE], timeout=2.0)
+        if img_res.returncode == 0 and img_res.stdout.strip():
+            hub_image_present = True
+            try:
+                img_parsed = json.loads(img_res.stdout)
+                img_obj = img_parsed[0] if isinstance(img_parsed, list) and img_parsed else img_parsed
+                labels = (img_obj.get('Config') or {}).get('Labels') or {}
+                hub_image_version = (
+                    labels.get('io.ros-maintainer-harness.version')
+                    or labels.get('org.opencontainers.image.version')
+                )
+            except Exception:
+                pass
+
+        hub_inspect = _safe_run([runtime, 'inspect', HUB_CONTAINER_NAME], timeout=2.0)
+        if hub_inspect.returncode == 0 and hub_inspect.stdout.strip():
+            try:
+                parsed = json.loads(hub_inspect.stdout)
+                c_obj = parsed[0] if isinstance(parsed, list) and parsed else parsed
+            except Exception:
+                c_obj = {}
+            hub_running = bool((c_obj.get('State') or {}).get('Running', False))
+            c_labels = ((c_obj.get('Config') or {}).get('Labels')) or {}
+            if not hub_image_version:
+                hub_image_version = (
+                    c_labels.get('io.ros-maintainer-harness.version')
+                    or c_labels.get('org.opencontainers.image.version')
+                )
+            expected_hub_spec = build_hub_launch_spec(ws_root)
+            m_ver = verify_container_mounts_against_spec([c_obj], expected_hub_spec)
+            hub_mounts_verified = bool(m_ver['verified'])
+            hub_drifts = list(m_ver['drifts'])
+            for m in m_ver['actual_mounts']:
+                src_low = str(m.get('source') or '').lower()
+                tgt_str = str(m.get('target') or '')
+                if 'docker.sock' in src_low or 'podman.sock' in src_low:
+                    hub_no_docker_socket = False
+                if tgt_str == str((ws_root / 'config').resolve()) and m.get('read_only'):
+                    hub_config_ro = True
+                if tgt_str == str((ws_root / 'audit').resolve()) and m.get('read_only'):
+                    hub_audit_ro = True
+
+            if hub_running and gw_running:
+                gw_port = gw_status.get('port') or 8765
+                probe = _safe_run(
+                    [
+                        runtime,
+                        'exec',
+                        HUB_CONTAINER_NAME,
+                        'curl',
+                        '-fsS',
+                        '--max-time',
+                        '3',
+                        f'http://host.docker.internal:{gw_port}/healthz',
+                    ],
+                    timeout=3.0,
+                )
+                gw_reachable_from_hub = probe.returncode == 0
+
+    hub_version_matches = bool(not hub_image_version or hub_image_version == host_version)
+
+    gateway_report = {
+        'running': gw_running,
+        'bind_host': gw_status.get('host', '127.0.0.1'),
+        'port': gw_status.get('port', 8765),
+        'pid': gw_status.get('pid'),
+        'version': gw_version,
+        'version_matches_host': gw_version_matches,
+        'reachable_from_hub': gw_reachable_from_hub,
+    }
+
+    hub_report = {
+        'image_present': hub_image_present,
+        'running': hub_running,
+        'image_version': hub_image_version,
+        'version_matches_host': hub_version_matches,
+        'mounts_verified': hub_mounts_verified,
+        'no_docker_socket': hub_no_docker_socket,
+        'config_read_only': hub_config_ro,
+        'audit_read_only': hub_audit_ro,
+        'drifts': hub_drifts,
+    }
+
+    # 4. Session Images & Architecture Check
+    unsupported_arm64_distros: List[str] = []
+    if host_arch == 'arm64':
+        unsupported_arm64_distros.append('noetic')
+    session_images_report = {
+        'host_arch': host_arch,
+        'default_images': dict(DEFAULT_DISTRO_IMAGES),
+        'unsupported_arm64_distros': unsupported_arm64_distros,
+    }
+
+    # 5. OpenCode Client & LLM Credentials Check
+    opencode_path = active_runner.which('opencode')
+    opencode_version: Optional[str] = None
+    if opencode_path:
+        oc_ver_res = _safe_run(['opencode', '--version'], timeout=2.0)
+        if oc_ver_res.returncode == 0 and oc_ver_res.stdout.strip():
+            opencode_version = oc_ver_res.stdout.strip().splitlines()[0]
+
+    configured_llm_providers: List[str] = []
+    for key_name in (
+        'ANTHROPIC_API_KEY',
+        'OPENAI_API_KEY',
+        'GEMINI_API_KEY',
+        'GOOGLE_GENERATIVE_AI_API_KEY',
+        'OPENROUTER_API_KEY',
+    ):
+        val = os.environ.get(key_name) or ws_env.get(key_name) or state_creds.get(key_name)
+        if val and val.strip() and val.strip().lower() != 'none':
+            configured_llm_providers.append(key_name)
+
+    opencode_report = {
+        'installed': bool(opencode_path),
+        'path': opencode_path,
+        'version': opencode_version,
+        'llm_credential_configured': len(configured_llm_providers) > 0,
+        'configured_llm_providers': configured_llm_providers,
+    }
+
     warnings: List[str] = []
     recommendations: List[str] = []
+    remediations: List[Dict[str, str]] = []
+
+    def _add_remediation(component: str, issue: str, fix_cmd: str) -> None:
+        warnings.append(issue)
+        recommendations.append(f"Run `{fix_cmd}`.")
+        remediations.append({'component': component, 'issue': issue, 'fix_command': fix_cmd})
 
     if not ws_initialized:
-        warnings.append(f"Workspace at {ws_root} is not initialized.")
-        recommendations.append(f"Run `ros-maintainer-harness init -w {ws_root}`.")
+        _add_remediation(
+            'workspace',
+            f"Workspace at {ws_root} is not initialized.",
+            f"ros-maintainer-harness -w {ws_root} init",
+        )
 
     if not runtime:
         warnings.append("No container runtime (docker or podman) found on PATH.")
-        recommendations.append("Install Docker or Podman so session builds and tests run in isolated containers.")
+        recommendations.append("Install Docker or OrbStack so session builds and tests run in isolated containers.")
+        remediations.append({
+            'component': 'engine',
+            'issue': 'No container runtime (docker or podman) found on PATH.',
+            'fix_command': 'brew install --cask orbstack',
+        })
+    elif not engine_reachable:
+        _add_remediation(
+            'engine',
+            f"Container engine '{runtime}' is installed but the daemon is not reachable.",
+            'orb start' if sys.platform == 'darwin' else 'sudo systemctl start docker',
+        )
+
+    if arch_mismatch:
+        _add_remediation(
+            'engine',
+            f"Container engine architecture ({engine_arch}) does not match host architecture ({host_arch}).",
+            'docker context use orbstack' if sys.platform == 'darwin' else 'docker context use default',
+        )
 
     if not container_token_configured:
         warnings.append(
             "ROS_CONTAINER_GITHUB_TOKEN is not configured. Agents must not silently pass your host "
             "`gh auth token` into containers."
         )
+        fix_tok = f"ros-maintainer-harness -w {ws_root} token-setup --container-token <TOKEN>"
+        no_tok = f"ros-maintainer-harness -w {ws_root} token-setup --no-token"
         recommendations.append(
-            "Configure a read-only fine-grained GitHub PAT with "
-            "`ros-maintainer-harness token-setup --container-token <TOKEN>` "
-            "or explicitly opt into unauthenticated mode with `ros-maintainer-harness token-setup --no-token`."
+            f"Configure a read-only fine-grained GitHub PAT with `{fix_tok}` "
+            f"or explicitly opt into unauthenticated mode with `{no_tok}`."
         )
+        remediations.append({
+            'component': 'github_token',
+            'issue': 'ROS_CONTAINER_GITHUB_TOKEN is not configured.',
+            'fix_command': fix_tok,
+        })
 
     if token_matches_host_gh:
         warnings.append(
@@ -882,6 +1138,77 @@ def check_token_and_environment(
         recommendations.append(
             "Create a separate fine-grained Personal Access Token with zero repository write permissions "
             "for ROS_CONTAINER_GITHUB_TOKEN."
+        )
+
+    if not gw_running:
+        _add_remediation(
+            'gateway_service',
+            'Gateway launch service is not running.',
+            f"ros-maintainer-harness -w {ws_root} gateway start",
+        )
+    elif not gw_version_matches:
+        _add_remediation(
+            'gateway_service',
+            f"Gateway service version ({gw_version}) differs from host version ({host_version}).",
+            f"ros-maintainer-harness -w {ws_root} gateway restart",
+        )
+
+    if runtime and engine_reachable:
+        if not hub_image_present:
+            _add_remediation(
+                'hub',
+                f"Hub container image '{DEFAULT_HUB_IMAGE}' is not built.",
+                f"ros-maintainer-harness -w {ws_root} hub build",
+            )
+        elif not hub_running:
+            _add_remediation(
+                'hub',
+                f"Hub container '{HUB_CONTAINER_NAME}' is not running.",
+                f"ros-maintainer-harness -w {ws_root} hub start",
+            )
+        else:
+            if not hub_mounts_verified or not hub_no_docker_socket:
+                _add_remediation(
+                    'hub',
+                    f"Hub container '{HUB_CONTAINER_NAME}' mounts drifted from policy: {'; '.join(hub_drifts)}",
+                    f"ros-maintainer-harness -w {ws_root} hub restart",
+                )
+            if not hub_version_matches:
+                _add_remediation(
+                    'hub',
+                    f"Hub image version ({hub_image_version}) differs from host version ({host_version}).",
+                    f"ros-maintainer-harness -w {ws_root} redeploy",
+                )
+            if gw_running and not gw_reachable_from_hub:
+                _add_remediation(
+                    'gateway_service',
+                    'Gateway service is not reachable from inside the Hub container via host.docker.internal.',
+                    f"ros-maintainer-harness -w {ws_root} gateway restart",
+                )
+
+    if unsupported_arm64_distros:
+        warnings.append(
+            f"Host architecture is arm64: official OSRF images for {', '.join(unsupported_arm64_distros)} "
+            "are amd64-only and require Rosetta/QEMU emulation."
+        )
+
+    if not opencode_report['installed']:
+        oc_install_cmd = (
+            'brew install anomalyco/tap/opencode'
+            if sys.platform == 'darwin'
+            else 'curl -fsSL https://opencode.ai/install | bash'
+        )
+        _add_remediation(
+            'opencode',
+            "OpenCode CLI ('opencode') is not installed on the host PATH.",
+            oc_install_cmd,
+        )
+
+    if not opencode_report['llm_credential_configured']:
+        _add_remediation(
+            'opencode',
+            'No LLM provider API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY) is configured in host state.',
+            f"ros-maintainer-harness -w {ws_root} token-setup --llm-key ANTHROPIC_API_KEY=<KEY>",
         )
 
     if not global_mcp_configured:
@@ -896,12 +1223,19 @@ def check_token_and_environment(
         'ready': ready,
         'workspace_root': str(ws_root),
         'workspace_initialized': ws_initialized,
+        'host_version': host_version,
         'container_runtime': runtime,
         'container_token_configured': container_token_configured,
         'container_token_mode': container_token_mode,
         'host_token_configured': host_token_configured,
         'token_matches_host_gh_warning': token_matches_host_gh,
         'global_mcp_configured': global_mcp_configured,
+        'engine': engine_report,
+        'gateway_service': gateway_report,
+        'hub': hub_report,
+        'session_images': session_images_report,
+        'opencode': opencode_report,
+        'remediations': remediations,
         'warnings': warnings,
         'recommendations': recommendations,
     }

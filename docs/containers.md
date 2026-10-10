@@ -60,22 +60,37 @@ Any container runtime can be used provided it meets the following criteria:
 
 ---
 
-## 4. Running the Harness Inside a Container (Nested Containers)
+## 4. Unprivileged Maintainer Hub Container (No Docker Socket)
 
-### When Running the Harness on the Host
-When the harness runs directly on your local machine, **Docker-in-Docker (DinD) is not required**. The harness launches a single container for the session, and the agent builds and tests directly within that container environment using `colcon` and `pytest`.
+Rather than mounting `/var/run/docker.sock` into the coordinator container (Docker-outside-of-Docker) or running a privileged nested daemon (Docker-in-Docker), the harness uses a **Host Launch Service** (`ros-maintainer-harness gateway`) paired with an unprivileged **Maintainer Hub Container** (`ros-harness-hub`):
 
-### When Running the Harness Itself in a Container
-If you are running the harness inside a containerized environment (such as GitHub Codespaces, a remote cloudtop container, or containerized CI):
+1. **No Docker Socket**: `ros-harness-hub` never mounts `docker.sock` or `podman.sock`, and the Hub image (`ros-maintainer-harness-hub:latest`) does not include `docker-cli`, compilers, or ROS.
+2. **Scoped Workspace View**: The Hub container mounts `<workspace_root>` at its identical path (`rw`), with `<workspace_root>/config` (`ro`) and `<workspace_root>/audit` (`ro`) mounted read-only over it so the Hub agent cannot alter `policy.yaml` or tamper with `audit.jsonl`.
+3. **Launching Sibling Session Containers via HTTP MCP**: When the Hub agent needs to scaffold a PR or start a session container, it calls the Host Launch Service at `http://host.docker.internal:8765` using its `hub`-scoped bearer token (`ROS_MAINTAINER_GATEWAY_TOKEN`). The Host Launch Service validates the `LaunchSpec` against `policy.yaml` and invokes `docker run` on the host.
 
-1. **Docker-outside-of-Docker (DooD) (Recommended)**:
-   Mount the host's Docker socket into the harness container:
-   ```bash
-   -v /var/run/docker.sock:/var/run/docker.sock
-   ```
-   This allows the harness to instruct the host daemon to spawn sibling session containers.
-2. **Docker-in-Docker (DinD)**:
-   If socket mounting is prohibited by your infrastructure, you can run a nested Docker daemon inside the harness container (`docker:dind`). Ensure the container runs with `--privileged`.
+### Building and Managing the Hub Container
+
+```bash
+# Build the Hub image from a clean wheel and packaged Dockerfile.hub
+ros-maintainer-harness -w ~/ros_maintenance_ws hub build
+
+# Start the Gateway Launch Service and the Hub container
+ros-maintainer-harness -w ~/ros_maintenance_ws gateway start
+ros-maintainer-harness -w ~/ros_maintenance_ws hub start
+
+# Check Hub status, version alignment, gateway reachability, and mount verification
+ros-maintainer-harness -w ~/ros_maintenance_ws hub status --json
+ros-maintainer-harness -w ~/ros_maintenance_ws hub inspect-mounts --json
+
+# Attach the host OpenCode UI/TUI to the Hub agent
+ros-maintainer-harness -w ~/ros_maintenance_ws hub attach
+
+# Open a human debugging shell inside the Hub container
+ros-maintainer-harness -w ~/ros_maintenance_ws hub shell
+
+# Stop the Hub container (leaves running session containers untouched)
+ros-maintainer-harness -w ~/ros_maintenance_ws hub stop
+```
 
 ---
 
@@ -132,3 +147,22 @@ The generated `.devcontainer/devcontainer.json` automatically includes:
 ```
 
 This maps `host.docker.internal` inside Linux containers directly to the host machine's IP address, allowing scripts and extensions inside the container to connect to the host gateway without exposing the gateway to the public network.
+
+---
+
+## 7. Environment Diagnostics (`doctor --json`)
+
+Run `ros-maintainer-harness doctor [--json]` to verify the container engine (OrbStack, Docker Desktop, or Linux Docker), architecture alignment, Gateway Launch Service health, Hub container mounts, session image platform compatibility, and OpenCode client/credential readiness:
+
+```bash
+ros-maintainer-harness -w ~/ros_maintenance_ws doctor --json
+```
+
+The JSON output includes:
+- `engine`: `runtime`, `reachable`, `kind` (`orbstack`, `docker-desktop`, `linux-docker`, `podman`), `docker_host`, `context`, `host_arch`, `engine_arch`, and `arch_mismatch`.
+- `gateway_service`: `running`, `bind_host`, `port`, `pid`, `version`, `version_matches_host`, and `reachable_from_hub`.
+- `hub`: `image_present`, `running`, `image_version`, `version_matches_host`, `mounts_verified`, `no_docker_socket`, `config_read_only`, `audit_read_only`, and `drifts`.
+- `session_images`: `host_arch`, `default_images`, and `unsupported_arm64_distros`.
+- `opencode`: `installed`, `path`, `version`, `llm_credential_configured`, and `configured_llm_providers` (key names only, never secret values).
+- `remediations`: list of `{component, issue, fix_command}` entries with exact CLI commands to resolve each issue.
+
