@@ -126,6 +126,11 @@ class WorkspaceLayout:
         if not (self.root / 'AGENTS.md').exists():
             write_workspace_agent_instructions(self.root)
 
+        # Write workspace-level opencode.json for the Hub container if not present
+        from .mcp_config import write_opencode_config
+        if not (self.root / 'opencode.json').exists():
+            write_opencode_config(target_dir=self.root, workspace_path=self.root, role='hub')
+
         # Install workspace-level PreToolUse container hooks (.agents/hooks.json, .claude/settings.json)
         from .hooks import install_hooks_config
         install_hooks_config(target_dir=self.root, workspace_root=self.root)

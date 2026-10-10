@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -23,14 +24,21 @@ import re
 import shutil
 import subprocess
 from typing import Any, Dict, List, Optional
+import urllib.error
+import urllib.parse
+import urllib.request
 
 from .approval import ApprovalManager
 from .ci import CIMonitorService, CITracker, JenkinsManager
 from .devcontainer import (
     check_token_and_environment,
     get_container_status,
+    get_session_attach_info,
+    load_session_attach_state,
+    save_session_attach_state,
     start_session_container,
 )
+from .runner import CommandRunner
 from .scaffolder import scaffold_session_from_pr
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
@@ -69,6 +77,7 @@ __all__ = [
     'parse_timeline_summary',
     'query_open_github_prs',
     'read_session_metadata',
+    'seed_opencode_session_prompt',
     'start_session_conversation',
     'write_session_metadata',
 ]
@@ -130,11 +139,17 @@ def check_worktree_dirty(src_dir: Path) -> Dict[str, bool]:
     return dirty_map
 
 
-def format_conversation_link(label: str, conversation_id: Optional[str]) -> Optional[str]:
-    """Format a clickable conversation:// markdown link."""
-    if not conversation_id:
-        return None
-    return f"[{label}](conversation://{conversation_id})"
+def format_conversation_link(
+    label: str,
+    conversation_id: Optional[str],
+    opencode_url: Optional[str] = None,
+) -> Optional[str]:
+    """Format a clickable conversation:// or OpenCode markdown link."""
+    if conversation_id:
+        return f"[{label}](conversation://{conversation_id})"
+    if opencode_url:
+        return f"[{label}]({opencode_url})"
+    return None
 
 
 def format_session_dir_link(label: str, session_dir: Path) -> str:
@@ -145,12 +160,14 @@ def format_session_dir_link(label: str, session_dir: Path) -> str:
 def get_workspace_status(
     workspace: WorkspaceLayout,
     check_containers: bool = True,
+    runner: Optional[CommandRunner] = None,
+    state_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Build a comprehensive dashboard of all sessions, containers, CI runs, and approvals
     in the maintainer workspace for the Hub agent or CLI.
     """
-    env_report = check_token_and_environment(workspace.root)
+    env_report = check_token_and_environment(workspace.root, runner=runner, state_dir=state_dir)
     session_mgr = SessionManager(workspace)
     approval_mgr = ApprovalManager(workspace.audit_dir / 'approvals.json')
     ci_tracker = CITracker(workspace.audit_dir / 'ci_runs.json')
@@ -183,6 +200,7 @@ def get_workspace_status(
             c_status = get_container_status(
                 s.session_id,
                 runtime=env_report.get('container_runtime'),
+                runner=runner,
             )
         else:
             c_status = {
@@ -194,12 +212,23 @@ def get_workspace_status(
         if c_status.get('running'):
             running_containers_count += 1
 
+        attach_info = get_session_attach_info(
+            session_id=s.session_id,
+            workspace_root=workspace.root,
+            session_dir=s.session_dir,
+            state_dir=state_dir,
+            runtime=env_report.get('container_runtime'),
+            runner=runner,
+        )
+        oc_url = attach_info.get('url') or meta.get('opencode_url')
+        oc_session_id = attach_info.get('opencode_session_id') or meta.get('opencode_session_id')
+
         latest_ci_obj = ci_tracker.get_latest_run_for_session(s.session_id)
         latest_ci = latest_ci_obj.to_dict() if latest_ci_obj else None
         sess_approvals = [a for a in pending_approvals if a.get('session_id') == s.session_id]
 
-        conv_id = meta.get('conversation_id')
-        conv_link = format_conversation_link(s.session_id, conv_id)
+        conv_id = meta.get('conversation_id') or oc_session_id
+        conv_link = format_conversation_link(s.session_id, conv_id, opencode_url=oc_url)
         dir_link = format_session_dir_link(s.session_id, s.session_dir)
 
         session_summaries.append({
@@ -215,6 +244,10 @@ def get_workspace_status(
             'pr_author': meta.get('pr_author'),
             'conversation_id': conv_id,
             'conversation_link': conv_link,
+            'opencode_session_id': oc_session_id,
+            'opencode_url': oc_url,
+            'agent_running': bool(c_status.get('running') and oc_url),
+            'attach_command': attach_info.get('attach_command'),
             'hub_conversation_id': meta.get('hub_conversation_id'),
             'active_branches': s.active_branches,
             'git_dirty': git_dirty,
@@ -614,6 +647,82 @@ def build_task_conversation_prompt(
 {hub_section}{extra_section}"""
 
 
+def seed_opencode_session_prompt(
+    opencode_url: str,
+    password: Optional[str],
+    session_dir: Path,
+    title: str,
+    prompt: str,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    """
+    Create an OpenCode session on the in-container `opencode serve` endpoint and seed its
+    initial prompt asynchronously via the OpenCode HTTP API.
+    """
+    base_url = opencode_url.rstrip('/')
+    dir_q = urllib.parse.quote(str(session_dir.resolve()))
+    headers: Dict[str, str] = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+    }
+    if password:
+        creds = base64.b64encode(f"opencode:{password}".encode('utf-8')).decode('ascii')
+        headers['Authorization'] = f"Basic {creds}"
+
+    create_url = f"{base_url}/session?directory={dir_q}"
+    create_body = json.dumps({'title': title}).encode('utf-8')
+    try:
+        req = urllib.request.Request(create_url, data=create_body, headers=headers, method='POST')
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw_create = resp.read().decode('utf-8', errors='replace')
+            data = json.loads(raw_create) if raw_create.strip() else {}
+    except Exception as e:
+        return {'success': False, 'error': f"Failed to create OpenCode session at {base_url}: {e}"}
+
+    oc_session_id = (
+        data.get('id')
+        or data.get('sessionID')
+        or data.get('session_id')
+    )
+    if not oc_session_id:
+        return {
+            'success': False,
+            'error': f"OpenCode server at {base_url} did not return a session id.",
+        }
+
+    prompt_payload = json.dumps({
+        'parts': [{'type': 'text', 'text': prompt}],
+    }).encode('utf-8')
+
+    for endpoint in (f"session/{oc_session_id}/prompt_async", f"session/{oc_session_id}/message"):
+        prompt_url = f"{base_url}/{endpoint}?directory={dir_q}"
+        try:
+            p_req = urllib.request.Request(prompt_url, data=prompt_payload, headers=headers, method='POST')
+            with urllib.request.urlopen(p_req, timeout=timeout) as p_resp:
+                p_resp.read()
+            break
+        except urllib.error.HTTPError as he:
+            if he.code == 404 and endpoint.endswith('prompt_async'):
+                continue
+            return {
+                'success': False,
+                'opencode_session_id': str(oc_session_id),
+                'error': f"Failed to seed OpenCode prompt at {prompt_url}: HTTP {he.code}",
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'opencode_session_id': str(oc_session_id),
+                'error': f"Failed to seed OpenCode prompt at {prompt_url}: {e}",
+            }
+
+    return {
+        'success': True,
+        'opencode_session_id': str(oc_session_id),
+        'url': base_url,
+    }
+
+
 def start_session_conversation(
     workspace: WorkspaceLayout,
     pr_ref: Optional[str] = None,
@@ -624,6 +733,8 @@ def start_session_conversation(
     mode: str = 'auto',
     model: Optional[str] = None,
     auto_start_container: bool = True,
+    runner: Optional[CommandRunner] = None,
+    state_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Scaffold (if needed) a session and start or prepare a dedicated task conversation for it.
@@ -635,11 +746,14 @@ def start_session_conversation(
         distro: Optional ROS distro override.
         extra_instructions: Optional specific instructions from the maintainer for this task.
         hub_conversation_id: Optional conversation ID of the calling Hub conversation.
-        mode: 'auto' (uses `agentapi new-conversation` if available, else returns prompt for subagent),
+        mode: 'auto' (prefers in-container 'opencode', then 'agentapi', else 'prompt_only'),
+              'opencode' (start container + seed OpenCode session via HTTP API),
               'agentapi' (launch top-level conversation via `agentapi`), or
               'prompt_only' (prepare session and return prompt for subagent delegation).
         model: Optional model tier for `agentapi new-conversation` ('flash_lite', 'flash', 'pro').
         auto_start_container: Pre-start the detached session container when environment is ready.
+        runner: Optional injectable CommandRunner for container operations.
+        state_dir: Optional override for host state directory.
     """
     if not workspace.is_initialized():
         workspace.initialize()
@@ -676,18 +790,30 @@ def start_session_conversation(
     if effective_hub_id:
         write_session_metadata(session_dir, {'hub_conversation_id': effective_hub_id})
 
-    # Pre-start the session container if environment is ready so the task agent has an active container immediately
+    # Pre-start the session container if environment is ready (or if mode=='opencode')
     container_info: Optional[Dict[str, Any]] = None
     if auto_start_container:
-        env_check = check_token_and_environment(workspace.root)
-        if env_check.get('ready'):
+        env_check = check_token_and_environment(workspace.root, runner=runner, state_dir=state_dir)
+        if env_check.get('ready') or mode == 'opencode' or runner is not None:
             container_info = start_session_container(
                 session_id=final_session_id,
                 session_dir=session_dir,
                 workspace_root=workspace.root,
                 distro=final_distro,
                 runtime=env_check.get('container_runtime'),
+                runner=runner,
+                state_dir=state_dir,
             )
+            if container_info and not container_info.get('success'):
+                status_code = container_info.get('status')
+                if status_code in ('max_concurrent_sessions_exceeded', 'policy_denied'):
+                    raise RuntimeError(container_info.get('error') or 'Container start denied by policy.')
+
+    task_md_path = session_dir / 'TASK.md'
+    task_md_text = task_md_path.read_text(encoding='utf-8').strip() if task_md_path.is_file() else ''
+    merged_extra = extra_instructions or ''
+    if task_md_text and task_md_text not in merged_extra:
+        merged_extra = (f"{merged_extra}\n\n{task_md_text}").strip() if merged_extra else task_md_text
 
     task_prompt = build_task_conversation_prompt(
         session_id=final_session_id,
@@ -696,7 +822,7 @@ def start_session_conversation(
         distro=final_distro,
         pr_ref=pr_shorthand or pr_ref,
         pr_title=pr_title,
-        extra_instructions=extra_instructions,
+        extra_instructions=merged_extra or None,
         hub_conversation_id=effective_hub_id,
     )
 
@@ -704,12 +830,45 @@ def start_session_conversation(
     if len(title) > 80:
         title = title[:77] + '...'
 
-    agentapi_bin = find_agentapi_executable()
-    use_agentapi = (mode == 'agentapi') or (mode == 'auto' and agentapi_bin is not None)
-
     spawned_conv_id: Optional[str] = None
+    opencode_session_id: Optional[str] = None
+    opencode_url: Optional[str] = None
     launch_method = 'prompt_only'
     agentapi_output = None
+
+    attach_state = load_session_attach_state(final_session_id, state_dir=state_dir)
+    if container_info and container_info.get('opencode_url'):
+        opencode_url = str(container_info['opencode_url'])
+    elif attach_state.get('url'):
+        opencode_url = str(attach_state['url'])
+
+    if mode in ('auto', 'opencode') and opencode_url:
+        seed_res = seed_opencode_session_prompt(
+            opencode_url=opencode_url,
+            password=attach_state.get('password'),
+            session_dir=session_dir,
+            title=title,
+            prompt=task_prompt,
+        )
+        if seed_res.get('success'):
+            launch_method = 'opencode'
+            opencode_session_id = seed_res.get('opencode_session_id')
+            spawned_conv_id = opencode_session_id
+            if attach_state.get('port') and attach_state.get('password'):
+                save_session_attach_state(
+                    session_id=final_session_id,
+                    workspace_root=workspace.root,
+                    session_dir=session_dir,
+                    port=int(attach_state['port']),
+                    password=str(attach_state['password']),
+                    opencode_session_id=opencode_session_id,
+                    state_dir=state_dir,
+                )
+
+    agentapi_bin = find_agentapi_executable()
+    use_agentapi = (mode == 'agentapi') or (
+        mode == 'auto' and launch_method == 'prompt_only' and agentapi_bin is not None
+    )
 
     if use_agentapi and agentapi_bin:
         cmd = [agentapi_bin, 'new-conversation', f'--title={title}']
@@ -738,15 +897,23 @@ def start_session_conversation(
     updates: Dict[str, Any] = {'status': 'investigating'}
     if spawned_conv_id:
         updates['conversation_id'] = spawned_conv_id
+    if opencode_session_id:
+        updates['opencode_session_id'] = opencode_session_id
+    if opencode_url:
+        updates['opencode_url'] = opencode_url
     meta = write_session_metadata(session_dir, updates)
 
     timeline = TimelineLogger(final_session_id, session_dir, workspace.audit_log_path)
-    if launch_method == 'agentapi':
+    if launch_method == 'opencode':
+        link_str = format_conversation_link(final_session_id, spawned_conv_id, opencode_url=opencode_url)
+        timeline.log_status(f"Started in-container OpenCode session ({link_str or opencode_url}).")
+    elif launch_method == 'agentapi':
         link_str = format_conversation_link(final_session_id, spawned_conv_id) or 'via agentapi'
         timeline.log_status(f"Started dedicated task conversation ({link_str}).")
     else:
         timeline.log_status("Prepared task prompt for dedicated session agent/subagent.")
 
+    attach_cmd = f"ros-maintainer-harness -w {workspace.root.resolve()} session attach {final_session_id}"
     return {
         'success': True,
         'session_id': final_session_id,
@@ -758,7 +925,10 @@ def start_session_conversation(
         'launch_method': launch_method,
         'title': title,
         'conversation_id': spawned_conv_id,
-        'conversation_link': format_conversation_link(final_session_id, spawned_conv_id),
+        'conversation_link': format_conversation_link(final_session_id, spawned_conv_id, opencode_url=opencode_url),
+        'opencode_session_id': opencode_session_id,
+        'opencode_url': opencode_url,
+        'attach_command': attach_cmd,
         'hub_conversation_id': meta.get('hub_conversation_id'),
         'task_prompt': task_prompt,
         'agentapi_output': agentapi_output,

@@ -553,6 +553,111 @@ class TestDevcontainer(unittest.TestCase):
             hub_inspect_res = inspect_hub_container_mounts(workspace_root=ws_root, runner=runner)
             self.assertTrue(hub_inspect_res['verified'])
 
+    def test_session_opencode_lifecycle_and_concurrency_limit(self):
+        from ros_maintainer_agent_harness.devcontainer import (
+            attach_to_session_opencode,
+            get_session_attach_info,
+            load_session_attach_state,
+            start_session_container,
+            stop_session_container,
+        )
+        from ros_maintainer_agent_harness.runner import FakeCommandRunner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            ws_root = root / 'ws'
+            state_dir = root / 'state'
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+
+            # Set max_concurrent_sessions to 1 in policy.yaml
+            import yaml
+
+            policy_path = ws_root / 'config' / 'policy.yaml'
+            policy_data = yaml.safe_load(policy_path.read_text(encoding='utf-8')) or {}
+            policy_data.setdefault('policies', {}).setdefault('containers', {})['max_concurrent_sessions'] = 1
+            policy_path.write_text(yaml.safe_dump(policy_data), encoding='utf-8')
+
+            sess1_dir = ws_root / 'sessions' / 'sess-1'
+            sess2_dir = ws_root / 'sessions' / 'sess-2'
+            sess1_dir.mkdir(parents=True)
+            sess2_dir.mkdir(parents=True)
+
+            runner = FakeCommandRunner(
+                available_binaries={'docker': '/usr/bin/docker', 'opencode': '/usr/bin/opencode'}
+            )
+            runner.add_canned(['inspect', 'ros-harness-sess-1'], returncode=1, stderr='No such object')
+            runner.add_canned(['inspect', 'ros-harness-sess-2'], returncode=1, stderr='No such object')
+            runner.add_canned(['docker', 'run', '-d'], returncode=0, stdout='cid-sess-1\n')
+
+            start1 = start_session_container(
+                session_id='sess-1',
+                session_dir=sess1_dir,
+                workspace_root=ws_root,
+                runner=runner,
+                state_dir=state_dir,
+            )
+            self.assertTrue(start1['success'])
+            self.assertIsNotNone(start1.get('opencode_port'))
+            self.assertTrue((sess1_dir / 'opencode.json').is_file())
+
+            state1 = load_session_attach_state('sess-1', state_dir=state_dir)
+            self.assertEqual(state1['port'], start1['opencode_port'])
+            self.assertTrue(str(state1['password']).startswith('rmah_oc_'))
+
+            # Mark sess-1 container as running
+            runner.canned.clear()
+            runner.add_canned(['inspect', 'ros-harness-sess-1'], returncode=0, stdout='true\n')
+            runner.add_canned(['inspect', 'ros-harness-sess-2'], returncode=1, stderr='No such object')
+
+            attach_info = get_session_attach_info(
+                session_id='sess-1',
+                workspace_root=ws_root,
+                session_dir=sess1_dir,
+                state_dir=state_dir,
+                runner=runner,
+            )
+            self.assertTrue(attach_info['container_running'])
+            self.assertTrue(attach_info['agent_running'])
+            self.assertTrue(attach_info['password_configured'])
+            # Password value must never be exposed in get_session_attach_info
+            self.assertNotIn(state1['password'], json.dumps(attach_info))
+
+            # Test attach_to_session_opencode passes password via env, not argv
+            att_res = attach_to_session_opencode(
+                session_id='sess-1',
+                workspace_root=ws_root,
+                runner=runner,
+                state_dir=state_dir,
+            )
+            self.assertTrue(att_res['success'])
+            att_call = runner.calls[-1]
+            self.assertEqual(att_call.argv[:2], ['opencode', 'attach'])
+            self.assertNotIn(state1['password'], ' '.join(att_call.argv))
+            self.assertEqual(att_call.env.get('OPENCODE_SERVER_PASSWORD'), state1['password'])
+
+            # Starting sess-2 while sess-1 is running and max_concurrent_sessions=1 must fail
+            start2 = start_session_container(
+                session_id='sess-2',
+                session_dir=sess2_dir,
+                workspace_root=ws_root,
+                runner=runner,
+                state_dir=state_dir,
+            )
+            self.assertFalse(start2['success'])
+            self.assertEqual(start2['status'], 'max_concurrent_sessions_exceeded')
+
+            # Stopping sess-1 revokes its token and frees its port
+            stop1 = stop_session_container(
+                session_id='sess-1',
+                runner=runner,
+                state_dir=state_dir,
+            )
+            self.assertTrue(stop1['success'])
+            self.assertEqual(stop1['freed_port'], start1['opencode_port'])
+            self.assertGreaterEqual(stop1['revoked_tokens'], 1)
+            self.assertEqual(load_session_attach_state('sess-1', state_dir=state_dir), {})
+
 
 if __name__ == '__main__':
     unittest.main()

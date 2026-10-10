@@ -57,6 +57,35 @@ class TestAuditRecords(unittest.TestCase):
             self.assertIn('git_push', formatted)
             self.assertIn('Cherry-pick commit', formatted)
 
+    def test_redact_llm_keys_and_opencode_password(self):
+        import os
+        from unittest.mock import patch
+        from ros_maintainer_agent_harness.audit import redact_credentials
+
+        fake_gemini_key = 'AIza' + 'SyA1234567890abcdefghijklmnopqrstuv'
+        raw = (
+            "ANTHROPIC_API_KEY=sk-ant-api03-1234567890abcdef "
+            "OPENAI_API_KEY=sk-proj-1234567890abcdefghijklmn "
+            f"GEMINI_API_KEY={fake_gemini_key} "
+            "OPENROUTER_API_KEY=sk-or-v1-1234567890abcdef "
+            "OPENCODE_SERVER_PASSWORD=rmah_oc_secretpass123456 "
+            "Bearer rmah_tok_gatewaysecret7890"
+        )
+        scrubbed = redact_credentials(raw)
+        self.assertNotIn('sk-ant-api03-1234567890abcdef', scrubbed)
+        self.assertNotIn('sk-proj-1234567890abcdefghijklmn', scrubbed)
+        self.assertNotIn(fake_gemini_key, scrubbed)
+        self.assertNotIn('sk-or-v1-1234567890abcdef', scrubbed)
+        self.assertNotIn('rmah_oc_secretpass123456', scrubbed)
+        self.assertNotIn('rmah_tok_gatewaysecret7890', scrubbed)
+        self.assertIn('***REDACTED_TOKEN***', scrubbed)
+
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'custom_anthropic_secret_value_xyz'}):
+            self.assertNotIn(
+                'custom_anthropic_secret_value_xyz',
+                redact_credentials("Using key custom_anthropic_secret_value_xyz in request"),
+            )
+
 
 if __name__ == '__main__':
     unittest.main()

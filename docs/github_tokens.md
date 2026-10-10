@@ -138,3 +138,20 @@ Supplying a read-only fine-grained token increases this limit to **5,000 request
 - **Never mount host SSH private keys (`~/.ssh`)** into the container.
 - **Use short expirations** (30 to 90 days) for container tokens and rotate them periodically.
 - **Review audit logs**: Periodically inspect `audit/audit.jsonl` on the host to review what actions the gateway performed on behalf of the agent.
+
+---
+
+## 7. LLM Provider Credentials for In-Container Agents
+
+When OpenCode agents run inside the Hub container (`ros-harness-hub`) and Session containers (`ros-harness-<session_id>`), they need an LLM API key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENROUTER_API_KEY`) without mounting your host `~/.local/share/opencode` or `~/.config/opencode` directories into any container:
+
+1. **Store LLM Keys in the Host State Directory (`0600`)**:
+   ```bash
+   ros-maintainer-harness -w ~/ros_maintenance_ws token-setup --llm-key ANTHROPIC_API_KEY=<YOUR_KEY>
+   ```
+   This writes the key to `~/.local/state/ros_maintainer_agent_harness/credentials.env` (`0600`), which is never mounted into any container.
+2. **Environment-Only Inheritance (`-e KEY`)**:
+   When the Host Launch Service starts the Hub or Session container, it exports the configured LLM API keys in the `docker run` child process environment and passes `-e ANTHROPIC_API_KEY` (without putting the secret value on the `docker run` command line).
+3. **Automatic Audit & Log Redaction**:
+   `redact_credentials` in `audit.py` scrubs LLM API key prefixes (`sk-ant-...`, `sk-proj-...`, `AIza...`, `sk-or-v1-...`), `OPENCODE_SERVER_PASSWORD` (`rmah_oc_...`), and gateway bearer tokens (`rmah_tok_...`) before writing to `timeline.md`, `audit.jsonl`, or command output logs.
+

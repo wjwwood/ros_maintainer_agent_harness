@@ -342,6 +342,7 @@ SHARED_SESSION_AND_HUB_TOOLS = frozenset({
     'cancel_ci_run',
     'get_maintainer_rules',
     'check_policy',
+    'get_session_attach_info',
 })
 
 HUB_SESSION_OWNERSHIP_CHECK_TOOLS = frozenset({

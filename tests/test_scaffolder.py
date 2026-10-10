@@ -99,6 +99,8 @@ class TestScaffolder(unittest.TestCase):
             self.assertTrue(devcontainer_path.exists())
 
             # Check MCP configs
+            self.assertTrue((layout.root / 'opencode.json').exists())
+            self.assertTrue((res.session_dir / 'opencode.json').exists())
             self.assertTrue((res.session_dir / 'mcp.json').exists())
             self.assertTrue((res.session_dir / '.mcp.json').exists())
             self.assertTrue((res.session_dir / '.cursor' / 'mcp.json').exists())
