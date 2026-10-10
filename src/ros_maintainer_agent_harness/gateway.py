@@ -353,6 +353,21 @@ def is_pid_alive(pid: int) -> bool:
     """Return True if a process with `pid` exists and is alive."""
     if pid <= 0:
         return False
+    if os.name == 'nt':
+        import ctypes
+        process_query_limited = 0x1000
+        still_active = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(process_query_limited, False, int(pid))
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return exit_code.value == still_active
+            return True
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -558,7 +573,9 @@ def start_gateway_service(
     child_env['ROS_MAINTAINER_STATE_DIR'] = str(sdir)
     pkg_parent = str(Path(__file__).resolve().parent.parent)
     existing_pypath = child_env.get('PYTHONPATH', '')
-    child_env['PYTHONPATH'] = f"{pkg_parent}:{existing_pypath}" if existing_pypath else pkg_parent
+    child_env['PYTHONPATH'] = (
+        f"{pkg_parent}{os.pathsep}{existing_pypath}" if existing_pypath else pkg_parent
+    )
     for k, v in load_state_credentials(sdir, workspace_root=ws_root).items():
         if v and k not in child_env:
             child_env[k] = v
