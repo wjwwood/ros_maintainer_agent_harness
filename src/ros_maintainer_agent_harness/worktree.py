@@ -15,9 +15,11 @@
 import dataclasses
 import datetime
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +31,17 @@ from .workspace import WorkspaceLayout
 
 SESSION_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 SUBFOLDER_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_.-]+$')
+
+
+def _rmtree_force(target: Path) -> None:
+    def _handle_readonly(func, path, _exc_info):
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            func(path)
+        except Exception:
+            pass
+
+    shutil.rmtree(target, onerror=_handle_readonly)
 
 
 def validate_session_id(session_id: str) -> str:
@@ -322,7 +335,7 @@ class SessionManager:
 
         alternates_file = worktree_target / '.git' / 'objects' / 'info' / 'alternates'
         alternates_file.parent.mkdir(parents=True, exist_ok=True)
-        alternates_file.write_text(f"{source_objects_dir.as_posix()}\n", encoding='utf-8')
+        alternates_file.write_bytes(f"{source_objects_dir.as_posix()}\n".encode('utf-8'))
 
         # Copy remotes from repo_dir into worktree_target
         remotes_res = subprocess.run(
@@ -538,15 +551,15 @@ class SessionManager:
         src_dir = session_dir / 'src'
         if src_dir.exists():
             for sub in src_dir.iterdir():
-                if sub.is_dir() and (sub / '.git').exists():
-                    # Attempt clean git worktree remove
+                if sub.is_dir() and (sub / '.git').is_file():
+                    # Attempt clean git worktree remove for legacy linked worktrees
                     subprocess.run(
                         git_safe_cmd(sub, 'worktree', 'remove', str(sub)) + (['--force'] if force else []),
                         cwd=str(sub),
                         capture_output=True,
                     )
 
-        shutil.rmtree(session_dir, ignore_errors=True)
+        _rmtree_force(session_dir)
 
         if self.workspace.shared_repos_dir.exists():
             for repo_dir in self.workspace.shared_repos_dir.iterdir():

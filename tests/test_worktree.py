@@ -131,7 +131,7 @@ class TestSessionManager(unittest.TestCase):
             alternates_file = wt_path / '.git' / 'objects' / 'info' / 'alternates'
             self.assertTrue(alternates_file.is_file())
             self.assertIn(
-                str((shared_repo / '.git' / 'objects').resolve()),
+                (shared_repo / '.git' / 'objects').resolve().as_posix(),
                 alternates_file.read_text(encoding='utf-8'),
             )
 
