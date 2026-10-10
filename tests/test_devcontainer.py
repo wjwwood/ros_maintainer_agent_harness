@@ -197,3 +197,79 @@ class TestDevcontainer(unittest.TestCase):
 
                 stop_res = stop_session_container('session-pr-10', runtime='docker')
                 self.assertTrue(stop_res['success'])
+
+    def test_fake_command_runner_seam(self):
+        import subprocess
+        from ros_maintainer_agent_harness.runner import FakeCommandRunner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = Path(temp_dir)
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+            session_dir = ws_root / 'sessions' / 'session-runner-1'
+            session_dir.mkdir(parents=True, exist_ok=True)
+            save_workspace_env_var(ws_root, 'ROS_CONTAINER_GITHUB_TOKEN', 'github_pat_fake_ro')
+
+            fake_runner = FakeCommandRunner(
+                available_binaries={'docker': '/usr/bin/docker', 'gh': None},
+            )
+            fake_runner.add_prefix_response(
+                ['docker', 'inspect'],
+                returncode=1,
+                stdout='false\n',
+            )
+            fake_runner.add_prefix_response(
+                ['docker', 'run'],
+                returncode=0,
+                stdout='container_id_123\n',
+            )
+            fake_runner.add_prefix_response(
+                ['docker', 'exec'],
+                returncode=0,
+                stdout='runner exec output\n',
+            )
+
+            res = start_session_container(
+                session_id='session-runner-1',
+                session_dir=session_dir,
+                workspace_root=ws_root,
+                distro='jazzy',
+                runner=fake_runner,
+            )
+            self.assertTrue(res['success'])
+            self.assertEqual(res['status'], 'started')
+            self.assertEqual(res['runtime'], 'docker')
+
+            run_calls = [c for c in fake_runner.calls if len(c.args) >= 2 and c.args[1] == 'run']
+            self.assertEqual(len(run_calls), 1)
+            self.assertIn('docker.io/osrf/ros:jazzy-desktop', run_calls[0].args)
+            self.assertEqual(run_calls[0].env.get('GITHUB_TOKEN'), 'github_pat_fake_ro')
+
+            # Simulate running state and timeout on exec
+            running_runner = FakeCommandRunner(available_binaries={'docker': '/usr/bin/docker'})
+            running_runner.add_prefix_response(['docker', 'inspect'], returncode=0, stdout='true\n')
+            running_runner.add_handler(
+                lambda argv: len(argv) >= 2 and argv[1] == 'exec',
+                subprocess.TimeoutExpired(cmd=['docker', 'exec'], timeout=5, output='partial log'),
+            )
+            timeout_res = exec_in_session_container(
+                session_id='session-runner-1',
+                command='sleep 60',
+                timeout=5,
+                auto_start=False,
+                runner=running_runner,
+            )
+            self.assertFalse(timeout_res['success'])
+            self.assertEqual(timeout_res['returncode'], 124)
+            self.assertIn('partial log', timeout_res['stdout'])
+
+            # Simulate no container runtime available
+            no_rt_runner = FakeCommandRunner(available_binaries={})
+            no_rt_res = start_session_container(
+                session_id='session-runner-1',
+                session_dir=session_dir,
+                workspace_root=ws_root,
+                runner=no_rt_runner,
+            )
+            self.assertFalse(no_rt_res['success'])
+            self.assertIn('No container runtime', no_rt_res['error'])
