@@ -25,6 +25,7 @@ from .audit import format_audit_record, read_audit_records
 from .devcontainer import (
     check_token_and_environment,
     exec_in_session_container,
+    inspect_session_container_mounts,
     save_workspace_env_var,
     start_session_container,
     stop_session_container,
@@ -595,6 +596,35 @@ def handle_session_down(args: argparse.Namespace) -> int:
     else:
         print(f"Error stopping container: {res.get('error') or res.get('output')}", file=sys.stderr)
         return 1
+
+
+def handle_session_inspect_mounts(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    mgr = SessionManager(layout)
+    session_dir = mgr.get_session_dir(args.session_id) if mgr.session_exists(args.session_id) else None
+
+    report = inspect_session_container_mounts(
+        session_id=args.session_id,
+        workspace_root=ws_path,
+        session_dir=session_dir,
+    )
+    if getattr(args, 'json', False):
+        print(json.dumps(report, indent=2))
+    else:
+        if report['verified']:
+            print(
+                f"✅ Container '{report['container_name']}' mounts verified against expected session spec "
+                f"({len(report['actual_mounts'])} mount(s))."
+            )
+        else:
+            print(
+                f"❌ Container '{report['container_name']}' mount verification failed:",
+                file=sys.stderr,
+            )
+            for drift in report.get('drifts', []):
+                print(f"  - {drift}", file=sys.stderr)
+    return 0 if report['verified'] else 1
 
 
 def handle_session_start_conversation(args: argparse.Namespace) -> int:
@@ -1744,6 +1774,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     s_down.add_argument('session_id', type=str, help='Session ID')
 
+    # session inspect-mounts
+    s_im = session_subparsers.add_parser(
+        'inspect-mounts', parents=[ws_parent],
+        help='Inspect running session container mounts and verify against launch spec',
+    )
+    s_im.add_argument('session_id', type=str, help='Session ID')
+    s_im.add_argument('--json', action='store_true', help='Output verification report as JSON')
+
     # session start-conversation
     s_conv = session_subparsers.add_parser(
         'start-conversation', parents=[ws_parent],
@@ -2177,6 +2215,8 @@ def main():
             return handle_session_exec(args)
         elif args.session_action == 'down':
             return handle_session_down(args)
+        elif args.session_action == 'inspect-mounts':
+            return handle_session_inspect_mounts(args)
         elif args.session_action == 'start-conversation':
             return handle_session_start_conversation(args)
         elif args.session_action == 'status':

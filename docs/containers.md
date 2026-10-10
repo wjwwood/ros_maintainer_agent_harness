@@ -79,39 +79,35 @@ If you are running the harness inside a containerized environment (such as GitHu
 
 ---
 
-## 5. Workspace Layout & Volume Mounts
+## 5. Workspace Layout, Identical-Path Mounts, and Launch Policy
 
-The harness uses **Linked Git Worktrees** and volume bind mounts to keep sessions completely isolated while minimizing disk usage:
+Every container started by the harness is constructed as a typed `LaunchSpec` (`build_session_launch_spec` or `build_hub_launch_spec`) and validated by `validate_launch_spec` before any `docker run` or `podman run` invocation:
 
-```
-HOST DIRECTORY                                      CONTAINER MOUNT
-~/ros_maintenance_ws/
-├── config/maintainer_rules.md ─────────────────►  /workspace/MAINTAINER_RULES.md (ro)
-├── tools/ ─────────────────────────────────────►  /workspace/tools/
-├── shared_repos/ ──────────────────────────────►  ~/ros_maintenance_ws/shared_repos/
-└── sessions/pr-rclcpp-160/ ────────────────────►  /workspace/
-    ├── src/                                       /workspace/src/
-    ├── build/                                     /workspace/build/
-    ├── install/                                   /workspace/install/
-    ├── log/                                       /workspace/log/
-    ├── scratch/                                   /workspace/scratch/
-    └── timeline.md                                /workspace/timeline.md
-```
+- **Image Allowlist**: Only official distro images (`DEFAULT_DISTRO_IMAGES`), the Hub image (`ros-maintainer-harness-hub:latest`), and custom images explicitly listed in `policies.containers.allowed_images` in `config/policy.yaml` are permitted.
+- **Identical-Path Bind Mounts**: Every mount source is resolved through symlinks, must reside inside the workspace root, and is mounted at its identical host path inside the container (plus a `/workspace` compatibility symlink in session containers):
+  - **Session containers**: `<ws>/sessions/<id>` (`rw`), `<ws>/tools` (`ro`), `<ws>/shared_repos` (`ro` by default, `rw` only with `--writable-shared-repos`), and `<ws>/config/maintainer_rules.md` (`ro`).
+  - **Hub container**: `<ws>` (`rw`) with `<ws>/config` (`ro`) and `<ws>/audit` (`ro`) mounted read-only over it.
+  - **Forbidden mounts**: The Docker/Podman socket, `~/.ssh`, `~/.config/gh`, `~/.local/share/opencode`, `~/.config/opencode`, the host home directory, other sessions' directories, and the host `gh` binary are rejected by `validate_launch_spec`.
+- **Flag Restrictions and `seccomp=unconfined` Rationale**: `--privileged`, `--network=host`, `--pid=host`, `--ipc=host`, `--cap-add`, and `--device` are rejected. Session containers include `--security-opt=seccomp=unconfined` when `policies.containers.seccomp_unconfined: true` (default) because ROS 2 C++ test suites (GoogleTest death tests, ASAN/LSAN `ptrace` leak detection, and CycloneDDS/FastDDS shared-memory discovery syscalls) require it inside Docker; the Hub container never uses `seccomp=unconfined`.
+- **Loopback Port Publishing**: Any published container port (`PortPublishSpec`) must bind strictly to `127.0.0.1`.
 
-### Why Linked Git Worktrees & the `shared_repos/` Mount?
-Instead of making a full `git clone` for each session (which duplicates gigabytes of `.git/objects` history for large repositories like `ros2/rclcpp`), the harness maintains a central repository clone in `shared_repos/`.
+### Reference-Clone Checkouts and Read-Only `shared_repos/`
+When `shared_repos/` is mounted read-only (`:ro`), a traditional `git worktree` fails on `git add` or `git commit` inside the container because `git worktree` writes `index.lock`, `HEAD`, and new objects under `shared_repos/<repo>/.git/worktrees/<id>`.
 
-When a session is created:
+To keep `shared_repos/` strictly read-only while supporting full Git operations (`git status`, `git diff`, `git add`, `git commit`) inside the session container without duplicating repository history:
 1. The harness fetches the PR ref into `shared_repos/<repo>`.
-2. It links a new git worktree into `sessions/<id>/src/<repo>`.
-3. Because a git worktree's `.git` file points to the absolute host path of `shared_repos/<repo>/.git/worktrees/...`, the container also bind-mounts `shared_repos/` at its exact host path so `git status`, `git diff`, and `git commit` work seamlessly inside the container.
+2. `SessionManager.attach_worktree` initializes a standalone session-local `.git/` directory inside `sessions/<id>/src/<repo>/.git` (`rw`) and configures `.git/objects/info/alternates` pointing to `shared_repos/<repo>/.git/objects` (`:ro`).
+3. Existing objects are read zero-copy from `shared_repos/<repo>/.git/objects` (`:ro`), while the index, `HEAD`, branch refs, and any newly committed objects are written into `sessions/<id>/src/<repo>/.git/` (`rw`).
 
-### Managing Session Containers from the CLI or MCP
-You can start, execute commands in, and stop a session's container directly from the host CLI (or via the corresponding MCP tools `start_session_container`, `exec_in_session`, and `stop_session_container`):
+### Managing and Auditing Session Containers
+You can start, verify mounts on, execute commands in, and stop a session's container from the host CLI:
 
 ```bash
 # Start the detached session container (ros-harness-<session_id>)
 ros-maintainer-harness session up pr-rclcpp-160
+
+# Verify the running container's mounts against the expected LaunchSpec
+ros-maintainer-harness session inspect-mounts pr-rclcpp-160 --json
 
 # Execute build and test commands inside the container
 ros-maintainer-harness session exec pr-rclcpp-160 -- "colcon build --symlink-install"

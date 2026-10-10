@@ -15,9 +15,11 @@
 import dataclasses
 import datetime
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 from typing import Any, Dict, List, Optional
 
@@ -27,16 +29,33 @@ from .mcp_config import write_session_mcp_configs
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
 
-SESSION_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+SESSION_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 SUBFOLDER_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_.-]+$')
 
 
+def _rmtree_force(target: Path) -> None:
+    def _handle_readonly(func, path, _exc_info):
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            func(path)
+        except Exception:
+            pass
+
+    shutil.rmtree(target, onerror=_handle_readonly)
+
+
 def validate_session_id(session_id: str) -> str:
-    """Validate that session_id contains only alphanumeric, hyphen, and underscore characters."""
-    if not session_id or not SESSION_ID_PATTERN.match(session_id):
+    """Validate that session_id is 1-64 alphanumeric/hyphen/underscore chars with no path traversal."""
+    if (
+        not session_id
+        or '..' in session_id
+        or '/' in session_id
+        or '\\' in session_id
+        or not SESSION_ID_PATTERN.match(session_id)
+    ):
         raise ValueError(
             f"Invalid session_id '{session_id}': "
-            "must consist only of alphanumeric characters, hyphens, and underscores."
+            "must be 1-64 characters and consist only of alphanumeric characters, hyphens, and underscores."
         )
     return session_id
 
@@ -239,7 +258,13 @@ class SessionManager:
         target_subfolder: Optional[str] = None,
     ) -> Path:
         """
-        Create a linked Git worktree for repo_dir inside the session's src directory.
+        Create a session checkout for ``repo_dir`` inside the session's ``src/`` directory
+        using a session-local ``.git/`` directory and ``.git/objects/info/alternates``
+        pointing to ``repo_dir/.git/objects``.
+
+        This keeps ``shared_repos/`` strictly read-only inside the session container while
+        allowing ``git add`` and ``git commit`` to write index, HEAD, refs, and new objects
+        inside ``<session_dir>/src/<repo>/.git/``.
         """
         if not self.session_exists(session_id):
             self.create_session(session_id)
@@ -261,24 +286,147 @@ class SessionManager:
 
         from .git_ops import git_safe_cmd
 
-        # Check if the branch already exists in the repo
+        repo_dir = repo_dir.resolve()
+        common_res = subprocess.run(
+            git_safe_cmd(repo_dir, 'rev-parse', '--git-common-dir'),
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+        )
+        if common_res.returncode == 0 and common_res.stdout.strip():
+            cand = Path(common_res.stdout.strip())
+            source_git_dir = cand if cand.is_absolute() else (repo_dir / cand).resolve()
+        else:
+            source_git_dir = (repo_dir / '.git').resolve()
+        source_objects_dir = (source_git_dir / 'objects').resolve()
+
+        # Resolve target commit SHA in repo_dir (prefer branch_name if present, else base_ref)
         branch_check = subprocess.run(
             git_safe_cmd(repo_dir, 'rev-parse', '--verify', f'refs/heads/{branch_name}'),
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
         )
-
-        if branch_check.returncode == 0:
-            # Branch exists; checkout existing branch in worktree
-            cmd = git_safe_cmd(repo_dir, 'worktree', 'add', '--', str(worktree_target), branch_name)
+        if branch_check.returncode == 0 and branch_check.stdout.strip():
+            target_sha = branch_check.stdout.strip()
         else:
-            # Create new branch based on base_ref
-            cmd = git_safe_cmd(repo_dir, 'worktree', 'add', '-b', branch_name, '--', str(worktree_target), base_ref)
+            base_check = subprocess.run(
+                git_safe_cmd(repo_dir, 'rev-parse', '--verify', base_ref),
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+            )
+            if base_check.returncode != 0 or not base_check.stdout.strip():
+                raise RuntimeError(
+                    f"Failed to resolve ref '{branch_name}' or '{base_ref}' in {repo_dir}: {base_check.stderr}"
+                )
+            target_sha = base_check.stdout.strip()
 
-        res = subprocess.run(cmd, cwd=str(repo_dir), capture_output=True, text=True)
-        if res.returncode != 0:
-            raise RuntimeError(f"Failed to create git worktree in {worktree_target}: {res.stderr}")
+        worktree_target.mkdir(parents=True, exist_ok=True)
+        init_res = subprocess.run(
+            ['git', 'init'],
+            cwd=str(worktree_target),
+            capture_output=True,
+            text=True,
+        )
+        if init_res.returncode != 0:
+            shutil.rmtree(worktree_target, ignore_errors=True)
+            raise RuntimeError(f"Failed to initialize checkout in {worktree_target}: {init_res.stderr}")
+
+        alternates_file = worktree_target / '.git' / 'objects' / 'info' / 'alternates'
+        alternates_file.parent.mkdir(parents=True, exist_ok=True)
+        alternates_file.write_bytes(f"{source_objects_dir.as_posix()}\n".encode('utf-8'))
+
+        # Copy remotes from repo_dir into worktree_target
+        remotes_res = subprocess.run(
+            git_safe_cmd(repo_dir, 'remote'),
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+        )
+        if remotes_res.returncode == 0:
+            for rem in remotes_res.stdout.splitlines():
+                rem_name = rem.strip()
+                if not rem_name:
+                    continue
+                url_res = subprocess.run(
+                    git_safe_cmd(repo_dir, 'remote', 'get-url', '--', rem_name),
+                    cwd=str(repo_dir),
+                    capture_output=True,
+                    text=True,
+                )
+                if url_res.returncode == 0 and url_res.stdout.strip():
+                    subprocess.run(
+                        git_safe_cmd(worktree_target, 'remote', 'add', '--', rem_name, url_res.stdout.strip()),
+                        cwd=str(worktree_target),
+                        capture_output=True,
+                        text=True,
+                    )
+
+        # Copy local git user.name and user.email if configured on repo_dir
+        for cfg_key in ('user.name', 'user.email'):
+            cfg_res = subprocess.run(
+                git_safe_cmd(repo_dir, 'config', '--local', '--get', cfg_key),
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+            )
+            if cfg_res.returncode == 0 and cfg_res.stdout.strip():
+                subprocess.run(
+                    git_safe_cmd(worktree_target, 'config', cfg_key, cfg_res.stdout.strip()),
+                    cwd=str(worktree_target),
+                    capture_output=True,
+                    text=True,
+                )
+
+        # Copy remote-tracking refs and local branch refs (as origin/<branch> fallback) from repo_dir
+        refs_res = subprocess.run(
+            git_safe_cmd(
+                repo_dir,
+                'for-each-ref',
+                '--format=%(refname) %(objectname)',
+                'refs/remotes/',
+                'refs/heads/',
+            ),
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+        )
+        if refs_res.returncode == 0:
+            for line in refs_res.stdout.splitlines():
+                parts = line.strip().split()
+                if len(parts) != 2:
+                    continue
+                ref_name, obj_sha = parts
+                if ref_name.startswith('refs/remotes/'):
+                    subprocess.run(
+                        git_safe_cmd(worktree_target, 'update-ref', ref_name, obj_sha),
+                        cwd=str(worktree_target),
+                        capture_output=True,
+                        text=True,
+                    )
+                elif ref_name.startswith('refs/heads/'):
+                    short_branch = ref_name[len('refs/heads/'):]
+                    subprocess.run(
+                        git_safe_cmd(
+                            worktree_target, 'update-ref', f'refs/remotes/origin/{short_branch}', obj_sha
+                        ),
+                        cwd=str(worktree_target),
+                        capture_output=True,
+                        text=True,
+                    )
+
+        checkout_res = subprocess.run(
+            git_safe_cmd(worktree_target, 'checkout', '-B', branch_name, target_sha),
+            cwd=str(worktree_target),
+            capture_output=True,
+            text=True,
+        )
+        if checkout_res.returncode != 0:
+            shutil.rmtree(worktree_target, ignore_errors=True)
+            raise RuntimeError(
+                f"Failed to checkout branch '{branch_name}' in {worktree_target}: {checkout_res.stderr}"
+            )
 
         timeline = TimelineLogger(session_id, session_dir, self.workspace.audit_log_path)
         timeline.log_status(f"Attached worktree for `{repo_name}` on branch `{branch_name}`.")
@@ -403,15 +551,15 @@ class SessionManager:
         src_dir = session_dir / 'src'
         if src_dir.exists():
             for sub in src_dir.iterdir():
-                if sub.is_dir() and (sub / '.git').exists():
-                    # Attempt clean git worktree remove
+                if sub.is_dir() and (sub / '.git').is_file():
+                    # Attempt clean git worktree remove for legacy linked worktrees
                     subprocess.run(
                         git_safe_cmd(sub, 'worktree', 'remove', str(sub)) + (['--force'] if force else []),
                         cwd=str(sub),
                         capture_output=True,
                     )
 
-        shutil.rmtree(session_dir, ignore_errors=True)
+        _rmtree_force(session_dir)
 
         if self.workspace.shared_repos_dir.exists():
             for repo_dir in self.workspace.shared_repos_dir.iterdir():

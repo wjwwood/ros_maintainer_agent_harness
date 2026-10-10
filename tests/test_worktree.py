@@ -102,6 +102,79 @@ class TestSessionManager(unittest.TestCase):
                 mgr.create_session('session/subfolder')
             with self.assertRaises(ValueError):
                 mgr.create_session('')
+            with self.assertRaises(ValueError):
+                mgr.create_session('a' * 65)
+
+    def test_commit_with_readonly_shared_repo(self):
+        import os
+        import stat
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir).resolve()
+            ws_root = temp_path / 'ws'
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+
+            shared_repo = layout.shared_repos_dir / 'sample_pkg'
+            self._init_git_repo(shared_repo)
+
+            mgr = SessionManager(layout)
+            mgr.create_session('session-ro-commit', topic='Test RO shared_repos commit')
+            wt_path = mgr.attach_worktree(
+                session_id='session-ro-commit',
+                repo_dir=shared_repo,
+                branch_name='maintainer/ro_commit_test',
+            )
+
+            # Verify session-local .git directory and alternates file
+            self.assertTrue((wt_path / '.git').is_dir())
+            alternates_file = wt_path / '.git' / 'objects' / 'info' / 'alternates'
+            self.assertTrue(alternates_file.is_file())
+            self.assertIn(
+                (shared_repo / '.git' / 'objects').resolve().as_posix(),
+                alternates_file.read_text(encoding='utf-8'),
+            )
+
+            # Make shared_repo recursively read-only to simulate :ro container mount
+            original_modes = []
+            for root, dirs, files in os.walk(shared_repo):
+                root_p = Path(root)
+                for f_name in files:
+                    fp = root_p / f_name
+                    mode = fp.stat().st_mode
+                    original_modes.append((fp, mode))
+                    fp.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+                for d_name in dirs:
+                    dp = root_p / d_name
+                    mode = dp.stat().st_mode
+                    original_modes.append((dp, mode))
+                    dp.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+            root_mode = shared_repo.stat().st_mode
+            original_modes.append((shared_repo, root_mode))
+            shared_repo.chmod(root_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+            try:
+                (wt_path / 'README.md').write_text('# Updated while shared_repo is read-only\n')
+                subprocess.run(['git', 'add', 'README.md'], cwd=str(wt_path), check=True)
+                subprocess.run(
+                    ['git', 'commit', '-m', 'Commit with RO shared_repos'],
+                    cwd=str(wt_path),
+                    check=True,
+                )
+                log_res = subprocess.run(
+                    ['git', 'log', '-n', '1', '--pretty=%s'],
+                    cwd=str(wt_path),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertEqual(log_res.stdout.strip(), 'Commit with RO shared_repos')
+            finally:
+                for p, mode in reversed(original_modes):
+                    try:
+                        p.chmod(mode)
+                    except OSError:
+                        pass
 
 
 if __name__ == '__main__':

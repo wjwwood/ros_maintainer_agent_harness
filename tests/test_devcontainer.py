@@ -18,16 +18,27 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from ros_maintainer_agent_harness.config import ContainerPolicy, HarnessPolicy
 from ros_maintainer_agent_harness.devcontainer import (
+    build_hub_launch_spec,
+    build_session_launch_spec,
     check_token_and_environment,
     DEFAULT_DISTRO_IMAGES,
+    DEFAULT_HUB_IMAGE,
     exec_in_session_container,
     generate_devcontainer_config,
     get_image_for_distro,
+    HUB_CONTAINER_NAME,
+    inspect_hub_container_mounts,
+    inspect_session_container_mounts,
     load_workspace_env,
+    MountSpec,
+    PortPublishSpec,
     save_workspace_env_var,
     start_session_container,
     stop_session_container,
+    validate_launch_spec,
+    verify_container_mounts_against_spec,
     write_devcontainer_config,
 )
 from ros_maintainer_agent_harness.workspace import WorkspaceLayout
@@ -273,3 +284,275 @@ class TestDevcontainer(unittest.TestCase):
             )
             self.assertFalse(no_rt_res['success'])
             self.assertIn('No container runtime', no_rt_res['error'])
+
+    def test_launch_spec_and_argv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = Path(temp_dir).resolve()
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+
+            session_dir = (ws_root / 'sessions' / 'session-pr-42').resolve()
+            session_dir.mkdir(parents=True, exist_ok=True)
+
+            sess_spec = build_session_launch_spec(
+                session_id='session-pr-42',
+                session_dir=session_dir,
+                workspace_root=ws_root,
+                distro='rolling',
+                include_github_token=True,
+                ports=[PortPublishSpec(host_ip='127.0.0.1', host_port=4101, container_port=4101)],
+            )
+            is_valid, errs = validate_launch_spec(sess_spec)
+            self.assertTrue(is_valid, f"Expected valid session spec, got errors: {errs}")
+
+            argv = sess_spec.to_docker_run_argv(runtime='docker')
+            self.assertEqual(argv[:5], ['docker', 'run', '-d', '--name', 'ros-harness-session-pr-42'])
+            self.assertIn('--workdir', argv)
+            self.assertIn(str(session_dir), argv)
+            self.assertIn('--security-opt=seccomp=unconfined', argv)
+            self.assertIn('-p', argv)
+            self.assertIn('127.0.0.1:4101:4101', argv)
+            self.assertIn(f"{session_dir}:{session_dir}", argv)
+            self.assertIn(f"{(ws_root / 'tools').resolve()}:{(ws_root / 'tools').resolve()}:ro", argv)
+            self.assertIn(
+                f"{(ws_root / 'shared_repos').resolve()}:{(ws_root / 'shared_repos').resolve()}:ro",
+                argv,
+            )
+            self.assertIn(DEFAULT_DISTRO_IMAGES['rolling'], argv)
+
+            # Build and validate Hub LaunchSpec
+            hub_spec = build_hub_launch_spec(
+                workspace_root=ws_root,
+                ports=[PortPublishSpec(host_ip='127.0.0.1', host_port=4096, container_port=4096)],
+            )
+            hub_valid, hub_errs = validate_launch_spec(hub_spec)
+            self.assertTrue(hub_valid, f"Expected valid hub spec, got errors: {hub_errs}")
+
+            hub_argv = hub_spec.to_docker_run_argv(runtime='docker')
+            self.assertEqual(hub_argv[:5], ['docker', 'run', '-d', '--name', HUB_CONTAINER_NAME])
+            self.assertNotIn('--security-opt=seccomp=unconfined', hub_argv)
+            self.assertIn('--restart', hub_argv)
+            self.assertIn('unless-stopped', hub_argv)
+            self.assertIn(f"{ws_root}:{ws_root}", hub_argv)
+            self.assertIn(f"{(ws_root / 'config').resolve()}:{(ws_root / 'config').resolve()}:ro", hub_argv)
+            self.assertIn(f"{(ws_root / 'audit').resolve()}:{(ws_root / 'audit').resolve()}:ro", hub_argv)
+            self.assertIn(DEFAULT_HUB_IMAGE, hub_argv)
+
+    def test_validate_launch_spec_rejections(self):
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside_dir:
+            ws_root = Path(temp_dir).resolve()
+            outside_path = Path(outside_dir).resolve()
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+
+            sess_a = (ws_root / 'sessions' / 'session-a').resolve()
+            sess_b = (ws_root / 'sessions' / 'session-b').resolve()
+            sess_a.mkdir(parents=True, exist_ok=True)
+            sess_b.mkdir(parents=True, exist_ok=True)
+
+            # 1. Disallowed image
+            bad_img_spec = build_session_launch_spec('session-a', sess_a, ws_root, custom_image='evil/miner:v1')
+            valid, errs = validate_launch_spec(bad_img_spec)
+            self.assertFalse(valid)
+            self.assertTrue(any('not in the allowed image list' in e for e in errs))
+
+            # Allowed when added to policy.containers.allowed_images
+            custom_policy = HarnessPolicy(containers=ContainerPolicy(allowed_images=['evil/miner:*']))
+            valid_custom, _ = validate_launch_spec(bad_img_spec, policy=custom_policy)
+            self.assertTrue(valid_custom)
+
+            # 2. Mounting another session's directory
+            cross_sess_spec = build_session_launch_spec('session-a', sess_a, ws_root)
+            cross_sess_spec.mounts.append(MountSpec(source=str(sess_b), target=str(sess_b), read_only=False))
+            valid, errs = validate_launch_spec(cross_sess_spec)
+            self.assertFalse(valid)
+            self.assertTrue(any("cannot mount another session's directory" in e for e in errs))
+
+            # 3. Path traversal with '..'
+            dotdot_spec = build_session_launch_spec('session-a', sess_a, ws_root)
+            dotdot_spec.mounts.append(
+                MountSpec(
+                    source=f"{sess_a}/../session-b",
+                    target=f"{sess_a}/../session-b",
+                    read_only=True,
+                )
+            )
+            valid, errs = validate_launch_spec(dotdot_spec)
+            self.assertFalse(valid)
+            self.assertTrue(any("'..' path traversal" in e for e in errs))
+
+            # 4. Symlink escape outside workspace_root
+            symlink_escape = sess_a / 'escape_link'
+            try:
+                symlink_escape.symlink_to(outside_path, target_is_directory=True)
+                sym_spec = build_session_launch_spec('session-a', sess_a, ws_root)
+                sym_spec.mounts.append(
+                    MountSpec(source=str(symlink_escape), target=str(symlink_escape), read_only=True)
+                )
+                valid, errs = validate_launch_spec(sym_spec)
+                self.assertFalse(valid)
+                self.assertTrue(any('outside workspace root' in e for e in errs))
+            except OSError:
+                # Windows without developer mode may disallow symlinks
+                pass
+
+            # 5. Forbidden mounts: docker.sock, ~/.ssh, ~/.config/gh, ~/.local/share/opencode, gh binary
+            for bad_mount in (
+                '/var/run/docker.sock',
+                '/Users/alice/.ssh',
+                '/home/alice/.config/gh',
+                '/home/alice/.local/share/opencode',
+                '/usr/bin/gh',
+            ):
+                f_spec = build_session_launch_spec('session-a', sess_a, ws_root)
+                f_spec.mounts.append(MountSpec(source=bad_mount, target=bad_mount, read_only=True))
+                valid, errs = validate_launch_spec(f_spec)
+                self.assertFalse(valid, f"Expected {bad_mount} to be rejected")
+                self.assertTrue(any('forbidden' in e.lower() for e in errs))
+
+            # 6. Forbidden flags: --privileged, --network=host, --pid=host, --cap-add, --device
+            for bad_flags in (
+                ['--privileged'],
+                ['--network=host'],
+                ['--network', 'host'],
+                ['--pid=host'],
+                ['--cap-add=SYS_ADMIN'],
+                ['--device=/dev/kvm'],
+            ):
+                flag_spec = build_session_launch_spec('session-a', sess_a, ws_root)
+                flag_spec.extra_flags = list(bad_flags)
+                valid, errs = validate_launch_spec(flag_spec)
+                self.assertFalse(valid, f"Expected {bad_flags} to be rejected")
+                self.assertTrue(any('prohibited' in e.lower() for e in errs))
+
+            # 7. seccomp=unconfined forbidden on hub role
+            hub_seccomp = build_hub_launch_spec(ws_root)
+            hub_seccomp.security_opts = ['seccomp=unconfined']
+            valid, errs = validate_launch_spec(hub_seccomp)
+            self.assertFalse(valid)
+            self.assertTrue(any('seccomp=unconfined' in e for e in errs))
+
+            # 8. Non-loopback port publish rejected
+            wide_port_spec = build_session_launch_spec(
+                'session-a',
+                sess_a,
+                ws_root,
+                ports=[PortPublishSpec(host_ip='0.0.0.0', host_port=4096, container_port=4096)],
+            )
+            valid, errs = validate_launch_spec(wide_port_spec)
+            self.assertFalse(valid)
+            self.assertTrue(any("must bind strictly to '127.0.0.1'" in e for e in errs))
+
+            # 9. Non-identical mount source and target rejected
+            mismatch_spec = build_session_launch_spec('session-a', sess_a, ws_root)
+            mismatch_spec.mounts = [MountSpec(source=str(sess_a), target='/workspace', read_only=False)]
+            valid, errs = validate_launch_spec(mismatch_spec)
+            self.assertFalse(valid)
+            self.assertTrue(any('identical-path mount requirement' in e for e in errs))
+
+    def test_verify_and_inspect_container_mounts(self):
+        from ros_maintainer_agent_harness.runner import FakeCommandRunner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = Path(temp_dir).resolve()
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+
+            sess_dir = (ws_root / 'sessions' / 'session-pr-77').resolve()
+            sess_dir.mkdir(parents=True, exist_ok=True)
+
+            expected_spec = build_session_launch_spec('session-pr-77', sess_dir, ws_root)
+
+            matching_inspect_payload = [
+                {
+                    'Name': '/ros-harness-session-pr-77',
+                    'HostConfig': {'Privileged': False, 'NetworkMode': 'default'},
+                    'Mounts': [
+                        {
+                            'Type': 'bind',
+                            'Source': m.source,
+                            'Destination': m.target,
+                            'RW': not m.read_only,
+                        }
+                        for m in expected_spec.mounts
+                    ],
+                }
+            ]
+            report = verify_container_mounts_against_spec(matching_inspect_payload, expected_spec)
+            self.assertTrue(report['verified'], f"Unexpected drifts: {report['drifts']}")
+            self.assertEqual(report['drifts'], [])
+
+            # Drift: shared_repos mounted RW when RO was expected + unexpected extra mount + Privileged=True
+            drifted_mounts = []
+            for m in expected_spec.mounts:
+                if 'shared_repos' in m.source:
+                    drifted_mounts.append(
+                        {'Type': 'bind', 'Source': m.source, 'Destination': m.target, 'RW': True}
+                    )
+                else:
+                    drifted_mounts.append(
+                        {'Type': 'bind', 'Source': m.source, 'Destination': m.target, 'RW': not m.read_only}
+                    )
+            drifted_mounts.append(
+                {
+                    'Type': 'bind',
+                    'Source': str(ws_root / 'audit'),
+                    'Destination': str(ws_root / 'audit'),
+                    'RW': False,
+                }
+            )
+            drifted_payload = [
+                {
+                    'Name': '/ros-harness-session-pr-77',
+                    'HostConfig': {'Privileged': True, 'NetworkMode': 'host'},
+                    'Mounts': drifted_mounts,
+                }
+            ]
+            drift_report = verify_container_mounts_against_spec(drifted_payload, expected_spec)
+            self.assertFalse(drift_report['verified'])
+            self.assertTrue(any('Privileged=true' in d for d in drift_report['drifts']))
+            self.assertTrue(any("NetworkMode='host'" in d for d in drift_report['drifts']))
+            self.assertTrue(any('Mount mode drift' in d for d in drift_report['drifts']))
+            self.assertTrue(any('Unexpected extra mount' in d for d in drift_report['drifts']))
+
+            # Test inspect_session_container_mounts and inspect_hub_container_mounts via FakeCommandRunner
+            runner = FakeCommandRunner(available_binaries={'docker': '/usr/bin/docker'})
+            runner.add_prefix_response(
+                ['docker', 'inspect', 'ros-harness-session-pr-77'],
+                returncode=0,
+                stdout=json.dumps(matching_inspect_payload),
+            )
+            sess_inspect_res = inspect_session_container_mounts(
+                session_id='session-pr-77',
+                workspace_root=ws_root,
+                runner=runner,
+            )
+            self.assertTrue(sess_inspect_res['verified'])
+
+            hub_spec = build_hub_launch_spec(ws_root)
+            hub_payload = [
+                {
+                    'Name': f'/{HUB_CONTAINER_NAME}',
+                    'HostConfig': {'Privileged': False, 'NetworkMode': 'default'},
+                    'Mounts': [
+                        {
+                            'Type': 'bind',
+                            'Source': m.source,
+                            'Destination': m.target,
+                            'RW': not m.read_only,
+                        }
+                        for m in hub_spec.mounts
+                    ],
+                }
+            ]
+            runner.add_prefix_response(
+                ['docker', 'inspect', HUB_CONTAINER_NAME],
+                returncode=0,
+                stdout=json.dumps(hub_payload),
+            )
+            hub_inspect_res = inspect_hub_container_mounts(workspace_root=ws_root, runner=runner)
+            self.assertTrue(hub_inspect_res['verified'])
+
+
+if __name__ == '__main__':
+    unittest.main()
