@@ -51,6 +51,7 @@ from .ci import CIMonitorService, CITracker, JenkinsManager
 from .devcontainer import (
     check_token_and_environment,
     exec_in_session_container as do_exec_in_session_container,
+    get_session_attach_info as do_get_session_attach_info,
     start_session_container as do_start_session_container,
     stop_session_container as do_stop_session_container,
 )
@@ -2999,6 +3000,28 @@ def create_mcp_server(workspace: WorkspaceLayout, require_auth: bool = False) ->
             dry_run=dry_run,
             approval_mgr=approval_mgr,
         )
+
+    # 31. get_session_attach_info
+    @server.tool()
+    def get_session_attach_info(session_id: str) -> Dict[str, Any]:
+        """
+        Return connection metadata for attaching an OpenCode UI or CLI to a running session container
+        without exposing the raw `OPENCODE_SERVER_PASSWORD` value.
+
+        Args:
+            session_id: Session identifier.
+        """
+        if not session_mgr.session_exists(session_id):
+            return {'success': False, 'error': f"Session '{session_id}' not found."}
+
+        session_dir = session_mgr.get_session_dir(session_id)
+        info = do_get_session_attach_info(
+            session_id=session_id,
+            workspace_root=workspace.root,
+            session_dir=session_dir,
+        )
+        info['success'] = True
+        return info
 
     return server
 

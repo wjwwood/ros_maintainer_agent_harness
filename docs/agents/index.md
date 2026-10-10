@@ -7,6 +7,7 @@ The harness is designed to work with any AI coding agent that can either speak t
 When a session is created (via `session create` or `session from-pr`), the harness prepares everything an agent needs to work inside the isolated workspace:
 
 1. **MCP Client Configurations**: Automatically writes configuration files tailored for different editors and tools:
+   - `opencode.json`: OpenCode configuration (`{env:ROS_MAINTAINER_GATEWAY_TOKEN}` header + role tool permissions)
    - `mcp.json`: Generic MCP client configuration
    - `.mcp.json`: Claude Code / Claude Desktop configuration
    - `.cursor/mcp.json`: Cursor IDE MCP configuration
@@ -31,6 +32,7 @@ ros-maintainer-harness session launch <session_id> --agent <agent_name>
 ```
 
 Supported agent options:
+- `opencode`: Launches OpenCode in the session directory (or use `session attach <session_id>` to attach to the in-container OpenCode agent).
 - `antigravity`: Opens Antigravity in the session directory.
 - `claude`: Launches Claude Code in the session directory with `.mcp.json` active.
 - `cursor`: Opens Cursor in the session directory.

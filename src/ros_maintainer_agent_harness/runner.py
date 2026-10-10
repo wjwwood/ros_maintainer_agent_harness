@@ -39,6 +39,10 @@ class RecordedCall:
     timeout: Optional[float] = None
     input_data: Optional[str] = None
 
+    @property
+    def argv(self) -> List[str]:
+        return self.args
+
 
 class CommandRunner(Protocol):
     """Injectable command execution seam for container runtime and host CLI invocations."""
@@ -132,6 +136,10 @@ class FakeCommandRunner:
     calls: List[RecordedCall] = field(default_factory=list)
     _handlers: List[Tuple[Callable[[List[str]], bool], ResponseHandler]] = field(default_factory=list)
 
+    @property
+    def canned(self) -> List[Tuple[Callable[[List[str]], bool], ResponseHandler]]:
+        return self._handlers
+
     def which(self, binary: str) -> Optional[str]:
         if binary in self.available_binaries:
             return self.available_binaries[binary]
@@ -144,6 +152,34 @@ class FakeCommandRunner:
     ) -> None:
         """Register a response or callable handler for commands matching `predicate`."""
         self._handlers.append((predicate, response))
+
+    def add_canned(
+        self,
+        subsequence: Sequence[str],
+        *,
+        returncode: int = 0,
+        stdout: str = '',
+        stderr: str = '',
+    ) -> None:
+        """Register a canned CommandResult for any command containing `subsequence` tokens in order."""
+        tokens = [str(p) for p in subsequence]
+
+        def _matches(argv: List[str]) -> bool:
+            idx = 0
+            for item in argv:
+                if idx < len(tokens) and (item == tokens[idx] or tokens[idx] in item):
+                    idx += 1
+            return idx == len(tokens)
+
+        self.add_handler(
+            _matches,
+            CommandResult(
+                args=tokens,
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+            ),
+        )
 
     def add_prefix_response(
         self,

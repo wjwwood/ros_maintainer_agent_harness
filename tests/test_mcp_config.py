@@ -185,6 +185,85 @@ class TestMCPConfig(unittest.TestCase):
         self.assertEqual(shell_info['agent'], 'shell')
         self.assertEqual(shell_info['command'], ['bash'])
 
+        # OpenCode launch info
+        oc_info = get_agent_launch_info(
+            session_id='session-pr-100',
+            session_dir=session_dir,
+            workspace_path=ws_path,
+            agent='opencode',
+        )
+        self.assertEqual(oc_info['agent'], 'opencode')
+        self.assertEqual(
+            oc_info['command'],
+            ['ros-maintainer-harness', '-w', str(ws_path.resolve()), 'session', 'attach', 'session-pr-100'],
+        )
+
+    def test_opencode_config_and_instructions_without_token_leakage(self):
+        import os
+        from unittest.mock import patch
+        from ros_maintainer_agent_harness.instructions import (
+            get_opencode_hub_instructions,
+            get_opencode_session_instructions,
+        )
+        from ros_maintainer_agent_harness.mcp_config import (
+            generate_opencode_config,
+            write_opencode_config,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = Path(temp_dir) / 'ws'
+            session_dir = ws_root / 'sessions' / 'sess-1'
+            fake_home = Path(temp_dir) / 'home'
+            ws_root.mkdir(parents=True)
+            session_dir.mkdir(parents=True)
+
+            with patch.dict(os.environ, {'ROS_MAINTAINER_GATEWAY_TOKEN': 'rmah_tok_super_secret_should_never_write'}):
+                hub_cfg = generate_opencode_config(workspace_root=ws_root, role='hub', port=8765)
+                self.assertEqual(hub_cfg['mcp']['ros-maintainer-harness']['type'], 'remote')
+                self.assertEqual(
+                    hub_cfg['mcp']['ros-maintainer-harness']['url'],
+                    'http://host.docker.internal:8765/mcp',
+                )
+                self.assertEqual(
+                    hub_cfg['mcp']['ros-maintainer-harness']['headers']['Authorization'],
+                    'Bearer {env:ROS_MAINTAINER_GATEWAY_TOKEN}',
+                )
+                self.assertEqual(hub_cfg['permission']['edit']['config/*'], 'deny')
+                self.assertEqual(hub_cfg['permission']['edit']['audit/*'], 'deny')
+
+                sess_cfg = generate_opencode_config(workspace_root=ws_root, role='session', port=8765)
+                self.assertEqual(sess_cfg['permission']['edit'], 'allow')
+
+                hub_file = write_opencode_config(target_dir=ws_root, workspace_root=ws_root, role='hub')
+                sess_files = write_session_mcp_configs(session_dir=session_dir, workspace_path=ws_root)
+                self.assertIn('opencode', sess_files)
+                self.assertTrue((session_dir / 'opencode.json').is_file())
+
+                for p in [hub_file] + list(sess_files.values()):
+                    text = p.read_text(encoding='utf-8')
+                    self.assertNotIn('rmah_tok_super_secret_should_never_write', text)
+
+                global_written = install_global_mcp_config(
+                    workspace_path=ws_root,
+                    targets=['opencode'],
+                    home_dir=fake_home,
+                )
+                self.assertIn('opencode', global_written)
+                self.assertTrue((fake_home / '.config' / 'opencode' / 'opencode.json').is_file())
+
+            hub_md = get_opencode_hub_instructions(ws_root)
+            self.assertIn('Maintainer Hub', hub_md)
+            self.assertIn('NEVER', hub_md.upper())
+            self.assertIn('config/policy.yaml', hub_md)
+
+            sess_md = get_opencode_session_instructions(
+                session_id='sess-1',
+                session_dir=session_dir,
+                workspace_root=ws_root,
+            )
+            self.assertIn('sess-1', sess_md)
+            self.assertIn('colcon build', sess_md)
+
 
 if __name__ == '__main__':
     unittest.main()

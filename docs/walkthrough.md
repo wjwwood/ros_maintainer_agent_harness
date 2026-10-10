@@ -6,9 +6,34 @@ In this scenario, we are triaging an issue reported on `ros2/rclcpp#160` (a hypo
 
 ---
 
-## 1. Set Up the Session
+## 1. Starting from the Maintainer Hub Conversation (OpenCode Hub-and-Spoke)
 
-Run `session from-pr` with the PR reference:
+When running the three-tier Hub-and-Spoke deployment (`gateway start` + `hub start`), start by attaching OpenCode to the Maintainer Hub container:
+
+```bash
+ros-maintainer-harness -w ~/ros_maintenance_ws gateway start
+ros-maintainer-harness -w ~/ros_maintenance_ws hub start
+ros-maintainer-harness -w ~/ros_maintenance_ws hub attach
+```
+
+Inside the Hub conversation:
+1. Ask the Hub what needs attention:
+   - `"What is the status of things we're working on?"` -> calls `get_workspace_status()`.
+   - `"What should I work on next?"` -> calls `get_next_actions(repos=["ros2/rclcpp"])`.
+2. Ask the Hub to start a session for `ros2/rclcpp#160`:
+   - `"I want to work on ros2/rclcpp#160"`.
+   - The Hub calls `start_session_conversation(pr_ref="ros2/rclcpp#160", mode="auto")` on the Host Launch Service.
+   - The Launch Service scaffolds `sessions/pr-rclcpp-160`, starts `ros-harness-pr-rclcpp-160`, starts the in-container `opencode serve` agent, seeds the initial prompt from `TASK.md`, and returns the session attach command.
+3. Attach to the dedicated Session conversation from your host terminal (or switch to its endpoint in the OpenCode Desktop app):
+   ```bash
+   ros-maintainer-harness -w ~/ros_maintenance_ws session attach pr-rclcpp-160
+   ```
+
+---
+
+## 2. Direct CLI Session Setup & Agent Launch
+
+You can also scaffold a session and launch an agent directly from the host CLI:
 
 ```bash
 ros-maintainer-harness session from-pr ros2/rclcpp#160
@@ -18,26 +43,22 @@ Behind the scenes, the harness:
 1. **Queries GitHub**: Retrieves metadata (title, body, author, base branch, changed files).
 2. **Infers Target Distro**: Notes that the base branch is `jazzy`, so the target ROS distribution is Jazzy.
 3. **Prepares Shared Clones**: Checks if `shared_repos/ros2/rclcpp` exists; clones it if missing.
-4. **Creates Git Worktree**: Fetches the PR ref (`pull/160/head`) and creates a linked worktree at `sessions/pr-rclcpp-160/src/rclcpp` on branch `pr-160`.
+4. **Creates Git Worktree**: Fetches the PR ref (`pull/160/head`) and creates a reference-clone checkout at `sessions/pr-rclcpp-160/src/rclcpp` on branch `pr-160`.
 5. **Configures Devcontainer**: Writes `.devcontainer/devcontainer.json` referencing `osrf/ros:jazzy-desktop`.
-6. **Writes MCP Configs**: Generates `.mcp.json`, `.cursor/mcp.json`, and `.vscode/mcp.json`.
+6. **Writes MCP Configs**: Generates `opencode.json`, `.mcp.json`, `.cursor/mcp.json`, and `.vscode/mcp.json`.
 7. **Initializes Context**:
    - Creates `timeline.md` with an initial entry linking to the PR.
    - Creates `TASK.md` detailing the problem, files to inspect, and verification goals.
 
----
-
-## 2. Launch Your AI Agent
-
-Launch your preferred agent in the session. Here we use Claude Code:
+Launch your preferred agent in the session (for example, OpenCode or Claude Code):
 
 ```bash
 ros-maintainer-harness session launch pr-rclcpp-160 --agent claude
 ```
 
-Claude starts in `sessions/pr-rclcpp-160/` with the MCP server active and environment variables set.
+The agent starts in `sessions/pr-rclcpp-160/` with the MCP server active and environment variables set.
 
-Give Claude its initial prompt:
+Give the agent its initial prompt:
 
 ```text
 Please read TASK.md and MAINTAINER_RULES.md. First inspect the diff in src/rclcpp against origin/rolling for any suspicious modifications to build scripts, test code, or CI workflows, and check for committed credentials. Once verified safe, build the package with colcon and run the test suite to reproduce the reported issue.

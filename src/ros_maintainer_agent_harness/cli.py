@@ -23,8 +23,10 @@ from typing import List, Optional, Tuple
 from .approval import ApprovalManager
 from .audit import format_audit_record, read_audit_records
 from .devcontainer import (
+    attach_to_session_opencode,
     check_token_and_environment,
     exec_in_session_container,
+    get_session_attach_info,
     inspect_session_container_mounts,
     save_workspace_env_var,
     start_session_container,
@@ -675,6 +677,41 @@ def handle_session_inspect_mounts(args: argparse.Namespace) -> int:
             for drift in report.get('drifts', []):
                 print(f"  - {drift}", file=sys.stderr)
     return 0 if report['verified'] else 1
+
+
+def handle_session_attach_info(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    mgr = SessionManager(layout)
+    if not mgr.session_exists(args.session_id):
+        print(f"Error: Session '{args.session_id}' does not exist.", file=sys.stderr)
+        return 1
+
+    session_dir = mgr.get_session_dir(args.session_id)
+    info = get_session_attach_info(
+        session_id=args.session_id,
+        workspace_root=ws_path,
+        session_dir=session_dir,
+    )
+    if getattr(args, 'json', False):
+        print(json.dumps(info, indent=2))
+    else:
+        print(f"🔗 OpenCode Attach Info for Session '{args.session_id}':")
+        print(f"  - Container:        {info['container_name']} (running={info['container_running']})")
+        print(f"  - Agent running:    {info['agent_running']}")
+        print(f"  - URL:              {info.get('url') or 'N/A'}")
+        print(f"  - OpenCode Session: {info.get('opencode_session_id') or 'N/A'}")
+        print(f"  - Password env:     {info.get('password_env_var')} (configured={info.get('password_configured')})")
+        print(f"  - Attach command:   {info.get('attach_command')}")
+    return 0
+
+
+def handle_session_attach(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    res = attach_to_session_opencode(session_id=args.session_id, workspace_root=ws_path)
+    if not res.get('success') and res.get('error'):
+        print(f"❌ {res['error']}", file=sys.stderr)
+    return 0 if res.get('success') else 1
 
 
 def handle_hub(args: argparse.Namespace) -> int:
@@ -1799,7 +1836,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help='Register ros-maintainer-harness in global user MCP configs (~/.gemini, ~/.claude.json)',
     )
     mcp_inst.add_argument(
-        '--target', choices=['gemini', 'antigravity', 'claude', 'all'], default='gemini',
+        '--target', choices=['gemini', 'antigravity', 'claude', 'opencode', 'all'], default='gemini',
         help='Target global MCP client config to update (default: gemini)',
     )
     mcp_inst.add_argument(
@@ -2037,7 +2074,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     s_launch.add_argument('session_id', type=str, help='Session ID')
     s_launch.add_argument(
-        '--agent', choices=['claude', 'cursor', 'code', 'vscode', 'gemini', 'antigravity', 'shell'], default='claude',
+        '--agent',
+        choices=['claude', 'cursor', 'code', 'vscode', 'gemini', 'antigravity', 'opencode', 'shell'],
+        default='claude',
         help='Agent or editor to launch (default: claude)',
     )
     s_launch.add_argument(
@@ -2070,7 +2109,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     s_from_pr.add_argument('--session-id', type=str, default=None, help='Custom session ID override')
     s_from_pr.add_argument('--distro', type=str, default=None, help='Target ROS distro override')
     s_from_pr.add_argument(
-        '--launch', choices=['claude', 'cursor', 'code', 'vscode', 'shell'], default=None,
+        '--launch', choices=['claude', 'cursor', 'code', 'vscode', 'opencode', 'shell'], default=None,
         help='Automatically launch agent or IDE after scaffolding',
     )
 
@@ -2117,6 +2156,21 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     s_im.add_argument('session_id', type=str, help='Session ID')
     s_im.add_argument('--json', action='store_true', help='Output verification report as JSON')
 
+    # session attach-info
+    s_ai = session_subparsers.add_parser(
+        'attach-info', parents=[ws_parent],
+        help='Return OpenCode attach metadata for a session without exposing the password',
+    )
+    s_ai.add_argument('session_id', type=str, help='Session ID')
+    s_ai.add_argument('--json', action='store_true', help='Output attach info as JSON')
+
+    # session attach
+    s_att = session_subparsers.add_parser(
+        'attach', parents=[ws_parent],
+        help='Attach OpenCode client on host to the running session container agent',
+    )
+    s_att.add_argument('session_id', type=str, help='Session ID')
+
     # session start-conversation
     s_conv = session_subparsers.add_parser(
         'start-conversation', parents=[ws_parent],
@@ -2126,8 +2180,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     s_conv.add_argument('--session-id', type=str, default=None, help='Session ID')
     s_conv.add_argument('--distro', type=str, default=None, help='Target ROS distro override')
     s_conv.add_argument(
-        '--mode', choices=['auto', 'agentapi', 'prompt_only'], default='auto',
-        help='Launch method: auto, agentapi (top-level conversation), or prompt_only',
+        '--mode', choices=['auto', 'opencode', 'agentapi', 'prompt_only'], default='auto',
+        help='Launch method: auto, opencode (in-container agent), agentapi (top-level conversation), or prompt_only',
     )
     s_conv.add_argument('--model', choices=['flash_lite', 'flash', 'pro'], default=None, help='Model tier for agentapi')
     s_conv.add_argument('--hub-conversation-id', type=str, default=None, help='Parent Hub conversation ID')
@@ -2556,6 +2610,10 @@ def main():
             return handle_session_down(args)
         elif args.session_action == 'inspect-mounts':
             return handle_session_inspect_mounts(args)
+        elif args.session_action == 'attach-info':
+            return handle_session_attach_info(args)
+        elif args.session_action == 'attach':
+            return handle_session_attach(args)
         elif args.session_action == 'start-conversation':
             return handle_session_start_conversation(args)
         elif args.session_action == 'status':

@@ -52,11 +52,42 @@ Prerequisites:
 - Python 3.10+
 - Git
 - [GitHub CLI (`gh`)](https://cli.github.com/) authenticated with appropriate scopes
-- An OCI container runtime (Docker or Podman) to run devcontainer sessions
-  - Running on the host does not require Docker-in-Docker (DinD).
-  - If running the harness itself inside a container (e.g., GitHub Codespaces), use Docker-outside-of-Docker (mount `/var/run/docker.sock`) or enable DinD.
+- An OCI container runtime (OrbStack on macOS, Docker Engine on Linux, or Podman) to run Hub and Session containers
+  - Running on the host does not require Docker-in-Docker (DinD) or mounting `/var/run/docker.sock` into containers.
+  - All container launches are performed by the Host Launch Service (`ros-maintainer-harness gateway start`).
 
-### Typical Workflow
+### Hub-and-Spoke Quick Start (macOS / OrbStack & Linux Docker)
+
+Run the three-tier architecture with an unprivileged Maintainer Hub container and isolated per-PR Session containers:
+
+```bash
+# 1. Initialize workspace (generates config/, tools/, AGENTS.md, CLAUDE.md, opencode.json)
+ros-maintainer-harness -w ~/ros_maintenance_ws init
+
+# 2. Configure read-only container GitHub token and LLM API key (stored in ~/.local/state)
+ros-maintainer-harness -w ~/ros_maintenance_ws token-setup --container-token <READONLY_PAT>
+ros-maintainer-harness -w ~/ros_maintenance_ws token-setup --llm-key ANTHROPIC_API_KEY=<YOUR_KEY>
+
+# 3. Start the Host Launch Service HTTP MCP Gateway on 127.0.0.1:8765
+ros-maintainer-harness -w ~/ros_maintenance_ws gateway start
+
+# 4. Build and start the unprivileged Maintainer Hub container (no Docker socket)
+ros-maintainer-harness -w ~/ros_maintenance_ws hub build
+ros-maintainer-harness -w ~/ros_maintenance_ws hub start
+
+# 5. Verify environment readiness and attach OpenCode to the Hub conversation
+ros-maintainer-harness -w ~/ros_maintenance_ws doctor
+ros-maintainer-harness -w ~/ros_maintenance_ws hub attach
+```
+
+When you ask the Hub agent to work on a PR (for example, `"I want to work on ros2/rclcpp#160"`), the Hub calls `start_session_conversation` on the Host Launch Service to scaffold the session, start the session container (`ros-harness-pr-rclcpp-160`), and seed the in-container OpenCode agent with `TASK.md`. You can attach to that session conversation at any time:
+
+```bash
+ros-maintainer-harness -w ~/ros_maintenance_ws session attach-info pr-rclcpp-160
+ros-maintainer-harness -w ~/ros_maintenance_ws session attach pr-rclcpp-160
+```
+
+### Direct CLI Workflow
 
 #### 1. Initialize the workspace, configure tokens, and register the MCP server
 
@@ -90,7 +121,7 @@ This single command:
 - Clones the target repository into `shared_repos/` if not already present.
 - Creates a new linked git worktree in `sessions/pr-rclcpp-160/src/rclcpp`.
 - Generates `.devcontainer/devcontainer.json` configured for that ROS distribution (including mounting `shared_repos/` so worktree git pointers resolve inside the container).
-- Writes editor/agent MCP configs (`mcp.json`, `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/mcp_config.json`) and auto-discovered agent rule files (`AGENTS.md` and `CLAUDE.md`).
+- Writes editor/agent MCP configs (`opencode.json`, `mcp.json`, `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/mcp_config.json`) and auto-discovered agent rule files (`AGENTS.md` and `CLAUDE.md`).
 - Pre-populates `timeline.md` and generates a structured `TASK.md` goal prompt for the agent.
 
 #### 3. Run builds & tests in the session container or launch an agent
@@ -112,7 +143,7 @@ Or launch your preferred coding agent directly inside the session directory:
 ros-maintainer-harness session launch pr-rclcpp-160 --agent claude
 ```
 
-Supported agents/editors include `claude`, `cursor`, `code`/`vscode`, `gemini`, `antigravity`, or an interactive `shell`. You can also pass `--dry-run` to inspect the command line and environment without launching.
+Supported agents/editors include `opencode`, `claude`, `cursor`, `code`/`vscode`, `gemini`, `antigravity`, or an interactive `shell`. You can also pass `--dry-run` to inspect the command line and environment without launching.
 
 #### 4. Monitor CI without burning agent tokens
 

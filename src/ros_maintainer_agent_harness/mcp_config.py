@@ -87,6 +87,91 @@ def generate_mcp_config_dict(
     }
 
 
+def generate_opencode_config(
+    workspace_path: Optional[Path] = None,
+    role: str = 'session',
+    host: str = 'host.docker.internal',
+    port: int = 8765,
+    workspace_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Generate an `opencode.json` configuration dictionary for a Hub (`role='hub'`)
+    or Session (`role='session'`) OpenCode agent.
+
+    Uses `{env:ROS_MAINTAINER_GATEWAY_TOKEN}` so no raw token value is ever written to disk.
+    """
+    url = f"http://{host}:{int(port)}/mcp"
+    if role == 'hub':
+        instructions = ['AGENTS.md']
+        permissions: Dict[str, Any] = {
+            'edit': {
+                'config/*': 'deny',
+                'audit/*': 'deny',
+                '*': 'allow',
+            },
+            'bash': {
+                'colcon*': 'deny',
+                'pytest*': 'deny',
+                'docker*': 'deny',
+                'podman*': 'deny',
+                '*': 'allow',
+            },
+            'external_directory': 'deny',
+        }
+    else:
+        instructions = ['AGENTS.md', 'TASK.md']
+        permissions = {
+            'edit': 'allow',
+            'bash': {
+                'docker*': 'deny',
+                'podman*': 'deny',
+                '*gh auth token*': 'deny',
+                '*': 'allow',
+            },
+            'external_directory': 'deny',
+        }
+
+    return {
+        '$schema': 'https://opencode.ai/config.json',
+        'autoupdate': False,
+        'share': 'disabled',
+        'instructions': instructions,
+        'mcp': {
+            'ros-maintainer-harness': {
+                'type': 'remote',
+                'url': url,
+                'enabled': True,
+                'headers': {
+                    'Authorization': 'Bearer {env:ROS_MAINTAINER_GATEWAY_TOKEN}',
+                },
+            }
+        },
+        'permission': permissions,
+    }
+
+
+def write_opencode_config(
+    target_dir: Path,
+    workspace_path: Optional[Path] = None,
+    role: str = 'session',
+    host: str = 'host.docker.internal',
+    port: int = 8765,
+    workspace_root: Optional[Path] = None,
+) -> Path:
+    """Write `opencode.json` inside `target_dir` for the specified role ('hub' or 'session')."""
+    target_dir.mkdir(parents=True, exist_ok=True)
+    ws_path = workspace_path or workspace_root or target_dir
+    cfg = generate_opencode_config(
+        workspace_path=ws_path,
+        role=role,
+        host=host,
+        port=port,
+    )
+    out_path = target_dir / 'opencode.json'
+    out_path.write_text(json.dumps(cfg, indent=2) + '\n', encoding='utf-8')
+    return out_path
+
+
 def write_session_mcp_configs(
     session_dir: Path,
     workspace_path: Path,
@@ -99,9 +184,9 @@ def write_session_mcp_configs(
     Write MCP client config files for various editors and agents inside a session directory.
 
     Supported formats: 'generic' (mcp.json), 'claude' (.mcp.json), 'cursor' (.cursor/mcp.json),
-    'vscode' (.vscode/mcp.json), 'gemini' (.gemini/mcp_config.json).
+    'vscode' (.vscode/mcp.json), 'gemini' (.gemini/mcp_config.json), 'opencode' (opencode.json).
     """
-    selected_formats = formats or ['generic', 'claude', 'cursor', 'vscode', 'gemini']
+    selected_formats = formats or ['generic', 'claude', 'cursor', 'vscode', 'gemini', 'opencode']
     config_data = generate_mcp_config_dict(
         workspace_path=workspace_path,
         transport=transport,
@@ -143,6 +228,17 @@ def write_session_mcp_configs(
         p.write_text(config_json, encoding='utf-8')
         written_files['gemini'] = p
 
+    if 'opencode' in selected_formats:
+        oc_host = 'host.docker.internal' if host in ('127.0.0.1', 'localhost') else host
+        p = write_opencode_config(
+            target_dir=session_dir,
+            workspace_path=workspace_path,
+            role='session',
+            host=oc_host,
+            port=port,
+        )
+        written_files['opencode'] = p
+
     return written_files
 
 
@@ -156,7 +252,7 @@ def install_global_mcp_config(
 ) -> Dict[str, Path]:
     """
     Register ros-maintainer-harness in global user-level MCP configuration files
-    (e.g. ~/.gemini/config/mcp_config.json and/or ~/.claude.json).
+    (e.g. ~/.gemini/config/mcp_config.json, ~/.claude.json, ~/.config/opencode/opencode.json).
     """
     base_home = (home_dir or Path.home()).resolve()
     selected_targets = targets or ['gemini']
@@ -196,6 +292,18 @@ def install_global_mcp_config(
         _merge_and_write(claude_path)
         updated['claude'] = claude_path
 
+    if 'opencode' in selected_targets:
+        opencode_path = base_home / '.config' / 'opencode' / 'opencode.json'
+        opencode_path.parent.mkdir(parents=True, exist_ok=True)
+        oc_data = generate_opencode_config(
+            workspace_path=workspace_path,
+            role='hub',
+            host=host,
+            port=port,
+        )
+        opencode_path.write_text(json.dumps(oc_data, indent=2) + '\n', encoding='utf-8')
+        updated['opencode'] = opencode_path
+
     return updated
 
 
@@ -219,6 +327,9 @@ def get_agent_launch_info(
     if agent == 'claude':
         cmd = ['claude', '--cwd', str(session_dir.resolve())]
         description = f"Launch Claude Code agent in session '{session_id}'"
+    elif agent == 'opencode':
+        cmd = ['ros-maintainer-harness', '-w', str(workspace_path.resolve()), 'session', 'attach', session_id]
+        description = f"Attach OpenCode client to in-container agent for session '{session_id}'"
     elif agent == 'cursor':
         cmd = ['cursor', str(session_dir.resolve())]
         description = f"Open Cursor IDE in session '{session_id}'"

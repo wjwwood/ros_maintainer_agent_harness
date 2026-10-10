@@ -252,6 +252,101 @@ class TestHubCoordinator(unittest.TestCase):
                     self.assertEqual(ret, 0)
                     self.assertIn('ready_to_merge', fake_out.getvalue())
 
+    def test_start_session_conversation_opencode_mode_and_fallback(self):
+        import json
+        from ros_maintainer_agent_harness.runner import FakeCommandRunner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ws = WorkspaceLayout(root / 'ws')
+            state_dir = root / 'state'
+            ws.initialize()
+            save_workspace_env_var(ws.root, 'ROS_CONTAINER_GITHUB_TOKEN', 'none')
+
+            mgr = SessionManager(ws)
+            s_info = mgr.create_session('sess-oc-1', topic='Test OpenCode Launch', distro='rolling')
+            (s_info.session_dir / 'TASK.md').write_text('# Task: Fix node lifecycle\n', encoding='utf-8')
+
+            runner = FakeCommandRunner(available_binaries={'docker': '/usr/bin/docker'})
+            # Container is not running initially
+            runner.add_canned(
+                ['inspect', 'ros-harness-sess-oc-1'],
+                returncode=1,
+                stderr='No such object',
+            )
+            runner.add_canned(
+                ['docker', 'run', '-d'],
+                returncode=0,
+                stdout='container-id-123\n',
+            )
+
+            class _FakeResp:
+                def __init__(self, payload: bytes):
+                    self._payload = payload
+
+                def read(self) -> bytes:
+                    return self._payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            def fake_urlopen(req, timeout=10.0):
+                url = req.full_url if hasattr(req, 'full_url') else str(req)
+                if '/session?' in url:
+                    return _FakeResp(json.dumps({'id': 'ses_opencode_abc123'}).encode('utf-8'))
+                return _FakeResp(b'{}')
+
+            with patch('ros_maintainer_agent_harness.hub.urllib.request.urlopen', side_effect=fake_urlopen):
+                res = start_session_conversation(
+                    workspace=ws,
+                    session_id='sess-oc-1',
+                    mode='auto',
+                    runner=runner,
+                    state_dir=state_dir,
+                )
+
+            self.assertTrue(res['success'])
+            self.assertEqual(res['launch_method'], 'opencode')
+            self.assertEqual(res['opencode_session_id'], 'ses_opencode_abc123')
+            self.assertEqual(res['conversation_id'], 'ses_opencode_abc123')
+            self.assertIn('session attach sess-oc-1', res['attach_command'])
+            self.assertIn('Fix node lifecycle', res['task_prompt'])
+
+            meta = read_session_metadata(s_info.session_dir)
+            self.assertEqual(meta.get('opencode_session_id'), 'ses_opencode_abc123')
+            self.assertTrue(meta.get('opencode_url', '').startswith('http://127.0.0.1:'))
+
+            # Verify get_workspace_status surfaces the OpenCode conversation link and attach command
+            runner.canned.clear()
+            runner.add_canned(
+                ['inspect', 'ros-harness-sess-oc-1'],
+                returncode=0,
+                stdout='true\n',
+            )
+            ws_stat = get_workspace_status(ws, check_containers=True, runner=runner, state_dir=state_dir)
+            sess_entry = ws_stat['sessions'][0]
+            self.assertEqual(sess_entry['opencode_session_id'], 'ses_opencode_abc123')
+            self.assertTrue(sess_entry['agent_running'])
+            self.assertIn('conversation://ses_opencode_abc123', sess_entry['conversation_link'])
+
+            # Fallback to prompt_only when OpenCode API is unreachable and agentapi is absent
+            mgr.create_session('sess-oc-2', topic='Fallback Session', distro='rolling')
+            with patch(
+                'ros_maintainer_agent_harness.hub.find_agentapi_executable',
+                return_value=None,
+            ):
+                res_fallback = start_session_conversation(
+                    workspace=ws,
+                    session_id='sess-oc-2',
+                    mode='auto',
+                    auto_start_container=False,
+                    state_dir=state_dir,
+                )
+            self.assertEqual(res_fallback['launch_method'], 'prompt_only')
+
 
 if __name__ == '__main__':
     unittest.main()

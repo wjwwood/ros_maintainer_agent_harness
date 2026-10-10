@@ -37,6 +37,12 @@ def _get_known_secret_tokens() -> Set[str]:
         'OPENCODE_SERVER_PASSWORD',
         'JENKINS_TOKEN',
         'ROS_CI_JENKINS_TOKEN',
+        'ANTHROPIC_API_KEY',
+        'OPENAI_API_KEY',
+        'GEMINI_API_KEY',
+        'GOOGLE_GENERATIVE_AI_API_KEY',
+        'GOOGLE_API_KEY',
+        'OPENROUTER_API_KEY',
     ):
         val = (os.environ.get(env_key) or '').strip()
         if len(val) >= 8 and val.lower() != 'none':
@@ -62,7 +68,7 @@ def _get_known_secret_tokens() -> Set[str]:
 
 def redact_credentials(text: str) -> str:
     """
-    Redact credentials, GitHub PAT/OAuth tokens, and URL userinfo secrets from a string.
+    Redact credentials, GitHub PAT/OAuth tokens, LLM provider API keys, and URL userinfo secrets from a string.
     """
     if not text or not isinstance(text, str):
         return text
@@ -88,10 +94,13 @@ def redact_credentials(text: str) -> str:
         cleaned,
     )
 
-    # 4. Standard GitHub, GitLab, and harness gateway token prefixes
+    # 4. Standard GitHub, GitLab, harness gateway/OpenCode, and LLM provider API key prefixes
     cleaned = re.sub(
         r'\b(?:gh[opusr]_[A-Za-z0-9_]{20,255}|github_pat_[A-Za-z0-9_]{20,255}|'
-        r'glpat-[A-Za-z0-9_-]{20,255}|rmah_tok_[A-Za-z0-9_-]{16,255})\b',
+        r'glpat-[A-Za-z0-9_-]{20,255}|rmah_tok_[A-Za-z0-9_-]{16,255}|'
+        r'rmah_oc_[A-Za-z0-9_-]{12,255}|sk-ant-[A-Za-z0-9_-]{12,255}|'
+        r'sk-proj-[A-Za-z0-9_-]{12,255}|sk-or-v1-[A-Za-z0-9_-]{12,255}|'
+        r'sk-[A-Za-z0-9]{20,255}|AIza[0-9A-Za-z_-]{30,60})\b',
         '***REDACTED_TOKEN***',
         cleaned,
     )
@@ -109,10 +118,12 @@ def redact_credentials(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    # 6. JSON/key-value oauth_token / github_token / api_token / password fields (quoted or unquoted)
+    # 6. JSON/key-value oauth_token / github_token / api_token / LLM key / password fields (quoted or unquoted)
     cleaned = re.sub(
         r'("?(?:oauth_token|github_token|access_token|api_token|jenkins_token|'
-        r'gateway_token|ros_maintainer_gateway_token|opencode_server_password)"?\s*[:=]\s*["\'])'
+        r'gateway_token|ros_maintainer_gateway_token|opencode_server_password|'
+        r'anthropic_api_key|openai_api_key|gemini_api_key|google_generative_ai_api_key|'
+        r'google_api_key|openrouter_api_key)"?\s*[:=]\s*["\'])'
         r'([^"\'\s]{6,})(["\'])',
         r'\1***REDACTED_TOKEN***\3',
         cleaned,
@@ -120,7 +131,9 @@ def redact_credentials(text: str) -> str:
     )
     cleaned = re.sub(
         r'(\b(?:oauth_token|github_token|access_token|api_token|jenkins_token|'
-        r'gateway_token|ros_maintainer_gateway_token|opencode_server_password)\s*=\s*)'
+        r'gateway_token|ros_maintainer_gateway_token|opencode_server_password|'
+        r'anthropic_api_key|openai_api_key|gemini_api_key|google_generative_ai_api_key|'
+        r'google_api_key|openrouter_api_key)\s*=\s*)'
         r'([^\s"\'\r\n]{6,})',
         r'\1***REDACTED_TOKEN***',
         cleaned,

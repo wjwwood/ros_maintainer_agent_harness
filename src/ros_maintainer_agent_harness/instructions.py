@@ -432,15 +432,135 @@ If any `ros-maintainer-harness` MCP tool, CLI command, container, or `PreToolUse
 """
 
 
+def get_opencode_hub_instructions(workspace_root: Path) -> str:
+    """
+    Generate OpenCode-specific Hub coordinator instructions (without Claude/Gemini PreToolUse hook assumptions).
+    """
+    ws_str = str(workspace_root.resolve())
+    return f"""# ROS 2 Maintainer Hub Agent Instructions (OpenCode)
+
+You are the **Maintainer Hub** coordinator agent operating inside the unprivileged Hub container (`ros-harness-hub`)
+rooted at `{ws_str}`.
+
+---
+
+## 1. Role Boundaries (`role: hub`)
+
+### What You May Do
+- Run pre-flight diagnostics (`check_environment`).
+- Inspect workspace status and prioritized next actions (`get_workspace_status`, `get_next_actions`).
+- Scaffold and start isolated session containers and conversations (`start_session_conversation`,
+  `scaffold_session_from_pr`, `create_session`, `start_session_container`, `stop_session_container`,
+  `prune_session`, `get_session_attach_info`).
+- Run bounded commands inside a session container via `exec_in_session` when permitted by policy.
+- Query CI runs and audit records (`get_ci_status`, `get_ci_summary`, `get_audit_log`, `list_approval_requests`).
+
+### What You Must Never Do
+- **Never build or run target ROS package code in the Hub container** (`colcon build`, `colcon test`, `pytest`).
+  All builds and tests belong strictly inside a per-PR session container (`ros-harness-<session_id>`).
+- **Never edit `config/policy.yaml`, `config/maintainer_rules.md`, or `audit/`** (mounted read-only `:ro` in the Hub).
+- **Never invoke `docker` or `podman` directly** (no Docker socket is mounted in the Hub; all container lifecycle
+  calls go through the host MCP launch service).
+- **Never approve or reject approval tickets** (`approval approve|reject` is restricted to the human maintainer on
+  the host).
+
+---
+
+## 2. Coordinator Workflow
+
+1. **Pre-Flight Check**:
+   - Call `check_environment()` to verify container engine, gateway service, Hub mounts, and token readiness.
+   - If `container_token_configured` is `False`, stop and ask the user to run `ros-maintainer-harness token-setup`
+     on the host.
+2. **Status & Next Actions**:
+   - Call `get_workspace_status()` to summarize active sessions, container states, milestones, CI runs, and
+     pending approvals.
+   - Call `get_next_actions()` to surface `P1` approvals/blockers, `P2` CI failures/completions, `P3` active
+     sessions, and `P4` candidate GitHub PRs.
+3. **Starting a Session Conversation (`start_session_conversation`)**:
+   - When the user asks to work on `<owner>/<repo>#<num>`, call:
+     `start_session_conversation(pr_ref="<owner>/<repo>#<num>", mode="auto")`
+   - This scaffolds the session, starts `ros-harness-<session_id>` with its in-container OpenCode server, seeds the
+     initial task prompt from `TASK.md`, and returns the `session_id`, `opencode_url`, `attach_command`, and
+     conversation link so the user can open the session in the same OpenCode UI.
+"""
+
+
+def get_opencode_session_instructions(
+    session_id: str,
+    session_dir: Path,
+    workspace_root: Path,
+    distro: str = 'rolling',
+) -> str:
+    """
+    Generate OpenCode-specific Session agent instructions (running directly inside ros-harness-<session_id>).
+    """
+    ws_str = str(workspace_root.resolve())
+    sess_str = str(session_dir.resolve())
+    return f"""# ROS 2 Maintainer Session Agent Instructions (`{session_id}` - OpenCode)
+
+- **Role**: `session:{session_id}` (scoped strictly to `{session_id}`)
+- **Session ID**: `{session_id}`
+- **Target ROS Distro**: `{distro}`
+- **Session Directory**: `{sess_str}`
+
+---
+
+## 1. Role Boundaries (`role: session:{session_id}`)
+
+### What You May Do
+- Work directly inside `{sess_str}` (`src/`, `build/`, `install/`, `log/`, `scratch/`). Because you are already
+  running inside `ros-harness-{session_id}`, your bash and file tools execute natively inside the container without
+  host `PreToolUse` hooks.
+- Run `colcon build`, `colcon test`, `colcon test-result`, `pytest`, and `git` (including `git add` and `git commit`)
+  inside `{sess_str}`.
+- Call the host MCP launch service for this session (`{session_id}`): `log_status`, `update_session_status`,
+  `check_policy`, `create_approval_request`, `git_push`, `create_pull_request`, `edit_pull_request`,
+  `push_release`, `run_bloom_release`, `launch_jenkins_ci`, `get_ci_status`, `get_ci_summary`, `find_restarted_ci`.
+
+### What You Must Never Do
+- **Never access or pass another session's `session_id`** (the gateway enforces `session:{session_id}` scoping).
+- **Never invoke `docker`, `podman`, or `gh auth token`**.
+- **Never call Hub-only or Admin-only tools** (`start_session_container`, `stop_session_container`,
+  `start_session_conversation`, `exec_in_session`).
+- **Never debug or circumvent the harness** if a gateway tool fails; stop immediately and ask the user or Hub for help.
+
+---
+
+## 2. Mandatory Session Workflow
+
+1. **Read Task & Perform Pre-Build Diff Security Check**:
+   - Read `{sess_str}/TASK.md` and `{ws_str}/config/maintainer_rules.md`.
+   - Inspect `git diff` in `{sess_str}/src/` before compiling. Halt immediately if secrets, CI workflow modifications,
+     or suspicious build/test commands are present.
+2. **Build & Test**:
+   ```bash
+   source /opt/ros/{distro}/setup.bash
+   colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+   source install/setup.bash
+   colcon test --event-handlers console_direct+ --return-code-on-test-failure
+   colcon test-result --all --verbose
+   ```
+3. **Log Milestones & Use Gateway Tools**:
+   - Record milestones with `log_status(session_id="{session_id}", milestone="...", message="...")` and update status
+     with `update_session_status(session_id="{session_id}", status="...")`.
+   - Use `git_push`, `launch_jenkins_ci`, `get_ci_status`, `get_ci_summary`, `create_pull_request`, and
+     `edit_pull_request` for all remote GitHub and Jenkins operations.
+"""
+
+
 def write_workspace_agent_instructions(workspace_root: Path) -> Dict[str, Path]:
-    """Write AGENTS.md and CLAUDE.md (@AGENTS.md) in the workspace root directory."""
+    """Write AGENTS.md, CLAUDE.md (@AGENTS.md), and opencode.json in the workspace root directory."""
+    from .mcp_config import write_opencode_config
+
     ws_root = workspace_root.resolve()
     content = get_workspace_coordinator_instructions(ws_root)
     agents_file = ws_root / 'AGENTS.md'
     agents_file.write_text(content, encoding='utf-8')
     claude_file = ws_root / 'CLAUDE.md'
     claude_file.write_text('@AGENTS.md\n', encoding='utf-8')
-    return {'AGENTS.md': agents_file, 'CLAUDE.md': claude_file}
+    opencode_file = write_opencode_config(target_dir=ws_root, workspace_path=ws_root, role='hub')
+    return {'AGENTS.md': agents_file, 'CLAUDE.md': claude_file, 'opencode.json': opencode_file}
 
 
 def write_session_agent_instructions(

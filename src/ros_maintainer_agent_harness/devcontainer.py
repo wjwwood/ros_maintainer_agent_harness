@@ -1384,6 +1384,251 @@ def get_container_status(
     }
 
 
+def _get_session_attach_state_dir(state_dir: Optional[Path] = None) -> Path:
+    from .auth import ensure_private_dir, get_default_state_dir
+
+    base = (state_dir or get_default_state_dir()).resolve()
+    sess_state_dir = base / 'sessions'
+    ensure_private_dir(sess_state_dir)
+    return sess_state_dir
+
+
+def _get_session_attach_state_file(
+    session_id: str,
+    state_dir: Optional[Path] = None,
+) -> Path:
+    from .worktree import validate_session_id
+
+    validate_session_id(session_id)
+    return _get_session_attach_state_dir(state_dir=state_dir) / f"{session_id}.json"
+
+
+def allocate_free_localhost_port(
+    preferred_start: int = 4100,
+    state_dir: Optional[Path] = None,
+) -> int:
+    """
+    Allocate a free localhost port not already reserved by another session or the Hub.
+    """
+    import socket
+
+    sess_dir = _get_session_attach_state_dir(state_dir=state_dir)
+    used_ports = {4096}
+    for f in sess_dir.glob('*.json'):
+        try:
+            data = json.loads(f.read_text(encoding='utf-8'))
+            if isinstance(data, dict) and data.get('port'):
+                used_ports.add(int(data['port']))
+        except Exception:
+            pass
+
+    for candidate in range(int(preferred_start), int(preferred_start) + 500):
+        if candidate in used_ports:
+            continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(('127.0.0.1', candidate))
+                return candidate
+            except OSError:
+                continue
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(('127.0.0.1', 0))
+        return int(sock.getsockname()[1])
+
+
+def save_session_attach_state(
+    session_id: str,
+    workspace_root: Path,
+    session_dir: Path,
+    port: int,
+    password: str,
+    opencode_session_id: Optional[str] = None,
+    state_dir: Optional[Path] = None,
+) -> Path:
+    """Persist per-session OpenCode port and password in host-only private state (0600)."""
+    path = _get_session_attach_state_file(session_id, state_dir=state_dir)
+    payload: Dict[str, Any] = {
+        'session_id': session_id,
+        'workspace_root': str(workspace_root.resolve()),
+        'session_dir': str(session_dir.resolve()),
+        'host': '127.0.0.1',
+        'port': int(port),
+        'url': f"http://127.0.0.1:{int(port)}",
+        'password': password,
+        'opencode_session_id': opencode_session_id,
+    }
+    path.write_text(json.dumps(payload, indent=2) + '\n', encoding='utf-8')
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
+
+
+def load_session_attach_state(
+    session_id: str,
+    state_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Load per-session OpenCode attach state from host-only private state."""
+    try:
+        path = _get_session_attach_state_file(session_id, state_dir=state_dir)
+    except ValueError:
+        return {}
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def remove_session_attach_state(
+    session_id: str,
+    state_dir: Optional[Path] = None,
+) -> Optional[int]:
+    """Remove per-session OpenCode state file and return the freed port (if any)."""
+    try:
+        path = _get_session_attach_state_file(session_id, state_dir=state_dir)
+    except ValueError:
+        return None
+    if not path.is_file():
+        return None
+    freed_port: Optional[int] = None
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(data, dict) and data.get('port'):
+            freed_port = int(data['port'])
+    except Exception:
+        pass
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return freed_port
+
+
+def ensure_session_opencode_binary(
+    workspace_root: Path,
+) -> Dict[str, Any]:
+    """
+    Ensure `<workspace_root>/tools/bin/opencode` is provisioned if a source static binary
+    is configured via `RMAH_OPENCODE_BINARY_PATH` or already cached in `<ws>/tools/bin/opencode`.
+    """
+    import shutil
+
+    tools_bin = (workspace_root.resolve() / 'tools' / 'bin')
+    tools_bin.mkdir(parents=True, exist_ok=True)
+    target_bin = tools_bin / 'opencode'
+    if target_bin.is_file():
+        return {'available': True, 'path': str(target_bin), 'source': 'cached'}
+
+    env_src = os.environ.get('RMAH_OPENCODE_BINARY_PATH')
+    if env_src and Path(env_src).is_file():
+        shutil.copy2(env_src, target_bin)
+        try:
+            target_bin.chmod(0o755)
+        except OSError:
+            pass
+        return {'available': True, 'path': str(target_bin), 'source': 'env'}
+
+    return {'available': False, 'path': str(target_bin), 'source': None}
+
+
+def get_session_attach_info(
+    session_id: str,
+    workspace_root: Path,
+    session_dir: Optional[Path] = None,
+    state_dir: Optional[Path] = None,
+    runtime: Optional[str] = None,
+    runner: Optional[CommandRunner] = None,
+) -> Dict[str, Any]:
+    """
+    Return connection metadata for attaching an OpenCode UI or CLI to a running session container
+    without exposing the raw `OPENCODE_SERVER_PASSWORD` value.
+    """
+    from .worktree import read_session_metadata
+
+    ws_root = workspace_root.resolve()
+    sess_dir = (session_dir or (ws_root / 'sessions' / session_id)).resolve()
+    state = load_session_attach_state(session_id, state_dir=state_dir)
+    meta = read_session_metadata(sess_dir) if sess_dir.is_dir() else {}
+    c_status = get_container_status(session_id, runtime=runtime, runner=runner)
+    port = state.get('port')
+    url = state.get('url') or (f"http://127.0.0.1:{port}" if port else None)
+    oc_session_id = state.get('opencode_session_id') or meta.get('opencode_session_id')
+    container_running = bool(c_status.get('running'))
+    agent_running = bool(container_running and url)
+
+    return {
+        'session_id': session_id,
+        'session_dir': str(sess_dir),
+        'container_name': c_status.get('container_name', get_container_name(session_id)),
+        'container_running': container_running,
+        'agent_running': agent_running,
+        'host': '127.0.0.1',
+        'port': port,
+        'url': url,
+        'opencode_session_id': oc_session_id,
+        'password_configured': bool(state.get('password')),
+        'password_env_var': 'OPENCODE_SERVER_PASSWORD',
+        'attach_command': f"ros-maintainer-harness -w {ws_root} session attach {session_id}",
+        'raw_attach_command': (
+            f"opencode attach {url} --dir {sess_dir}" if url else None
+        ),
+    }
+
+
+def attach_to_session_opencode(
+    session_id: str,
+    workspace_root: Path,
+    runner: Optional[CommandRunner] = None,
+    state_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Launch `opencode attach` on the host against a session container's OpenCode server,
+    passing `OPENCODE_SERVER_PASSWORD` via the process environment so it never appears in logs.
+    """
+    active_runner = runner or get_default_runner()
+    ws_root = workspace_root.resolve()
+    state = load_session_attach_state(session_id, state_dir=state_dir)
+    if not state.get('url'):
+        return {
+            'success': False,
+            'error': (
+                f"No OpenCode attach state found for session '{session_id}'. "
+                f"Start the session container first with 'ros-maintainer-harness -w {ws_root} session up {session_id}'."
+            ),
+        }
+
+    opencode_bin = active_runner.which('opencode')
+    if not opencode_bin:
+        return {
+            'success': False,
+            'error': "The 'opencode' CLI is not installed on the host PATH.",
+        }
+
+    sess_dir = state.get('session_dir') or str((ws_root / 'sessions' / session_id).resolve())
+    cmd: List[str] = ['opencode', 'attach', state['url'], '--dir', str(sess_dir)]
+    if state.get('opencode_session_id'):
+        cmd.extend(['--session', str(state['opencode_session_id'])])
+
+    env = os.environ.copy()
+    if state.get('password'):
+        env['OPENCODE_SERVER_PASSWORD'] = str(state['password'])
+
+    res = active_runner.run(cmd, env=env, capture_output=False)
+    return {
+        'success': res.returncode == 0,
+        'returncode': res.returncode,
+        'session_id': session_id,
+        'url': state['url'],
+        'command': cmd,
+    }
+
+
 def start_session_container(
     session_id: str,
     session_dir: Path,
@@ -1394,15 +1639,19 @@ def start_session_container(
     runtime: Optional[str] = None,
     writable_shared_repos: Optional[bool] = None,
     runner: Optional[CommandRunner] = None,
+    state_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
-    Start a detached sandbox container for the given session using a validated ``LaunchSpec``
-    so commands and builds can be executed inside it via `session exec` or `exec_in_session`.
+    Start a detached sandbox container and in-container OpenCode agent for the given session
+    using a validated ``LaunchSpec``.
 
     By default, `shared_repos/` is mounted read-only (`:ro`). Pass `writable_shared_repos=True`
     (or `ros-maintainer-harness session up <session_id> --writable-shared-repos`) to mount
     `shared_repos/` read-write when explicitly requested or after pre-build review.
     """
+    import secrets
+    from .gateway import load_state_credentials
+    from .mcp_config import write_opencode_config
     from .worktree import read_session_metadata, write_session_metadata
 
     active_runner = runner or get_default_runner()
@@ -1439,19 +1688,84 @@ def start_session_container(
     status_info = get_container_status(session_id, runtime=rt, runner=active_runner)
     container_name = status_info['container_name']
     if status_info['running'] and not mode_changed and writable_shared_repos is None:
+        existing_state = load_session_attach_state(session_id, state_dir=state_dir)
         return {
             'success': True,
             'status': 'already_running',
             'container_name': container_name,
             'runtime': rt,
             'writable_shared_repos': use_writable_shared,
+            'opencode_port': existing_state.get('port'),
+            'opencode_url': existing_state.get('url'),
+            'attach_command': f"ros-maintainer-harness -w {workspace_root.resolve()} session attach {session_id}",
         }
 
     session_dir = session_dir.resolve()
     workspace_root = workspace_root.resolve()
     policy = load_policy(workspace_root / 'config' / 'policy.yaml')
+
+    # Enforce policy.containers.max_concurrent_sessions across other running sessions
+    max_concurrent = int(policy.containers.max_concurrent_sessions)
+    sessions_parent = workspace_root / 'sessions'
+    if max_concurrent > 0 and sessions_parent.is_dir():
+        running_other = 0
+        for sibling in sorted(sessions_parent.iterdir()):
+            if not sibling.is_dir() or sibling.name == session_id:
+                continue
+            sib_status = get_container_status(sibling.name, runtime=rt, runner=active_runner)
+            if sib_status.get('running'):
+                running_other += 1
+        if running_other >= max_concurrent:
+            return {
+                'success': False,
+                'status': 'max_concurrent_sessions_exceeded',
+                'container_name': container_name,
+                'runtime': rt,
+                'error': (
+                    f"Cannot start session '{session_id}': {running_other} session containers are already "
+                    f"running (policy max_concurrent_sessions={max_concurrent}). Stop an inactive session "
+                    "with 'ros-maintainer-harness session down <id>' first."
+                ),
+            }
+
+    if session_dir.is_dir() and not (session_dir / 'opencode.json').exists():
+        try:
+            write_opencode_config(
+                target_dir=session_dir,
+                workspace_root=workspace_root,
+                role='session',
+                port=policy.server.port,
+            )
+        except TypeError:
+            write_opencode_config(
+                target_dir=session_dir,
+                workspace_path=workspace_root,
+                role='session',
+                port=policy.server.port,
+            )
+
+    ensure_session_opencode_binary(workspace_root)
+
+    existing_attach = load_session_attach_state(session_id, state_dir=state_dir)
+    oc_port = int(existing_attach.get('port') or allocate_free_localhost_port(state_dir=state_dir))
+    oc_password = str(existing_attach.get('password') or f"rmah_oc_{secrets.token_urlsafe(24)}")
+
     token = get_container_github_token(workspace_root)
     has_github_token = bool(token and token.lower() != 'none')
+    ws_env = load_workspace_env(workspace_root)
+    state_creds = load_state_credentials(state_dir=state_dir, workspace_root=workspace_root)
+    llm_keys = [
+        k
+        for k in (
+            'ANTHROPIC_API_KEY',
+            'OPENAI_API_KEY',
+            'GEMINI_API_KEY',
+            'GOOGLE_GENERATIVE_AI_API_KEY',
+            'GOOGLE_API_KEY',
+            'OPENROUTER_API_KEY',
+        )
+        if os.environ.get(k) or ws_env.get(k) or state_creds.get(k)
+    ]
 
     spec = build_session_launch_spec(
         session_id=session_id,
@@ -1462,6 +1776,8 @@ def start_session_container(
         gateway_url=gateway_url,
         writable_shared_repos=use_writable_shared,
         include_github_token=has_github_token,
+        ports=[PortPublishSpec(host_ip='127.0.0.1', host_port=oc_port, container_port=4096)],
+        extra_inherited_env_keys=['OPENCODE_SERVER_PASSWORD'] + llm_keys,
         policy=policy,
     )
     valid, errors = validate_launch_spec(spec, policy=policy)
@@ -1480,27 +1796,42 @@ def start_session_container(
 
     from .auth import TokenStore
 
-    token_store = TokenStore()
+    token_store = TokenStore(state_dir=state_dir)
     issued_token = token_store.issue_token(
         role=f"session:{session_id}",
         session_id=session_id,
         container_name=container_name,
         replace_existing=True,
     )
+    save_session_attach_state(
+        session_id=session_id,
+        workspace_root=workspace_root,
+        session_dir=session_dir,
+        port=oc_port,
+        password=oc_password,
+        opencode_session_id=existing_attach.get('opencode_session_id'),
+        state_dir=state_dir,
+    )
 
     run_env = os.environ.copy()
     run_env['ROS_MAINTAINER_GATEWAY_TOKEN'] = issued_token.token
+    run_env['OPENCODE_SERVER_PASSWORD'] = oc_password
     if has_github_token and token:
         run_env['GITHUB_TOKEN'] = token
         run_env['GH_TOKEN'] = token
     else:
         run_env.pop('GITHUB_TOKEN', None)
         run_env.pop('GH_TOKEN', None)
+    for k in llm_keys:
+        val = os.environ.get(k) or ws_env.get(k) or state_creds.get(k)
+        if val:
+            run_env[k] = val
 
     cmd = spec.to_docker_run_argv(runtime=rt)
     res = active_runner.run(cmd, env=run_env, timeout=300)
     if res.returncode != 0:
         token_store.revoke_token_by_id(issued_token.token_id)
+        remove_session_attach_state(session_id, state_dir=state_dir)
         return {
             'success': False,
             'status': 'failed',
@@ -1527,6 +1858,17 @@ def start_session_container(
         timeout=120,
     )
 
+    # Start in-container OpenCode headless server rooted at the session directory
+    oc_start_cmd = (
+        f"export PATH=\"{shlex.quote(str(tools_dir / 'bin'))}:/workspace/tools/bin:/usr/local/bin:$PATH\"; "
+        "command -v opencode >/dev/null 2>&1 && "
+        "opencode serve --hostname 0.0.0.0 --port 4096 >/tmp/opencode.log 2>&1 || true"
+    )
+    active_runner.run(
+        [rt, 'exec', '-d', '-w', str(session_dir), container_name, 'bash', '-c', oc_start_cmd],
+        timeout=30,
+    )
+
     return {
         'success': True,
         'status': 'started',
@@ -1536,6 +1878,9 @@ def start_session_container(
         'distro': distro,
         'writable_shared_repos': use_writable_shared,
         'token_id': issued_token.token_id,
+        'opencode_port': oc_port,
+        'opencode_url': f"http://127.0.0.1:{oc_port}",
+        'attach_command': f"ros-maintainer-harness -w {workspace_root} session attach {session_id}",
     }
 
 
@@ -1651,11 +1996,13 @@ def stop_session_container(
     session_id: str,
     runtime: Optional[str] = None,
     runner: Optional[CommandRunner] = None,
+    state_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Stop and remove the sandbox container for a session and revoke its bearer token."""
+    """Stop and remove the sandbox container for a session, revoke its bearer token, and free its port."""
     from .auth import TokenStore
 
-    revoked_count = TokenStore().revoke_tokens_for_session(session_id)
+    revoked_count = TokenStore(state_dir=state_dir).revoke_tokens_for_session(session_id)
+    freed_port = remove_session_attach_state(session_id, state_dir=state_dir)
     active_runner = runner or get_default_runner()
     rt = runtime or detect_container_runtime(runner=active_runner)
     container_name = get_container_name(session_id)
@@ -1664,6 +2011,7 @@ def stop_session_container(
             'success': False,
             'container_name': container_name,
             'revoked_tokens': revoked_count,
+            'freed_port': freed_port,
             'error': 'No container runtime (docker or podman) found on PATH.',
         }
 
@@ -1673,5 +2021,6 @@ def stop_session_container(
         'container_name': container_name,
         'runtime': rt,
         'revoked_tokens': revoked_count,
+        'freed_port': freed_port,
         'output': res.stdout.strip() or res.stderr.strip(),
     }
