@@ -20,7 +20,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from .config import HarnessPolicy, load_policy
 from .runner import CommandRunner, get_default_runner
@@ -873,6 +873,19 @@ def check_token_and_environment(
     except Exception:
         pass
 
+    def _safe_run(cmd: Sequence[str], timeout: float = 2.0):
+        from .runner import CommandResult
+
+        try:
+            return active_runner.run(cmd, timeout=timeout)
+        except Exception as exc:
+            return CommandResult(
+                args=[str(part) for part in cmd],
+                returncode=1,
+                stdout='',
+                stderr=str(exc),
+            )
+
     # 1. Container Engine & Architecture Check
     docker_host = os.environ.get('DOCKER_HOST')
     docker_context = None
@@ -882,11 +895,11 @@ def check_token_and_environment(
 
     if runtime:
         if runtime == 'docker':
-            ctx_res = active_runner.run(['docker', 'context', 'show'], timeout=5)
+            ctx_res = _safe_run(['docker', 'context', 'show'], timeout=2.0)
             if ctx_res.returncode == 0 and ctx_res.stdout.strip():
                 docker_context = ctx_res.stdout.strip()
 
-        info_res = active_runner.run([runtime, 'info', '--format', '{{json .}}'], timeout=5)
+        info_res = _safe_run([runtime, 'info', '--format', '{{json .}}'], timeout=2.0)
         if info_res.returncode == 0 and info_res.stdout.strip():
             engine_reachable = True
             raw_info = info_res.stdout.strip()
@@ -941,7 +954,7 @@ def check_token_and_environment(
     gw_reachable_from_hub = False
 
     if runtime and engine_reachable:
-        img_res = active_runner.run([runtime, 'image', 'inspect', DEFAULT_HUB_IMAGE], timeout=5)
+        img_res = _safe_run([runtime, 'image', 'inspect', DEFAULT_HUB_IMAGE], timeout=2.0)
         if img_res.returncode == 0 and img_res.stdout.strip():
             hub_image_present = True
             try:
@@ -955,7 +968,7 @@ def check_token_and_environment(
             except Exception:
                 pass
 
-        hub_inspect = active_runner.run([runtime, 'inspect', HUB_CONTAINER_NAME], timeout=5)
+        hub_inspect = _safe_run([runtime, 'inspect', HUB_CONTAINER_NAME], timeout=2.0)
         if hub_inspect.returncode == 0 and hub_inspect.stdout.strip():
             try:
                 parsed = json.loads(hub_inspect.stdout)
@@ -985,7 +998,7 @@ def check_token_and_environment(
 
             if hub_running and gw_running:
                 gw_port = gw_status.get('port') or 8765
-                probe = active_runner.run(
+                probe = _safe_run(
                     [
                         runtime,
                         'exec',
@@ -996,7 +1009,7 @@ def check_token_and_environment(
                         '3',
                         f'http://host.docker.internal:{gw_port}/healthz',
                     ],
-                    timeout=5,
+                    timeout=3.0,
                 )
                 gw_reachable_from_hub = probe.returncode == 0
 
@@ -1038,7 +1051,7 @@ def check_token_and_environment(
     opencode_path = active_runner.which('opencode')
     opencode_version: Optional[str] = None
     if opencode_path:
-        oc_ver_res = active_runner.run(['opencode', '--version'], timeout=5)
+        oc_ver_res = _safe_run(['opencode', '--version'], timeout=2.0)
         if oc_ver_res.returncode == 0 and oc_ver_res.stdout.strip():
             opencode_version = oc_ver_res.stdout.strip().splitlines()[0]
 

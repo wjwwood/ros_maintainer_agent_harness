@@ -89,7 +89,15 @@ class SubprocessRunner:
         if input_data is not None:
             run_kwargs['input'] = input_data
 
-        completed = subprocess.run(argv, **run_kwargs)
+        try:
+            completed = subprocess.run(argv, **run_kwargs)
+        except FileNotFoundError as exc:
+            return CommandResult(
+                args=argv,
+                returncode=127,
+                stdout='',
+                stderr=str(exc),
+            )
         return CommandResult(
             args=argv,
             returncode=int(completed.returncode),
