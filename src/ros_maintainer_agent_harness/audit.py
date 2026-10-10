@@ -33,6 +33,8 @@ def _get_known_secret_tokens() -> Set[str]:
         'ROS_CI_GITHUB_TOKEN',
         'ROS_HOST_GITHUB_TOKEN',
         'ROS_CONTAINER_GITHUB_TOKEN',
+        'ROS_MAINTAINER_GATEWAY_TOKEN',
+        'OPENCODE_SERVER_PASSWORD',
         'JENKINS_TOKEN',
         'ROS_CI_JENKINS_TOKEN',
     ):
@@ -86,9 +88,10 @@ def redact_credentials(text: str) -> str:
         cleaned,
     )
 
-    # 4. Standard GitHub & GitLab token prefixes (ghp_, gho_, ghu_, ghs_, ghr_, github_pat_, glpat-)
+    # 4. Standard GitHub, GitLab, and harness gateway token prefixes
     cleaned = re.sub(
-        r'\b(?:gh[opusr]_[A-Za-z0-9_]{20,255}|github_pat_[A-Za-z0-9_]{20,255}|glpat-[A-Za-z0-9_-]{20,255})\b',
+        r'\b(?:gh[opusr]_[A-Za-z0-9_]{20,255}|github_pat_[A-Za-z0-9_]{20,255}|'
+        r'glpat-[A-Za-z0-9_-]{20,255}|rmah_tok_[A-Za-z0-9_-]{16,255})\b',
         '***REDACTED_TOKEN***',
         cleaned,
     )
@@ -106,11 +109,20 @@ def redact_credentials(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    # 6. JSON/key-value oauth_token / github_token / api_token fields
+    # 6. JSON/key-value oauth_token / github_token / api_token / password fields (quoted or unquoted)
     cleaned = re.sub(
-        r'("?(?:oauth_token|github_token|access_token|api_token|jenkins_token)"?\s*[:=]\s*["\'])'
-        r'([^"\'\s]{8,})(["\'])',
+        r'("?(?:oauth_token|github_token|access_token|api_token|jenkins_token|'
+        r'gateway_token|ros_maintainer_gateway_token|opencode_server_password)"?\s*[:=]\s*["\'])'
+        r'([^"\'\s]{6,})(["\'])',
         r'\1***REDACTED_TOKEN***\3',
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r'(\b(?:oauth_token|github_token|access_token|api_token|jenkins_token|'
+        r'gateway_token|ros_maintainer_gateway_token|opencode_server_password)\s*=\s*)'
+        r'([^\s"\'\r\n]{6,})',
+        r'\1***REDACTED_TOKEN***',
         cleaned,
         flags=re.IGNORECASE,
     )
@@ -164,9 +176,16 @@ def get_last_record_hash(audit_log_path: Path) -> str:
 
 def append_audit_record(audit_log_path: Path, record: Dict[str, Any]) -> Dict[str, Any]:
     """Append an audit record with `prev_hash` and `record_hash` to `audit.jsonl` (with credential redaction)."""
+    from .auth import get_active_caller
+
     audit_log_path.parent.mkdir(parents=True, exist_ok=True)
     prev_hash = get_last_record_hash(audit_log_path)
     enriched = dict(redact_sensitive_data(record))
+    caller = get_active_caller()
+    if caller is not None:
+        enriched.setdefault('caller_role', caller.role)
+        if caller.token_id:
+            enriched.setdefault('token_id', caller.token_id)
     enriched['prev_hash'] = prev_hash
     enriched['record_hash'] = compute_record_hash(enriched, prev_hash)
     with open(audit_log_path, 'a', encoding='utf-8') as f:

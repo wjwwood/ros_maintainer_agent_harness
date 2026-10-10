@@ -41,51 +41,55 @@ def get_image_for_distro(distro: str, custom_image: Optional[str] = None) -> str
 
 
 def load_workspace_env(workspace_root: Path) -> Dict[str, str]:
-    """Load key=value environment variables from <workspace_root>/.env if present."""
-    env_file = workspace_root.resolve() / '.env'
+    """
+    Load environment variables and credentials for a workspace.
+    Automatically migrates any credentials from `<workspace_root>/.env` into the host-only
+    state directory (`~/.local/state/ros_maintainer_agent_harness/credentials.env`) so no
+    credentials remain inside the mounted workspace tree.
+    """
+    from .gateway import load_state_credentials, migrate_workspace_credentials, parse_env_file
+
+    ws_root = workspace_root.resolve()
+    migrate_workspace_credentials(ws_root)
     env_vars: Dict[str, str] = {}
-    if not env_file.exists():
-        return env_vars
-    try:
-        for raw_line in env_file.read_text(encoding='utf-8').splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith('#'):
-                continue
-            if line.startswith('export '):
-                line = line[len('export '):].strip()
-            if '=' in line:
-                k, v = line.split('=', 1)
-                k = k.strip()
-                v = v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
-                    v = v[1:-1]
-                env_vars[k] = v
-    except Exception:
-        pass
+    env_file = ws_root / '.env'
+    if env_file.exists():
+        env_vars.update(parse_env_file(env_file))
+    env_vars.update(load_state_credentials(workspace_root=ws_root))
     return env_vars
 
 
 def save_workspace_env_var(workspace_root: Path, key: str, value: str) -> Path:
-    """Save or update a key=value entry in <workspace_root>/.env with 0600 permissions."""
-    env_file = workspace_root.resolve() / '.env'
-    existing = load_workspace_env(workspace_root)
+    """
+    Save or update a configuration/credential variable with 0600 permissions.
+    Credentials (`*_TOKEN`, `*_API_KEY`, etc.) are stored outside the workspace tree in
+    `~/.local/state/ros_maintainer_agent_harness/`.
+    """
+    from .gateway import (
+        CREDENTIAL_ENV_KEYS,
+        migrate_workspace_credentials,
+        parse_env_file,
+        save_state_credential,
+        write_private_env_file,
+    )
+
+    ws_root = workspace_root.resolve()
+    migrate_workspace_credentials(ws_root)
+    if key in CREDENTIAL_ENV_KEYS or key.endswith('_TOKEN') or key.endswith('_API_KEY'):
+        return save_state_credential(key, value, workspace_root=ws_root)
+
+    env_file = ws_root / '.env'
+    existing = parse_env_file(env_file)
     existing[key] = value
-    lines = [
-        '# ROS Maintainer Agent Harness Workspace Environment',
-        '# Do not commit this file to version control.',
-    ]
-    for k, v in existing.items():
-        lines.append(f'{k}="{v}"')
-    env_file.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    try:
-        env_file.chmod(0o600)
-    except OSError:
-        pass
-    return env_file
+    return write_private_env_file(
+        env_file,
+        existing,
+        'ROS Maintainer Agent Harness Workspace Environment',
+    )
 
 
 def get_container_github_token(workspace_root: Path) -> Optional[str]:
-    """Retrieve the configured ROS_CONTAINER_GITHUB_TOKEN from environment or workspace .env."""
+    """Retrieve the configured ROS_CONTAINER_GITHUB_TOKEN from environment or host credentials state."""
     ws_env = load_workspace_env(workspace_root)
     token = os.environ.get('ROS_CONTAINER_GITHUB_TOKEN') or ws_env.get('ROS_CONTAINER_GITHUB_TOKEN')
     return token
@@ -478,9 +482,22 @@ def start_session_container(
     for k, v in container_env.items():
         cmd.extend(['-e', f"{k}={v}"])
 
-    # Pass GITHUB_TOKEN / GH_TOKEN via environment inheritance (`-e KEY` without `=VALUE`)
-    # so the secret token value is never exposed in process arguments (`ps aux`).
+    # Pass GITHUB_TOKEN, GH_TOKEN, and ROS_MAINTAINER_GATEWAY_TOKEN via environment inheritance
+    # (`-e KEY` without `=VALUE`) so secret token values are never exposed in process arguments (`ps aux`).
+    from .auth import TokenStore
+
+    token_store = TokenStore()
+    issued_token = token_store.issue_token(
+        role=f"session:{session_id}",
+        session_id=session_id,
+        container_name=container_name,
+        replace_existing=True,
+    )
+
     run_env = os.environ.copy()
+    run_env['ROS_MAINTAINER_GATEWAY_TOKEN'] = issued_token.token
+    cmd.extend(['-e', 'ROS_MAINTAINER_GATEWAY_TOKEN'])
+
     token = get_container_github_token(workspace_root)
     if token and token.lower() != 'none':
         run_env['GITHUB_TOKEN'] = token
@@ -494,6 +511,7 @@ def start_session_container(
 
     res = active_runner.run(cmd, env=run_env, timeout=300)
     if res.returncode != 0:
+        token_store.revoke_token_by_id(issued_token.token_id)
         return {
             'success': False,
             'status': 'failed',
@@ -528,6 +546,7 @@ def start_session_container(
         'image': image,
         'distro': distro,
         'writable_shared_repos': use_writable_shared,
+        'token_id': issued_token.token_id,
     }
 
 
@@ -639,7 +658,10 @@ def stop_session_container(
     runtime: Optional[str] = None,
     runner: Optional[CommandRunner] = None,
 ) -> Dict[str, Any]:
-    """Stop and remove the sandbox container for a session."""
+    """Stop and remove the sandbox container for a session and revoke its bearer token."""
+    from .auth import TokenStore
+
+    revoked_count = TokenStore().revoke_tokens_for_session(session_id)
     active_runner = runner or get_default_runner()
     rt = runtime or detect_container_runtime(runner=active_runner)
     container_name = get_container_name(session_id)
@@ -647,6 +669,7 @@ def stop_session_container(
         return {
             'success': False,
             'container_name': container_name,
+            'revoked_tokens': revoked_count,
             'error': 'No container runtime (docker or podman) found on PATH.',
         }
 
@@ -655,5 +678,6 @@ def stop_session_container(
         'success': res.returncode == 0,
         'container_name': container_name,
         'runtime': rt,
+        'revoked_tokens': revoked_count,
         'output': res.stdout.strip() or res.stderr.strip(),
     }

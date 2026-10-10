@@ -69,7 +69,9 @@ class PullRequestPolicy:
 class ServerConfig:
     host: str = '127.0.0.1'
     port: int = 8765
-    transport: str = 'sse'  # 'sse', 'stdio', or 'streamable-http'
+    transport: str = 'streamable-http'  # 'sse', 'stdio', or 'streamable-http'
+    allow_hub_exec_in_session: bool = True
+    allow_session_release_tools: bool = False
 
 
 @dataclasses.dataclass
@@ -417,7 +419,9 @@ def load_policy(config_path: Path) -> HarnessPolicy:
     server_config = ServerConfig(
         host=server_data.get('host', '127.0.0.1'),
         port=server_data.get('port', 8765),
-        transport=server_data.get('transport', 'sse'),
+        transport=server_data.get('transport', 'streamable-http'),
+        allow_hub_exec_in_session=bool(server_data.get('allow_hub_exec_in_session', True)),
+        allow_session_release_tools=bool(server_data.get('allow_session_release_tools', False)),
     )
 
     identity_data = data.get('identity') or {}
@@ -467,5 +471,7 @@ policies:
   server:
     host: '127.0.0.1'
     port: 8765
-    transport: 'sse'
+    transport: 'streamable-http'
+    allow_hub_exec_in_session: true
+    allow_session_release_tools: false
 """
