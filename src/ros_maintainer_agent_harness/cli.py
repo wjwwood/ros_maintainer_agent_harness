@@ -780,9 +780,161 @@ def handle_serve(args: argparse.Namespace) -> int:
     transport = args.transport or policy.server.transport or 'stdio'
     host = args.host or policy.server.host or '127.0.0.1'
     port = args.port or policy.server.port or 8765
+    require_auth = bool(getattr(args, 'require_auth', False))
+    allow_wide_bind = bool(getattr(args, 'allow_wide_bind', False))
 
-    print(f"🚀 Starting ROS Maintainer MCP Server Gateway on {host}:{port} (transport: {transport})...")
-    run_server(workspace=layout, transport=transport, host=host, port=port)
+    try:
+        print(f"🚀 Starting ROS Maintainer MCP Server Gateway on {host}:{port} (transport: {transport})...")
+        run_server(
+            workspace=layout,
+            transport=transport,
+            host=host,
+            port=port,
+            require_auth=require_auth,
+            allow_wide_bind=allow_wide_bind,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def handle_gateway(args: argparse.Namespace) -> int:
+    from .gateway import (
+        get_gateway_status,
+        install_launchd_service,
+        read_gateway_logs,
+        restart_gateway_service,
+        start_gateway_service,
+        stop_gateway_service,
+    )
+
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    if not layout.is_initialized():
+        layout.initialize()
+
+    policy = layout.get_policy()
+    action = getattr(args, 'gateway_action', None)
+    as_json = bool(getattr(args, 'json', False))
+
+    if action == 'start':
+        host = getattr(args, 'host', None) or policy.server.host or '127.0.0.1'
+        port = getattr(args, 'port', None) or policy.server.port or 8765
+        transport = getattr(args, 'transport', None) or policy.server.transport or 'streamable-http'
+        allow_wide_bind = bool(getattr(args, 'allow_wide_bind', False))
+        foreground = bool(getattr(args, 'foreground', False))
+
+        if foreground:
+            run_server = _lazy('run_server')
+            try:
+                run_server(
+                    workspace=layout,
+                    transport=transport,
+                    host=host,
+                    port=port,
+                    require_auth=True,
+                    allow_wide_bind=allow_wide_bind,
+                )
+                return 0
+            except ValueError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                return 1
+
+        res = start_gateway_service(
+            workspace_path=ws_path,
+            host=host,
+            port=port,
+            transport=transport,
+            allow_wide_bind=allow_wide_bind,
+        )
+        if as_json:
+            print(json.dumps(res, indent=2))
+            return 0 if res.get('success') else 1
+        if not res.get('success'):
+            print(f"Error starting gateway: {res.get('error')}", file=sys.stderr)
+            return 1
+        if res.get('already_running'):
+            print(f"ℹ️  Gateway already running (PID {res.get('pid')}) at {res.get('url')}")
+        else:
+            print(f"✅ Started Host Launch Service Gateway (PID {res.get('pid')}) at {res.get('url')}")
+        return 0
+
+    elif action == 'stop':
+        res = stop_gateway_service()
+        if as_json:
+            print(json.dumps(res, indent=2))
+            return 0 if res.get('success') else 1
+        if res.get('status') == 'not_running':
+            print("ℹ️  Gateway is not running.")
+        else:
+            print(f"✅ Stopped Gateway (PID {res.get('pid')}).")
+        return 0
+
+    elif action == 'restart':
+        host = getattr(args, 'host', None) or policy.server.host or '127.0.0.1'
+        port = getattr(args, 'port', None) or policy.server.port or 8765
+        transport = getattr(args, 'transport', None) or policy.server.transport or 'streamable-http'
+        allow_wide_bind = bool(getattr(args, 'allow_wide_bind', False))
+        res = restart_gateway_service(
+            workspace_path=ws_path,
+            host=host,
+            port=port,
+            transport=transport,
+            allow_wide_bind=allow_wide_bind,
+        )
+        if as_json:
+            print(json.dumps(res, indent=2))
+            return 0 if res.get('success') else 1
+        if not res.get('success'):
+            print(f"Error restarting gateway: {res.get('error')}", file=sys.stderr)
+            return 1
+        print(f"✅ Restarted Host Launch Service Gateway (PID {res.get('pid')}) at {res.get('url')}")
+        return 0
+
+    elif action == 'status':
+        host = getattr(args, 'host', None) or policy.server.host or '127.0.0.1'
+        port = getattr(args, 'port', None) or policy.server.port or 8765
+        res = get_gateway_status(host=host, port=port)
+        if as_json:
+            print(json.dumps(res, indent=2))
+            return 0
+        icon = '🟢' if res.get('running') else '⚪'
+        print(f"{icon} Gateway Status: {'running' if res.get('running') else 'stopped'}")
+        print(f"  - PID:          {res.get('pid') or 'N/A'}")
+        print(f"  - Endpoint:     {res.get('url')}")
+        print(f"  - Healthy:      {res.get('healthy')}")
+        print(f"  - Active tokens:{res.get('active_tokens')}")
+        print(f"  - State dir:    {res.get('state_dir')}")
+        return 0
+
+    elif action == 'logs':
+        lines = getattr(args, 'lines', 50)
+        text = read_gateway_logs(lines=lines)
+        if text:
+            sys.stdout.write(text)
+            if not text.endswith('\n'):
+                sys.stdout.write('\n')
+        else:
+            print("No gateway logs found.")
+        return 0
+
+    elif action == 'install-service':
+        host = getattr(args, 'host', None) or policy.server.host or '127.0.0.1'
+        port = getattr(args, 'port', None) or policy.server.port or 8765
+        res = install_launchd_service(
+            workspace_path=ws_path,
+            host=host,
+            port=port,
+            load=bool(getattr(args, 'load', False)),
+        )
+        if as_json:
+            print(json.dumps(res, indent=2))
+            return 0 if res.get('success') else 1
+        print(f"✅ Wrote launchd plist to: {res.get('plist_path')}")
+        return 0
+
+    print("Run `ros-maintainer-harness gateway --help` for gateway commands.")
     return 0
 
 
@@ -1394,6 +1546,81 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     serve_parser.add_argument('--host', type=str, default=None, help='Server host (default: 127.0.0.1)')
     serve_parser.add_argument('--port', type=int, default=None, help='Server port (default: 8765)')
+    serve_parser.add_argument(
+        '--require-auth', action='store_true', default=False,
+        help='Require role-scoped bearer token authentication on HTTP requests',
+    )
+    serve_parser.add_argument(
+        '--allow-wide-bind', action='store_true', default=False,
+        help='Allow binding to non-loopback addresses such as 0.0.0.0',
+    )
+
+    # gateway (Host Launch Service daemon management)
+    gw_parser = subparsers.add_parser(
+        'gateway', parents=[ws_parent],
+        help='Manage the Host Launch Service HTTP MCP Gateway daemon (start, stop, restart, status, logs)',
+    )
+    gw_subparsers = gw_parser.add_subparsers(dest='gateway_action')
+
+    gw_start = gw_subparsers.add_parser(
+        'start', parents=[ws_parent], help='Start the Host Launch Service HTTP MCP Gateway'
+    )
+    gw_start.add_argument('--host', type=str, default=None, help='Bind host (default: 127.0.0.1)')
+    gw_start.add_argument('--port', type=int, default=None, help='Bind port (default: 8765)')
+    gw_start.add_argument(
+        '--transport', choices=['streamable-http', 'sse'], default='streamable-http',
+        help='Network MCP transport (default: streamable-http)',
+    )
+    gw_start.add_argument(
+        '--allow-wide-bind', action='store_true', default=False,
+        help='Allow binding to non-loopback addresses such as 0.0.0.0',
+    )
+    gw_start.add_argument(
+        '--foreground', action='store_true', default=False,
+        help='Run gateway in the foreground instead of detaching',
+    )
+    gw_start.add_argument('--json', action='store_true', help='Output JSON result')
+
+    gw_stop = gw_subparsers.add_parser(
+        'stop', parents=[ws_parent], help='Stop the running Host Launch Service Gateway'
+    )
+    gw_stop.add_argument('--json', action='store_true', help='Output JSON result')
+
+    gw_restart = gw_subparsers.add_parser(
+        'restart', parents=[ws_parent], help='Restart the Host Launch Service Gateway'
+    )
+    gw_restart.add_argument('--host', type=str, default=None, help='Bind host (default: 127.0.0.1)')
+    gw_restart.add_argument('--port', type=int, default=None, help='Bind port (default: 8765)')
+    gw_restart.add_argument(
+        '--transport', choices=['streamable-http', 'sse'], default='streamable-http',
+        help='Network MCP transport (default: streamable-http)',
+    )
+    gw_restart.add_argument(
+        '--allow-wide-bind', action='store_true', default=False,
+        help='Allow binding to non-loopback addresses such as 0.0.0.0',
+    )
+    gw_restart.add_argument('--json', action='store_true', help='Output JSON result')
+
+    gw_status = gw_subparsers.add_parser(
+        'status', parents=[ws_parent], help='Check Host Launch Service Gateway status and health'
+    )
+    gw_status.add_argument('--host', type=str, default=None, help='Target host (default: 127.0.0.1)')
+    gw_status.add_argument('--port', type=int, default=None, help='Target port (default: 8765)')
+    gw_status.add_argument('--json', action='store_true', help='Output JSON result')
+
+    gw_logs = gw_subparsers.add_parser(
+        'logs', parents=[ws_parent], help='Tail Host Launch Service Gateway logs'
+    )
+    gw_logs.add_argument('-n', '--lines', type=int, default=50, help='Number of trailing log lines (default: 50)')
+
+    gw_service = gw_subparsers.add_parser(
+        'install-service', parents=[ws_parent],
+        help='Generate macOS launchd plist for the Host Launch Service Gateway',
+    )
+    gw_service.add_argument('--host', type=str, default=None, help='Bind host (default: 127.0.0.1)')
+    gw_service.add_argument('--port', type=int, default=None, help='Bind port (default: 8765)')
+    gw_service.add_argument('--load', action='store_true', help='Run launchctl load -w after writing plist')
+    gw_service.add_argument('--json', action='store_true', help='Output JSON result')
 
     # session
     session_parser = subparsers.add_parser(
@@ -1927,6 +2154,8 @@ def main():
         return handle_mcp_install(args)
     elif args.command == 'serve':
         return handle_serve(args)
+    elif args.command == 'gateway':
+        return handle_gateway(args)
     elif args.command == 'session':
         if args.session_action == 'create':
             return handle_session_create(args)

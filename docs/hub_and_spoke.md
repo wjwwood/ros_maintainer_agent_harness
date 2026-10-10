@@ -90,21 +90,54 @@ The Hub container mounts `<ws>` read-write so it can read session timelines and 
 
 ---
 
-## 3. Tier Capabilities and Caller Authorization Matrix
+## 3. Host Launch Service (`gateway`) and Role-Based Authorization
 
-The Host Launch Service issues a random bearer token whenever it starts the Hub container (`role = "hub"`) or a Session container (`role = "session:<session_id>"`). Token hashes and metadata live in `~/.local/state/ros_maintainer_agent_harness/` (outside the mounted workspace) and are revoked when a container stops.
+### 3.1 Host Launch Service Lifecycle
+The Host Launch Service runs as a background HTTP MCP daemon on the host (`ros-maintainer-harness gateway`):
 
-Any `session_id` parameter passed by a `session:<id>` caller is verified against (or overridden by) the token's bound `<id>`, preventing one session from acting on another session's worktree, status, or CI runs.
+```bash
+# Start the background gateway daemon (default: 127.0.0.1:8765, streamable-http)
+ros-maintainer-harness -w ~/ros_maintenance_ws gateway start
 
-| Operation / MCP Tool Category | `admin` (Host CLI / Dev) | `hub` (Hub Container) | `session:<id>` (Session Container) |
+# Check gateway status, PID, health, and active token count
+ros-maintainer-harness -w ~/ros_maintenance_ws gateway status
+
+# Tail gateway logs
+ros-maintainer-harness -w ~/ros_maintenance_ws gateway logs -n 50
+
+# Restart or stop the gateway
+ros-maintainer-harness -w ~/ros_maintenance_ws gateway restart
+ros-maintainer-harness -w ~/ros_maintenance_ws gateway stop
+
+# Generate macOS launchd plist (~/Library/LaunchAgents/org.osrf.ros_maintainer_harness.gateway.plist)
+ros-maintainer-harness -w ~/ros_maintenance_ws gateway install-service
+```
+
+- **State & Credentials Outside the Workspace**: The pidfile (`gateway.pid`), log file (`gateway.log`), hashed token store (`tokens.json`, mode `0600`), and host/container credentials (`credentials.env`, mode `0600`) live in `~/.local/state/ros_maintainer_agent_harness/`, never inside the workspace directory mounted into containers. Any legacy `<ws>/.env` file is automatically migrated into `credentials.env` and removed from `<ws>`.
+- **Network Binding**: By default, `gateway start` binds to `127.0.0.1:8765` (and on Linux with a local `docker0` bridge interface, runs a lightweight TCP bridge forwarder on the `docker0` IP so containers configured with `--add-host=host.docker.internal:host-gateway` can reach `http://host.docker.internal:8765/mcp`). Binding to `0.0.0.0` or non-loopback addresses is refused unless `--allow-wide-bind` is explicitly passed.
+- **Health Endpoint**: `GET http://127.0.0.1:8765/health` (and `GET http://host.docker.internal:8765/health` from inside containers) returns `{"status": "ok", "service": "ros-maintainer-harness-gateway"}`.
+
+### 3.2 Token Issuance, Revocation, and Caller Identity
+The Host Launch Service issues a cryptographically random bearer token (`rmah_tok_...`, 32 bytes of `secrets.token_urlsafe`) whenever it starts the Hub container (`role = "hub"`) or a Session container (`role = "session:<session_id>"`):
+
+1. **Hashed Storage**: Only the SHA-256 digest (`token_hash`), `token_id`, `role`, `container_name`, `issued_at`, and `revoked` flag are persisted in `~/.local/state/ros_maintainer_agent_harness/tokens.json`.
+2. **Environment Inheritance (No `ps` Leakage)**: The raw token is passed into the container via `ROS_MAINTAINER_GATEWAY_TOKEN` in the `docker run` subprocess environment with `-e ROS_MAINTAINER_GATEWAY_TOKEN` (without `=value` on the command line), so the token never appears in host `ps aux` output or `audit.jsonl`.
+3. **Revocation on Stop / Restart**: Starting a container revokes any prior active tokens for that role, and `stop_session_container` (`session down`) immediately revokes all tokens bound to that session.
+4. **Untrusted Environment Variables Ignored**: The server derives caller identity exclusively from the verified `Authorization: Bearer <token>` header. Any client-supplied `ROS_MAINTAINER_SESSION_ID` environment variable or mismatched `session_id` argument is ignored or rejected.
+
+### 3.3 Caller Authorization Matrix
+
+| Operation / MCP Tool | `admin` (Host CLI / Dev) | `hub` (Hub Container) | `session:<id>` (Session Container) |
 | :--- | :--- | :--- | :--- |
-| **Environment & Status Queries** (`check_environment`, `get_workspace_status`, `get_next_actions`, `list_sessions`, `get_maintainer_rules`, `check_policy`, `list_approval_requests`) | Allowed | Allowed | Read-only self status (`get_maintainer_rules`, `check_policy`) |
-| **Session Lifecycle & Container Launch** (`scaffold_session_from_pr`, `create_session`, `prune_session`, `start_session_container`, `stop_session_container`, `start_session_conversation`) | Allowed | Allowed (subject to `max_concurrent_sessions` and `LaunchSpec` policy) | **Denied** |
-| **Cross-Session Command Execution** (`exec_in_session`) | Allowed | Configurable (`allow_hub_exec_in_session`, disabled by default once in-container session agents are active) | **Denied** (session agent already runs inside its own container) |
-| **Session Progress & Timeline** (`log_status`, `update_session_status`) | Allowed | Allowed | Allowed for own `<id>` only |
-| **CI Queries & Launching** (`get_ci_status`, `get_ci_summary`, `list_ci_runs`, `find_restarted_ci`, `launch_jenkins_ci`, `cancel_ci_run`) | Allowed | Allowed | Allowed for own `<id>` only (subject to CI cooldown and rate limits) |
+| **Environment & Hub Queries** (`check_environment`, `get_workspace_status`, `get_next_actions`, `list_sessions`, `list_approval_requests`) | Allowed | Allowed | **Denied** |
+| **Rules & Policy Queries** (`get_maintainer_rules`, `check_policy`) | Allowed | Allowed | Allowed (read-only) |
+| **Session Scaffolding & Start** (`scaffold_session_from_pr`, `create_session`, `start_session_container`, `start_session_conversation`) | Allowed | Allowed (sets `started_by_hub: true` in `session.json`) | **Denied** |
+| **Session Stop & Prune** (`stop_session_container`, `prune_session`) | Allowed | Allowed only for sessions with `started_by_hub: true` | **Denied** |
+| **Cross-Session Command Execution** (`exec_in_session`) | Allowed | Allowed by default (`allow_hub_exec_in_session: true` in `policy.yaml`) for sessions with `started_by_hub: true` | **Denied** (session agent already runs inside its own container) |
+| **Session Progress & Timeline** (`log_status`, `update_session_status`) | Allowed | Allowed for sessions with `started_by_hub: true` | Allowed for own `<id>` only |
+| **CI Queries & Launching** (`get_ci_status`, `get_ci_summary`, `list_ci_runs`, `find_restarted_ci`, `launch_jenkins_ci`, `cancel_ci_run`) | Allowed | Allowed (`launch_jenkins_ci` / `find_restarted_ci` require `started_by_hub: true`) | Allowed for own `<id>` only (cross-session CI runs and paths are rejected) |
 | **Remote Git & PR Mutations** (`git_push`, `create_pull_request`, `edit_pull_request`) | Allowed (with policy/ticket) | **Denied** (mutations originate from a session checkout) | Allowed for own `<id>` only (subject to branch/fork policy and approval tickets) |
-| **Package Releases** (`push_release`, `run_bloom_release`) | Allowed (with approval ticket) | **Denied** | Allowed for own `<id>` only when policy enables session release requests and a maintainer approval ticket is approved |
+| **Package Releases** (`push_release`, `run_bloom_release`) | Allowed (with approval ticket) | **Denied** | Allowed for own `<id>` only when `allow_session_release_tools: true` in `policy.yaml` and a maintainer approval ticket is approved |
 | **Approving Tickets & Editing Policy** (`approval approve|reject`, `rules add`, editing `policy.yaml`) | Host CLI only | **Denied** | **Denied** |
 
 ---

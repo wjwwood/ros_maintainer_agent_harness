@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from datetime import datetime, timezone
+import functools
+import inspect
+import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -34,12 +39,26 @@ except ImportError:
                 return decorator
 
 from .approval import ApprovalManager
+from .audit import append_audit_record
+from .auth import (
+    authorize_tool_call,
+    caller_context,
+    CallerIdentity,
+    get_active_caller,
+    TokenStore,
+)
 from .ci import CIMonitorService, CITracker, JenkinsManager
 from .devcontainer import (
     check_token_and_environment,
     exec_in_session_container as do_exec_in_session_container,
     start_session_container as do_start_session_container,
     stop_session_container as do_stop_session_container,
+)
+from .gateway import (
+    _TCPBridgeForwarder,
+    detect_linux_docker_bridge_ip,
+    get_harness_version,
+    validate_gateway_bind_host,
 )
 from .git_ops import (
     execute_git_push,
@@ -1690,7 +1709,7 @@ def perform_run_bloom_release(
     }
 
 
-def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
+def create_mcp_server(workspace: WorkspaceLayout, require_auth: bool = False) -> MCPServer:
     """Create and configure the Host MCP Server Gateway with safety rules and tools."""
     if not workspace.is_initialized():
         workspace.initialize()
@@ -1701,6 +1720,92 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
     session_mgr = SessionManager(workspace)
     policy = workspace.get_policy()
     jenkins_mgr = JenkinsManager(ci_server=policy.jenkins_ci.ci_server, tracker=ci_tracker)
+
+    orig_server_tool = server.tool
+
+    def _authorized_tool(*t_args: Any, **t_kwargs: Any) -> Any:
+        base_decorator = orig_server_tool(*t_args, **t_kwargs)
+
+        def decorator(fn: Any) -> Any:
+            sig = inspect.signature(fn)
+            ret_ann = sig.return_annotation
+
+            @functools.wraps(fn)
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                bound = sig.bind_partial(*args, **kwargs)
+                bound.apply_defaults()
+                active_caller = get_active_caller()
+                if active_caller is None:
+                    effective_caller = (
+                        None
+                        if require_auth
+                        else CallerIdentity(role='admin', token_id='local-stdio')
+                    )
+                else:
+                    effective_caller = active_caller
+
+                curr_policy = workspace.get_policy()
+                allowed, err_msg, overrides = authorize_tool_call(
+                    caller=effective_caller,
+                    tool_name=fn.__name__,
+                    bound_args=dict(bound.arguments),
+                    workspace_root=workspace.root,
+                    allow_hub_exec_in_session=curr_policy.server.allow_hub_exec_in_session,
+                    allow_session_release_tools=curr_policy.server.allow_session_release_tools,
+                )
+                if not allowed:
+                    caller_role = effective_caller.role if effective_caller else 'unauthenticated'
+                    target_sid = str(
+                        (
+                            effective_caller.session_id
+                            if effective_caller and effective_caller.session_id
+                            else None
+                        )
+                        or bound.arguments.get('session_id')
+                        or 'unknown'
+                    )
+                    append_audit_record(
+                        workspace.audit_log_path,
+                        {
+                            'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                            'session_id': target_sid,
+                            'action': fn.__name__,
+                            'target': str(
+                                bound.arguments.get('session_id')
+                                or bound.arguments.get('repo')
+                                or fn.__name__
+                            ),
+                            'reason': f"Unauthorized tool call by role '{caller_role}'",
+                            'status': 'DENIED',
+                            'caller_role': caller_role,
+                            'token_id': effective_caller.token_id if effective_caller else None,
+                            'details': {'error': err_msg},
+                        },
+                    )
+                    err_payload = {
+                        'success': False,
+                        'authorized': False,
+                        'status': 'UNAUTHORIZED',
+                        'error': err_msg,
+                    }
+                    if ret_ann is str or ret_ann == 'str':
+                        return json.dumps(err_payload)
+                    if getattr(ret_ann, '__origin__', None) in (list, List):
+                        return [err_payload]
+                    return err_payload
+
+                for k, v in overrides.items():
+                    if k in bound.arguments:
+                        bound.arguments[k] = v
+
+                with caller_context(effective_caller):
+                    return fn(*bound.args, **bound.kwargs)
+
+            return base_decorator(wrapper)
+
+        return decorator
+
+    server.tool = _authorized_tool  # type: ignore[method-assign]
 
     # 1. log_status
     @server.tool()
@@ -2042,6 +2147,11 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             distro=distro,
             custom_image=custom_image,
         )
+        caller = get_active_caller()
+        write_session_metadata(
+            info.session_dir,
+            {'started_by_hub': bool(caller and caller.is_hub)},
+        )
         worktree_path = None
         if repo_path and branch:
             worktree_path = str(session_mgr.attach_worktree(
@@ -2223,15 +2333,36 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             timeout_seconds: Maximum time to wait in seconds (default: 60).
             poll_interval_seconds: Polling frequency in seconds (default: 5.0).
         """
+        caller = get_active_caller()
         run = None
         if job_url_or_id:
             run = ci_tracker.get_run(job_url_or_id)
-        elif session_id:
-            run = ci_tracker.get_latest_run_for_session(session_id)
         elif pr_url:
-            runs = ci_tracker.list_runs(pr_url=pr_url, limit=1)
+            runs = ci_tracker.list_runs(
+                session_id=(caller.session_id if caller and caller.is_session else session_id),
+                pr_url=pr_url,
+                limit=1,
+            )
             if runs:
                 run = runs[0]
+        elif session_id:
+            run = ci_tracker.get_latest_run_for_session(session_id)
+
+        if (
+            caller is not None
+            and caller.is_session
+            and run is not None
+            and run.session_id
+            and run.session_id != caller.session_id
+        ):
+            return {
+                'success': False,
+                'status': 'UNAUTHORIZED',
+                'error': (
+                    f"Role '{caller.role}' cannot access CI run belonging to "
+                    f"another session ('{run.session_id}')."
+                ),
+            }
 
         target_url = run.job_url if run else job_url_or_id
         if not target_url or not target_url.startswith(('http://', 'https://')):
@@ -2302,7 +2433,24 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             job_url_or_id: Jenkins job URL or build number or PR shorthand.
             max_log_lines: Maximum number of relevant error log lines to include.
         """
+        caller = get_active_caller()
         run = ci_tracker.get_run(job_url_or_id)
+        if (
+            caller is not None
+            and caller.is_session
+            and run is not None
+            and run.session_id
+            and run.session_id != caller.session_id
+        ):
+            return {
+                'success': False,
+                'status': 'UNAUTHORIZED',
+                'error': (
+                    f"Role '{caller.role}' cannot access CI summary belonging to "
+                    f"another session ('{run.session_id}')."
+                ),
+            }
+
         target_url = run.job_url if run else job_url_or_id
         if not target_url or not target_url.startswith(('http://', 'https://')):
             return {
@@ -2360,7 +2508,24 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
                 'error': 'Mandatory parameter `reason` must not be empty.',
             }
 
+        caller = get_active_caller()
         run = ci_tracker.get_run(job_url_or_id)
+        if (
+            caller is not None
+            and caller.is_session
+            and run is not None
+            and run.session_id
+            and run.session_id != caller.session_id
+        ):
+            return {
+                'success': False,
+                'status': 'UNAUTHORIZED',
+                'error': (
+                    f"Role '{caller.role}' cannot cancel CI run belonging to "
+                    f"another session ('{run.session_id}')."
+                ),
+            }
+
         target_url = run.job_url if run else job_url_or_id
         if not target_url or not target_url.startswith(('http://', 'https://')):
             return {
@@ -2481,6 +2646,11 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
                 distro=distro,
                 clone_if_missing=clone_if_missing,
             )
+            caller = get_active_caller()
+            write_session_metadata(
+                result.session_dir,
+                {'started_by_hub': bool(caller and caller.is_hub)},
+            )
             data = result.to_dict()
             env_check = check_token_and_environment(workspace.root)
             data['environment_ready'] = env_check['ready']
@@ -2540,6 +2710,9 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             writable_shared_repos=writable_shared_repos,
         )
         if res.get('success'):
+            caller = get_active_caller()
+            if caller and caller.is_hub:
+                write_session_metadata(session_dir, {'started_by_hub': True})
             timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
             timeline.log_status(
                 f"Started session sandbox container `{res.get('container_name')}` (distro: `{target_distro}`)."
@@ -2671,7 +2844,7 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
             model: Optional model tier ('flash_lite', 'flash', 'pro').
         """
         try:
-            return do_start_session_conversation(
+            res = do_start_session_conversation(
                 workspace=workspace,
                 pr_ref=pr_ref,
                 session_id=session_id,
@@ -2681,6 +2854,13 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
                 mode=mode,
                 model=model,
             )
+            caller = get_active_caller()
+            sid = res.get('session_id') or session_id
+            if caller and caller.is_hub and sid:
+                sdir = workspace.sessions_dir / str(sid)
+                if sdir.is_dir():
+                    write_session_metadata(sdir, {'started_by_hub': True})
+            return res
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
@@ -2823,16 +3003,157 @@ def create_mcp_server(workspace: WorkspaceLayout) -> MCPServer:
     return server
 
 
+class _GatewayASGIMiddleware:
+    """
+    ASGI middleware for the HTTP MCP launch service:
+    - Serves `GET /health` without requiring auth so containers and host CLI can verify connectivity.
+    - Verifies `Authorization: Bearer <token>` (or `X-Ros-Maintainer-Token`) against `TokenStore`
+      and binds the resulting `CallerIdentity` to the request context.
+    """
+
+    def __init__(
+        self,
+        app: Any,
+        require_auth: bool = False,
+        state_dir: Optional[Path] = None,
+    ):
+        self.app = app
+        self.require_auth = require_auth
+        self.token_store = TokenStore(state_dir)
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get('type') != 'http':
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get('path', '')
+        if path == '/health':
+            body = json.dumps({
+                'status': 'ok',
+                'version': get_harness_version(),
+                'pid': os.getpid(),
+            }).encode('utf-8')
+            await send({
+                'type': 'http.response.start',
+                'status': 200,
+                'headers': [
+                    (b'content-type', b'application/json'),
+                    (b'content-length', str(len(body)).encode('ascii')),
+                ],
+            })
+            await send({
+                'type': 'http.response.body',
+                'body': body,
+            })
+            return
+
+        raw_token: Optional[str] = None
+        for k_bytes, v_bytes in scope.get('headers') or []:
+            k = k_bytes.decode('latin-1').lower()
+            if k == 'authorization':
+                raw_token = v_bytes.decode('latin-1').strip()
+                break
+            if k == 'x-ros-maintainer-token' and not raw_token:
+                raw_token = v_bytes.decode('latin-1').strip()
+
+        caller = self.token_store.verify_token(raw_token)
+        if self.require_auth and caller is None:
+            body = json.dumps({
+                'error': 'unauthorized',
+                'message': 'Missing, invalid, or revoked bearer token.',
+            }).encode('utf-8')
+            await send({
+                'type': 'http.response.start',
+                'status': 401,
+                'headers': [
+                    (b'content-type', b'application/json'),
+                    (b'content-length', str(len(body)).encode('ascii')),
+                    (b'www-authenticate', b'Bearer'),
+                ],
+            })
+            await send({
+                'type': 'http.response.body',
+                'body': body,
+            })
+            return
+
+        with caller_context(caller):
+            await self.app(scope, receive, send)
+
+
+def create_gateway_http_app(
+    server: MCPServer,
+    transport: str = 'streamable-http',
+    host: str = '127.0.0.1',
+    require_auth: bool = False,
+    state_dir: Optional[Path] = None,
+) -> Any:
+    """Create the Starlette ASGI app wrapped with `/health` and bearer-token auth middleware."""
+    transport_security = None
+    try:
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        allowed_hosts = [
+            '127.0.0.1:*',
+            'localhost:*',
+            '[::1]:*',
+            'host.docker.internal:*',
+        ]
+        if host not in ('127.0.0.1', 'localhost', '::1', '0.0.0.0', '::'):
+            allowed_hosts.append(f'{host}:*')
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed_hosts,
+            allowed_origins=[
+                'http://127.0.0.1:*',
+                'http://localhost:*',
+                'http://[::1]:*',
+                'http://host.docker.internal:*',
+            ],
+        )
+    except Exception:
+        transport_security = None
+
+    if transport == 'streamable-http':
+        inner_app = server.streamable_http_app(
+            transport_security=transport_security,
+            host=host,
+        )
+    elif transport == 'sse':
+        inner_app = server.sse_app(
+            transport_security=transport_security,
+            host=host,
+        )
+    else:
+        raise ValueError(f"Unsupported HTTP transport: '{transport}'.")
+
+    return _GatewayASGIMiddleware(
+        inner_app,
+        require_auth=require_auth,
+        state_dir=state_dir,
+    )
+
+
 def run_server(
     workspace: WorkspaceLayout,
     transport: str = 'stdio',
     host: str = '127.0.0.1',
     port: int = 8765,
     enable_ci_monitor: bool = True,
+    require_auth: bool = False,
+    allow_wide_bind: bool = False,
 ) -> None:
     """Run the Host MCP Server Gateway with background CI monitoring."""
-    server = create_mcp_server(workspace)
+    if transport in ('sse', 'streamable-http'):
+        valid_host, host_err = validate_gateway_bind_host(host, allow_wide_bind=allow_wide_bind)
+        if not valid_host:
+            raise ValueError(host_err)
+    elif transport != 'stdio':
+        raise ValueError(f"Unsupported transport: '{transport}'. Choose 'stdio', 'sse', or 'streamable-http'.")
+
+    server = create_mcp_server(workspace, require_auth=require_auth)
     monitor_service = None
+    bridge_forwarder: Optional[_TCPBridgeForwarder] = None
     if enable_ci_monitor:
         ci_tracker = CITracker(workspace.audit_dir / 'ci_runs.json')
         policy = workspace.get_policy()
@@ -2850,9 +3171,32 @@ def run_server(
         if transport == 'stdio':
             server.run(transport='stdio')
         elif transport in ('sse', 'streamable-http'):
-            server.run(transport=transport, host=host, port=port)
-        else:
-            raise ValueError(f"Unsupported transport: '{transport}'. Choose 'stdio', 'sse', or 'streamable-http'.")
+            import anyio
+            import uvicorn
+
+            if host == '127.0.0.1':
+                bridge_ip = detect_linux_docker_bridge_ip()
+                if bridge_ip:
+                    forwarder = _TCPBridgeForwarder(listen_host=bridge_ip, port=port, target_host=host)
+                    if forwarder.start():
+                        bridge_forwarder = forwarder
+
+            asgi_app = create_gateway_http_app(
+                server=server,
+                transport=transport,
+                host=host,
+                require_auth=require_auth,
+            )
+            config = uvicorn.Config(
+                asgi_app,
+                host=host,
+                port=port,
+                log_level='info',
+            )
+            uv_server = uvicorn.Server(config)
+            anyio.run(uv_server.serve)
     finally:
+        if bridge_forwarder:
+            bridge_forwarder.stop()
         if monitor_service:
             monitor_service.stop()
