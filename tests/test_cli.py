@@ -399,6 +399,81 @@ class TestCLI(unittest.TestCase):
                         self.assertEqual(ret, 0)
                         self.assertIn('Stopped and removed container', fake_out.getvalue())
 
+    def test_workspace_flag_before_or_after_subcommands(self):
+        from ros_maintainer_agent_harness.cli import parse_args
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = str(Path(temp_dir) / 'ws_order')
+
+            # 1. `ros-maintainer-harness init -w <path>` (repro from issue #28)
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', 'init', '-w', ws_root]):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn('Successfully initialized maintainer workspace', fake_out.getvalue())
+
+            # 2. `status` with -w after subcommand
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', 'status', '--no-containers', '-w', ws_root]):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn('Maintainer Hub Status', fake_out.getvalue())
+
+            # 3. `session create` with -w after nested subcommand
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', 'session', 'create', 'sess-w', '-w', ws_root]):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn("Created session 'sess-w'", fake_out.getvalue())
+
+            # 4. `session -w <path> list` (-w between parent and nested subcommand)
+            with patch.object(sys, 'argv', ['ros-maintainer-harness', 'session', '-w', ws_root, 'list']):
+                with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    self.assertIn('sess-w', fake_out.getvalue())
+
+            # 5. `session up sess-w -w <path>`
+            with patch('ros_maintainer_agent_harness.cli.start_session_container') as mock_up:
+                mock_up.return_value = {
+                    'success': True,
+                    'status': 'started',
+                    'container_name': 'ros-harness-sess-w',
+                    'runtime': 'docker',
+                }
+                with patch.object(sys, 'argv', ['ros-maintainer-harness', 'session', 'up', 'sess-w', '-w', ws_root]):
+                    with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                        ret = main()
+                        self.assertEqual(ret, 0)
+                        self.assertIn('ros-harness-sess-w', fake_out.getvalue())
+
+            # 6. `session exec sess-w -w <path> -- colcon build`
+            with patch('ros_maintainer_agent_harness.cli.exec_in_session_container') as mock_exec:
+                mock_exec.return_value = {
+                    'success': True,
+                    'returncode': 0,
+                    'stdout': 'ok\n',
+                    'stderr': '',
+                }
+                exec_argv = [
+                    'ros-maintainer-harness', 'session', 'exec', 'sess-w', '-w', ws_root, '--', 'colcon build'
+                ]
+                with patch.object(sys, 'argv', exec_argv):
+                    with patch('sys.stdout', new=io.StringIO()) as fake_out:
+                        ret = main()
+                        self.assertEqual(ret, 0)
+                        self.assertIn('ok', fake_out.getvalue())
+
+            # 7. `parse_args` checks for `release push` and `policy check` with trailing -w
+            parsed_rel = parse_args([
+                'release', 'push', '-s', 'sess-w', '-t', '1.2.3', '-m', 'release', '-w', ws_root,
+            ])
+            self.assertEqual(parsed_rel.workspace, ws_root)
+            self.assertEqual(parsed_rel.release_action, 'push')
+
+            parsed_override = parse_args(['-w', '/earlier', 'init', '-w', ws_root])
+            self.assertEqual(parsed_override.workspace, ws_root)
+
 
 if __name__ == '__main__':
     unittest.main()

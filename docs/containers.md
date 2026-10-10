@@ -1,6 +1,6 @@
 # Container Runtimes & Sandboxing
 
-This document describes how the harness isolates agent sessions using container sandboxes, manages ROS 2 distributions, mounts workspace files, and configures networking.
+This document describes how the harness isolates agent sessions using container sandboxes, manages ROS 2 distributions, mounts workspace files, and configures networking. For the three-tier hub-and-spoke container deployment, identical-path mount rules, and threat model, see [Hub-and-Spoke Architecture & Threat Model](hub_and_spoke.md).
 
 ---
 

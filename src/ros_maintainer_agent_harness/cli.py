@@ -525,18 +525,11 @@ def handle_session_up(args: argparse.Namespace) -> int:
 
 
 def handle_session_exec(args: argparse.Namespace) -> int:
-    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
-    layout = WorkspaceLayout(ws_path)
-    mgr = SessionManager(layout)
-
-    if not mgr.session_exists(args.session_id):
-        print(f"Error: Session '{args.session_id}' does not exist.", file=sys.stderr)
-        return 1
-
     cmd_parts = list(args.exec_command or [])
     workdir = args.workdir or '/workspace'
     timeout = args.timeout or 600
     no_auto_start = bool(args.no_auto_start)
+    ws_override = args.workspace
 
     while cmd_parts and cmd_parts[0] != '--' and cmd_parts[0].startswith('-'):
         opt = cmd_parts.pop(0)
@@ -544,6 +537,10 @@ def handle_session_exec(args: argparse.Namespace) -> int:
             workdir = cmd_parts.pop(0)
         elif opt.startswith('--workdir='):
             workdir = opt.split('=', 1)[1]
+        elif opt in ('-w', '--workspace') and cmd_parts:
+            ws_override = cmd_parts.pop(0)
+        elif opt.startswith('--workspace='):
+            ws_override = opt.split('=', 1)[1]
         elif opt == '--timeout' and cmd_parts:
             timeout = int(cmd_parts.pop(0))
         elif opt.startswith('--timeout='):
@@ -553,6 +550,14 @@ def handle_session_exec(args: argparse.Namespace) -> int:
         else:
             cmd_parts.insert(0, opt)
             break
+
+    ws_path = Path(ws_override).resolve() if ws_override else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    mgr = SessionManager(layout)
+
+    if not mgr.session_exists(args.session_id):
+        print(f"Error: Session '{args.session_id}' does not exist.", file=sys.stderr)
+        return 1
 
     if cmd_parts and cmd_parts[0] == '--':
         cmd_parts = cmd_parts[1:]
@@ -1280,7 +1285,19 @@ def handle_edit_pr(args: argparse.Namespace) -> int:
     return 0 if res.get('success') else 1
 
 
-def parse_args():
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    ws_help = (
+        'Maintainer workspace root directory '
+        '(defaults to $ROS_MAINTAINER_WS, enclosing workspace, or current directory)'
+    )
+    ws_parent = argparse.ArgumentParser(add_help=False)
+    ws_parent.add_argument(
+        '-w', '--workspace',
+        type=str,
+        default=argparse.SUPPRESS,
+        help=ws_help,
+    )
+
     parser = argparse.ArgumentParser(
         prog='ros-maintainer-harness',
         description='ROS Maintainer Agent Harness & Workspace Manager',
@@ -1289,33 +1306,41 @@ def parse_args():
         '-w', '--workspace',
         type=str,
         default=None,
-        help=(
-            'Maintainer workspace root directory '
-            '(defaults to $ROS_MAINTAINER_WS, enclosing workspace, or current directory)'
-        ),
+        help=ws_help,
     )
 
     subparsers = parser.add_subparsers(dest='command')
 
     # instructions
-    subparsers.add_parser('instructions', help='Show standard instructions and prompt for AI coding agents')
+    subparsers.add_parser(
+        'instructions', parents=[ws_parent],
+        help='Show standard instructions and prompt for AI coding agents',
+    )
 
     # init
-    subparsers.add_parser('init', help='Initialize workspace layout and default configs')
+    subparsers.add_parser(
+        'init', parents=[ws_parent],
+        help='Initialize workspace layout and default configs',
+    )
 
     # doctor
-    subparsers.add_parser('doctor', help='Check workspace readiness, container runtime, GitHub tokens, and MCP config')
+    subparsers.add_parser(
+        'doctor', parents=[ws_parent],
+        help='Check workspace readiness, container runtime, GitHub tokens, and MCP config',
+    )
 
     # status (Hub dashboard)
     st_parser = subparsers.add_parser(
-        'status', help='Show Maintainer Hub status dashboard across all active sessions, containers, CI, and approvals'
+        'status', parents=[ws_parent],
+        help='Show Maintainer Hub status dashboard across all active sessions, containers, CI, and approvals',
     )
     st_parser.add_argument('--json', action='store_true', help='Output status dashboard as JSON')
     st_parser.add_argument('--no-containers', action='store_true', help='Skip querying container runtime state')
 
     # next (Triage next actions)
     nx_parser = subparsers.add_parser(
-        'next', help='Show prioritized next actions across in-flight sessions, approvals, CI, and open GitHub PRs'
+        'next', parents=[ws_parent],
+        help='Show prioritized next actions across in-flight sessions, approvals, CI, and open GitHub PRs',
     )
     nx_parser.add_argument(
         '-r', '--repo', action='append', default=None,
@@ -1327,7 +1352,8 @@ def parse_args():
 
     # token-setup
     ts_parser = subparsers.add_parser(
-        'token-setup', help='Configure read-only container GitHub token (or opt into unauthenticated mode) in .env'
+        'token-setup', parents=[ws_parent],
+        help='Configure read-only container GitHub token (or opt into unauthenticated mode) in .env',
     )
     ts_parser.add_argument(
         '--container-token', type=str, default=None,
@@ -1344,7 +1370,8 @@ def parse_args():
 
     # mcp-install
     mcp_inst = subparsers.add_parser(
-        'mcp-install', help='Register ros-maintainer-harness in global user MCP configs (~/.gemini, ~/.claude.json)'
+        'mcp-install', parents=[ws_parent],
+        help='Register ros-maintainer-harness in global user MCP configs (~/.gemini, ~/.claude.json)',
     )
     mcp_inst.add_argument(
         '--target', choices=['gemini', 'antigravity', 'claude', 'all'], default='gemini',
@@ -1358,7 +1385,9 @@ def parse_args():
     mcp_inst.add_argument('--port', type=int, default=8765, help='Port for network transport')
 
     # serve
-    serve_parser = subparsers.add_parser('serve', help='Run the Host MCP Server Gateway')
+    serve_parser = subparsers.add_parser(
+        'serve', parents=[ws_parent], help='Run the Host MCP Server Gateway'
+    )
     serve_parser.add_argument(
         '--transport', choices=['stdio', 'sse', 'streamable-http'], default=None,
         help='MCP transport protocol (stdio, sse, or streamable-http)',
@@ -1367,11 +1396,15 @@ def parse_args():
     serve_parser.add_argument('--port', type=int, default=None, help='Server port (default: 8765)')
 
     # session
-    session_parser = subparsers.add_parser('session', help='Manage multi-task session environments')
+    session_parser = subparsers.add_parser(
+        'session', parents=[ws_parent], help='Manage multi-task session environments'
+    )
     session_subparsers = session_parser.add_subparsers(dest='session_action')
 
     # session create
-    s_create = session_subparsers.add_parser('create', help='Create a new session workspace')
+    s_create = session_subparsers.add_parser(
+        'create', parents=[ws_parent], help='Create a new session workspace'
+    )
     s_create.add_argument('session_id', type=str, help='Unique session identifier (e.g. session-pr-160)')
     s_create.add_argument('--topic', type=str, default=None, help='Short topic/PR description')
     s_create.add_argument('--distro', type=str, default='rolling', help='Target ROS distro (default: rolling)')
@@ -1384,7 +1417,7 @@ def parse_args():
 
     # session devcontainer
     s_devcontainer = session_subparsers.add_parser(
-        'devcontainer', help='Generate .devcontainer configuration for session'
+        'devcontainer', parents=[ws_parent], help='Generate .devcontainer configuration for session'
     )
     s_devcontainer.add_argument('session_id', type=str, help='Session ID')
     s_devcontainer.add_argument('--distro', type=str, default='rolling', help='Target ROS distro (default: rolling)')
@@ -1395,17 +1428,21 @@ def parse_args():
     )
 
     # session list
-    session_subparsers.add_parser('list', help='List active sessions')
+    session_subparsers.add_parser('list', parents=[ws_parent], help='List active sessions')
 
     # session prune
-    s_prune = session_subparsers.add_parser('prune', help='Prune session worktrees and directory')
+    s_prune = session_subparsers.add_parser(
+        'prune', parents=[ws_parent], help='Prune session worktrees and directory'
+    )
     s_prune.add_argument('session_id', type=str, help='Session ID to prune')
     s_prune.add_argument(
         '-f', '--force', action='store_true', help='Force remove worktree even if untracked changes exist'
     )
 
     # session launch
-    s_launch = session_subparsers.add_parser('launch', help='Launch AI coding agent or IDE in session')
+    s_launch = session_subparsers.add_parser(
+        'launch', parents=[ws_parent], help='Launch AI coding agent or IDE in session'
+    )
     s_launch.add_argument('session_id', type=str, help='Session ID')
     s_launch.add_argument(
         '--agent', choices=['claude', 'cursor', 'code', 'vscode', 'gemini', 'antigravity', 'shell'], default='claude',
@@ -1421,7 +1458,9 @@ def parse_args():
     s_launch.add_argument('--print-env', action='store_true', help='Print launch environment variables')
 
     # session mcp-config
-    s_mcp = session_subparsers.add_parser('mcp-config', help='Generate MCP client configuration files in session')
+    s_mcp = session_subparsers.add_parser(
+        'mcp-config', parents=[ws_parent], help='Generate MCP client configuration files in session'
+    )
     s_mcp.add_argument('session_id', type=str, help='Session ID')
     s_mcp.add_argument(
         '--transport', choices=['stdio', 'sse', 'streamable-http'], default='stdio',
@@ -1432,7 +1471,8 @@ def parse_args():
 
     # session from-pr
     s_from_pr = session_subparsers.add_parser(
-        'from-pr', help='Automatically scaffold a session directly from a GitHub Pull Request'
+        'from-pr', parents=[ws_parent],
+        help='Automatically scaffold a session directly from a GitHub Pull Request',
     )
     s_from_pr.add_argument('pr_ref', type=str, help='PR URL or shorthand (e.g. ros2/rclcpp#160)')
     s_from_pr.add_argument('--session-id', type=str, default=None, help='Custom session ID override')
@@ -1443,7 +1483,9 @@ def parse_args():
     )
 
     # session up
-    s_up = session_subparsers.add_parser('up', help='Start the detached sandbox container for a session')
+    s_up = session_subparsers.add_parser(
+        'up', parents=[ws_parent], help='Start the detached sandbox container for a session'
+    )
     s_up.add_argument('session_id', type=str, help='Session ID')
     s_up.add_argument('--distro', type=str, default=None, help='Optional ROS distro override')
     s_up.add_argument('--image', type=str, default=None, help='Optional container image override')
@@ -1457,7 +1499,9 @@ def parse_args():
     )
 
     # session exec
-    s_exec = session_subparsers.add_parser('exec', help='Execute a command inside the session sandbox container')
+    s_exec = session_subparsers.add_parser(
+        'exec', parents=[ws_parent], help='Execute a command inside the session sandbox container'
+    )
     s_exec.add_argument('session_id', type=str, help='Session ID')
     s_exec.add_argument('-d', '--workdir', type=str, default='/workspace', help='Working directory in container')
     s_exec.add_argument('--timeout', type=int, default=600, help='Command timeout in seconds (default: 600)')
@@ -1468,12 +1512,14 @@ def parse_args():
     s_exec.add_argument('exec_command', nargs=argparse.REMAINDER, help='Command to execute inside container')
 
     # session down
-    s_down = session_subparsers.add_parser('down', help='Stop and remove the sandbox container for a session')
+    s_down = session_subparsers.add_parser(
+        'down', parents=[ws_parent], help='Stop and remove the sandbox container for a session'
+    )
     s_down.add_argument('session_id', type=str, help='Session ID')
 
     # session start-conversation
     s_conv = session_subparsers.add_parser(
-        'start-conversation',
+        'start-conversation', parents=[ws_parent],
         help='Scaffold a session (if needed) and start or prepare a dedicated task conversation',
     )
     s_conv.add_argument('--pr', type=str, default=None, help='PR URL or shorthand (e.g. ros2/rclcpp#160)')
@@ -1489,7 +1535,8 @@ def parse_args():
 
     # session status
     s_stat = session_subparsers.add_parser(
-        'status', help='View or update session status, linked conversation ID, or milestone'
+        'status', parents=[ws_parent],
+        help='View or update session status, linked conversation ID, or milestone',
     )
     s_stat.add_argument('session_id', type=str, help='Session ID')
     s_stat.add_argument(
@@ -1504,7 +1551,8 @@ def parse_args():
 
     # git-push (policy-guarded remote push)
     gp_parser = subparsers.add_parser(
-        'git-push', help='Push a branch to a Git remote with safety policy validation and audit logging'
+        'git-push', parents=[ws_parent],
+        help='Push a branch to a Git remote with safety policy validation and audit logging',
     )
     gp_parser.add_argument('-s', '--session', type=str, required=True, help='Active session ID')
     gp_parser.add_argument(
@@ -1529,12 +1577,13 @@ def parse_args():
 
     # release (ticket-gated release push & bloom-release)
     rel_parser = subparsers.add_parser(
-        'release', help='Ticket-gated ROS package release workflow (release push and bloom-release)'
+        'release', parents=[ws_parent],
+        help='Ticket-gated ROS package release workflow (release push and bloom-release)',
     )
     rel_subparsers = rel_parser.add_subparsers(dest='release_action')
 
     rel_push = rel_subparsers.add_parser(
-        'push',
+        'push', parents=[ws_parent],
         help='Push a local catkin_prepare_release commit and version tag to the upstream distro branch',
     )
     rel_push.add_argument('-s', '--session', type=str, required=True, help='Active session ID')
@@ -1560,7 +1609,7 @@ def parse_args():
     rel_push.add_argument('--json', action='store_true', help='Output result as JSON')
 
     rel_bloom = rel_subparsers.add_parser(
-        'bloom',
+        'bloom', parents=[ws_parent],
         help='Run bloom-release on the host for a ROS repository (requires maintainer approval ticket)',
     )
     rel_bloom.add_argument(
@@ -1610,7 +1659,7 @@ def parse_args():
 
     # create-pr (policy-guarded PR creation)
     cpr_parser = subparsers.add_parser(
-        'create-pr',
+        'create-pr', parents=[ws_parent],
         help='Generate a pre-filled GitHub PR creation URL (default) or create a PR directly via the GitHub API',
     )
     cpr_parser.add_argument('-s', '--session', type=str, required=True, help='Active session ID')
@@ -1641,7 +1690,8 @@ def parse_args():
 
     # edit-pr (policy-guarded PR update)
     epr_parser = subparsers.add_parser(
-        'edit-pr', help='Edit an existing GitHub Pull Request title or body with policy validation and approval gating'
+        'edit-pr', parents=[ws_parent],
+        help='Edit an existing GitHub Pull Request title or body with policy validation and approval gating',
     )
     epr_parser.add_argument(
         'pr_target', nargs='?', default=None, help='Optional PR URL or shorthand (e.g. ros2/launch#1025)'
@@ -1667,74 +1717,97 @@ def parse_args():
     epr_parser.add_argument('--json', action='store_true', help='Output result as JSON')
 
     # rules
-    rules_parser = subparsers.add_parser('rules', help='View or update maintainer style & preferences')
+    rules_parser = subparsers.add_parser(
+        'rules', parents=[ws_parent], help='View or update maintainer style & preferences'
+    )
     rules_subparsers = rules_parser.add_subparsers(dest='rules_action')
-    rules_subparsers.add_parser('show', help='Display maintainer_rules.md')
-    r_add = rules_subparsers.add_parser('add', help='Record a new preference rule')
+    rules_subparsers.add_parser('show', parents=[ws_parent], help='Display maintainer_rules.md')
+    r_add = rules_subparsers.add_parser('add', parents=[ws_parent], help='Record a new preference rule')
     r_add.add_argument('category', type=str, help='Category name (e.g. Git, CI, Testing)')
     r_add.add_argument('rule', type=str, help='Rule text description')
 
     # policy
-    policy_parser = subparsers.add_parser('policy', help='Inspect or test safety policies')
+    policy_parser = subparsers.add_parser(
+        'policy', parents=[ws_parent], help='Inspect or test safety policies'
+    )
     policy_subparsers = policy_parser.add_subparsers(dest='policy_action')
-    policy_subparsers.add_parser('show', help='Show policy.yaml configuration')
-    p_check = policy_subparsers.add_parser('check', help='Check whether a git push or action is allowed')
+    policy_subparsers.add_parser('show', parents=[ws_parent], help='Show policy.yaml configuration')
+    p_check = policy_subparsers.add_parser(
+        'check', parents=[ws_parent], help='Check whether a git push or action is allowed'
+    )
     p_check.add_argument('--branch', type=str, required=True, help='Branch name to check')
     p_check.add_argument('--repo', type=str, default=None, help='Repository full name (e.g. ros2/rclcpp)')
     p_check.add_argument('--force', action='store_true', help='Check force push')
     p_check.add_argument('--force-with-lease', action='store_true', help='Check force-with-lease push')
 
     # audit
-    audit_parser = subparsers.add_parser('audit', help='Inspect audit logs')
+    audit_parser = subparsers.add_parser('audit', parents=[ws_parent], help='Inspect audit logs')
     audit_subparsers = audit_parser.add_subparsers(dest='audit_action')
-    a_show = audit_subparsers.add_parser('show', help='Show recent audit log records')
+    a_show = audit_subparsers.add_parser(
+        'show', parents=[ws_parent], help='Show recent audit log records'
+    )
     a_show.add_argument('-n', '--limit', type=int, default=20, help='Maximum number of records to show')
     a_show.add_argument('--session', type=str, default=None, help='Filter by session ID')
     a_show.add_argument('--action-type', type=str, default=None, help='Filter by action type')
     a_show.add_argument('--status', type=str, default=None, help='Filter by status (APPROVED, DENIED, etc.)')
 
     # approval
-    appr_parser = subparsers.add_parser('approval', help='Manage maintainer approval tickets')
+    appr_parser = subparsers.add_parser(
+        'approval', parents=[ws_parent], help='Manage maintainer approval tickets'
+    )
     appr_subparsers = appr_parser.add_subparsers(dest='approval_action')
-    appr_list = appr_subparsers.add_parser('list', help='List approval requests')
+    appr_list = appr_subparsers.add_parser('list', parents=[ws_parent], help='List approval requests')
     appr_list.add_argument('--status', choices=['PENDING', 'APPROVED', 'REJECTED'], default=None)
 
-    appr_ok = appr_subparsers.add_parser('approve', help='Approve an approval request')
+    appr_ok = appr_subparsers.add_parser(
+        'approve', parents=[ws_parent], help='Approve an approval request'
+    )
     appr_ok.add_argument('ticket_id', type=str, help='Ticket ID to approve')
     appr_ok.add_argument('--maintainer', type=str, default='maintainer', help='Approver name')
     appr_ok.add_argument('--comment', type=str, default=None, help='Approval comment')
 
-    appr_no = appr_subparsers.add_parser('reject', help='Reject an approval request')
+    appr_no = appr_subparsers.add_parser(
+        'reject', parents=[ws_parent], help='Reject an approval request'
+    )
     appr_no.add_argument('ticket_id', type=str, help='Ticket ID to reject')
     appr_no.add_argument('--maintainer', type=str, default='maintainer', help='Rejecter name')
     appr_no.add_argument('--comment', type=str, default=None, help='Rejection comment')
 
     # ci
-    ci_parser = subparsers.add_parser('ci', help='Launch, query, and monitor Jenkins CI runs')
+    ci_parser = subparsers.add_parser(
+        'ci', parents=[ws_parent], help='Launch, query, and monitor Jenkins CI runs'
+    )
     ci_subparsers = ci_parser.add_subparsers(dest='ci_action')
 
-    ci_list = ci_subparsers.add_parser('list', help='List tracked CI runs')
+    ci_list = ci_subparsers.add_parser('list', parents=[ws_parent], help='List tracked CI runs')
     ci_list.add_argument('--session', type=str, default=None, help='Filter by session ID')
     ci_list.add_argument('--pr', type=str, default=None, help='Filter by PR URL or shorthand')
     ci_list.add_argument('--status', type=str, default=None, help='Filter by status (RUNNING, SUCCESS, etc.)')
     ci_list.add_argument('-n', '--limit', type=int, default=20, help='Max records to display')
 
-    ci_status = ci_subparsers.add_parser('status', help='Get build status for a CI job or PR')
+    ci_status = ci_subparsers.add_parser(
+        'status', parents=[ws_parent], help='Get build status for a CI job or PR'
+    )
     ci_status.add_argument('target', type=str, help='Jenkins job URL, build number, or PR shorthand')
     ci_status.add_argument('--wait', action='store_true', help='Block and poll until build finishes')
     ci_status.add_argument('--timeout', type=int, default=120, help='Polling timeout in seconds (default: 120)')
     ci_status.add_argument('--interval', type=float, default=5.0, help='Polling interval in seconds (default: 5.0)')
 
-    ci_summary = ci_subparsers.add_parser('summary', help='Get concise failure diagnosis and log excerpt')
+    ci_summary = ci_subparsers.add_parser(
+        'summary', parents=[ws_parent], help='Get concise failure diagnosis and log excerpt'
+    )
     ci_summary.add_argument('target', type=str, help='Jenkins job URL, build number, or PR shorthand')
     ci_summary.add_argument('--max-lines', type=int, default=50, help='Max lines of error log excerpt')
 
-    ci_cancel = ci_subparsers.add_parser('cancel', help='Abort a running Jenkins CI job')
+    ci_cancel = ci_subparsers.add_parser(
+        'cancel', parents=[ws_parent], help='Abort a running Jenkins CI job'
+    )
     ci_cancel.add_argument('target', type=str, help='Jenkins job URL or build number to cancel')
     ci_cancel.add_argument('--reason', type=str, required=True, help='Reason for aborting the build')
 
     ci_launch = ci_subparsers.add_parser(
-        'launch', help='Launch a Jenkins CI run on ci.ros2.org with rate-limiting & cooldown checks'
+        'launch', parents=[ws_parent],
+        help='Launch a Jenkins CI run on ci.ros2.org with rate-limiting & cooldown checks',
     )
     ci_launch.add_argument('pr_target', nargs='?', default=None, help='PR URL or shorthand (e.g. ros2/launch#712)')
     ci_launch.add_argument('--pr', '--pr-url', dest='pr_opt', type=str, default=None, help='PR URL or shorthand')
@@ -1757,7 +1830,8 @@ def parse_args():
     ci_launch.add_argument('--json', action='store_true', help='Output result as JSON')
 
     ci_restart = ci_subparsers.add_parser(
-        'find-restarted', help='Check for rescheduled/restarted Jenkins builds and optionally update PR comment'
+        'find-restarted', parents=[ws_parent],
+        help='Check for rescheduled/restarted Jenkins builds and optionally update PR comment',
     )
     ci_restart.add_argument('target', nargs='?', default=None, help='PR or comment URL to inspect')
     ci_restart.add_argument('--pr', '--url', dest='pr_opt', type=str, default=None, help='PR or comment URL')
@@ -1768,17 +1842,23 @@ def parse_args():
     ci_restart.add_argument('--json', action='store_true', help='Output result as JSON')
 
     # hook
-    hook_parser = subparsers.add_parser('hook', help='Lifecycle hook handlers for automatic container routing')
+    hook_parser = subparsers.add_parser(
+        'hook', parents=[ws_parent], help='Lifecycle hook handlers for automatic container routing'
+    )
     hook_subparsers = hook_parser.add_subparsers(dest='hook_action')
 
-    h_pre = hook_subparsers.add_parser('pre-tool-use', help='Evaluate PreToolUse hook payload from stdin')
+    h_pre = hook_subparsers.add_parser(
+        'pre-tool-use', parents=[ws_parent], help='Evaluate PreToolUse hook payload from stdin'
+    )
     h_pre.add_argument('--session', type=str, default=None, help='Explicit session ID override')
 
-    h_inst = hook_subparsers.add_parser('install', help='Install PreToolUse container routing hooks')
+    h_inst = hook_subparsers.add_parser(
+        'install', parents=[ws_parent], help='Install PreToolUse container routing hooks'
+    )
     h_inst.add_argument('--session', type=str, default=None, help='Install hooks for a specific session ID')
     h_inst.add_argument('--global-hooks', action='store_true', help='Also install in ~/.gemini/config/hooks.json')
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def handle_hook(args: argparse.Namespace) -> int:

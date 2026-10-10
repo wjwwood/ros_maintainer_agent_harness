@@ -15,11 +15,12 @@
 import json
 import os
 from pathlib import Path
-import shutil
 import shlex
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional
+
+from .runner import CommandRunner, get_default_runner
 
 DEFAULT_DISTRO_IMAGES = {
     'rolling': 'docker.io/osrf/ros:rolling-desktop',
@@ -90,10 +91,11 @@ def get_container_github_token(workspace_root: Path) -> Optional[str]:
     return token
 
 
-def detect_container_runtime() -> Optional[str]:
+def detect_container_runtime(runner: Optional[CommandRunner] = None) -> Optional[str]:
     """Detect available container runtime ('docker' or 'podman')."""
+    active_runner = runner or get_default_runner()
     for candidate in ('docker', 'podman'):
-        if shutil.which(candidate):
+        if active_runner.which(candidate):
             return candidate
     return None
 
@@ -103,13 +105,17 @@ def get_container_name(session_id: str) -> str:
     return f"ros-harness-{session_id}"
 
 
-def check_token_and_environment(workspace_root: Path) -> Dict[str, Any]:
+def check_token_and_environment(
+    workspace_root: Path,
+    runner: Optional[CommandRunner] = None,
+) -> Dict[str, Any]:
     """
     Check workspace readiness: initialization, container runtime, GitHub tokens, and global MCP config.
     """
+    active_runner = runner or get_default_runner()
     ws_root = workspace_root.resolve()
     ws_initialized = (ws_root / 'config' / 'policy.yaml').exists()
-    runtime = detect_container_runtime()
+    runtime = detect_container_runtime(runner=active_runner)
 
     container_token = get_container_github_token(ws_root)
     if container_token is None or container_token == '':
@@ -131,12 +137,10 @@ def check_token_and_environment(workspace_root: Path) -> Dict[str, Any]:
         or os.environ.get('GH_TOKEN')
     )
     gh_cli_token = None
-    if shutil.which('gh'):
+    if active_runner.which('gh'):
         try:
-            res = subprocess.run(
+            res = active_runner.run(
                 ['gh', 'auth', 'token'],
-                capture_output=True,
-                text=True,
                 timeout=5,
             )
             if res.returncode == 0 and res.stdout.strip():
@@ -330,9 +334,14 @@ def write_devcontainer_config(
     return config_file
 
 
-def get_container_status(session_id: str, runtime: Optional[str] = None) -> Dict[str, Any]:
+def get_container_status(
+    session_id: str,
+    runtime: Optional[str] = None,
+    runner: Optional[CommandRunner] = None,
+) -> Dict[str, Any]:
     """Check whether the session container is currently running."""
-    rt = runtime or detect_container_runtime()
+    active_runner = runner or get_default_runner()
+    rt = runtime or detect_container_runtime(runner=active_runner)
     container_name = get_container_name(session_id)
     if not rt:
         return {
@@ -342,10 +351,8 @@ def get_container_status(session_id: str, runtime: Optional[str] = None) -> Dict
             'runtime': None,
         }
 
-    res = subprocess.run(
+    res = active_runner.run(
         [rt, 'inspect', '-f', '{{.State.Running}}', container_name],
-        capture_output=True,
-        text=True,
     )
     if res.returncode == 0 and res.stdout.strip().lower() == 'true':
         return {
@@ -371,6 +378,7 @@ def start_session_container(
     gateway_url: Optional[str] = None,
     runtime: Optional[str] = None,
     writable_shared_repos: Optional[bool] = None,
+    runner: Optional[CommandRunner] = None,
 ) -> Dict[str, Any]:
     """
     Start a detached sandbox container for the given session so commands and builds
@@ -382,7 +390,8 @@ def start_session_container(
     """
     from .worktree import read_session_metadata, write_session_metadata
 
-    rt = runtime or detect_container_runtime()
+    active_runner = runner or get_default_runner()
+    rt = runtime or detect_container_runtime(runner=active_runner)
     if not rt:
         return {
             'success': False,
@@ -412,7 +421,7 @@ def start_session_container(
             except Exception:
                 pass
 
-    status_info = get_container_status(session_id, runtime=rt)
+    status_info = get_container_status(session_id, runtime=rt, runner=active_runner)
     container_name = status_info['container_name']
     if status_info['running'] and not mode_changed and writable_shared_repos is None:
         return {
@@ -424,7 +433,7 @@ def start_session_container(
         }
 
     # Remove any exited container (or running container when mount mode was explicitly changed)
-    subprocess.run([rt, 'rm', '-f', container_name], capture_output=True, text=True)
+    active_runner.run([rt, 'rm', '-f', container_name])
 
     session_dir = session_dir.resolve()
     workspace_root = workspace_root.resolve()
@@ -455,7 +464,7 @@ def start_session_container(
     # Mount the host's `gh` CLI binary read-only on Linux (without mounting ~/.config/gh)
     # so `gh` commands inside the container work using ROS_CONTAINER_GITHUB_TOKEN.
     if sys.platform.startswith('linux'):
-        gh_bin = shutil.which('gh')
+        gh_bin = active_runner.which('gh')
         if gh_bin and Path(gh_bin).is_file():
             cmd.extend(['-v', f"{Path(gh_bin).resolve()}:/usr/local/bin/gh:ro"])
 
@@ -483,7 +492,7 @@ def start_session_container(
 
     cmd.extend([image, 'sleep', 'infinity'])
 
-    res = subprocess.run(cmd, env=run_env, capture_output=True, text=True, timeout=300)
+    res = active_runner.run(cmd, env=run_env, timeout=300)
     if res.returncode != 0:
         return {
             'success': False,
@@ -506,10 +515,8 @@ def start_session_container(
         f"ln -sfn /workspace {shlex.quote(str(session_dir))}; "
         "(pip install -r /workspace/tools/requirements.txt 2>/dev/null || true)"
     )
-    subprocess.run(
+    active_runner.run(
         [rt, 'exec', container_name, 'bash', '-c', setup_cmd],
-        capture_output=True,
-        text=True,
         timeout=120,
     )
 
@@ -534,11 +541,13 @@ def exec_in_session_container(
     session_dir: Optional[Path] = None,
     workspace_root: Optional[Path] = None,
     distro: str = 'rolling',
+    runner: Optional[CommandRunner] = None,
 ) -> Dict[str, Any]:
     """
     Execute a shell command inside the session container with the ROS environment sourced.
     """
-    rt = runtime or detect_container_runtime()
+    active_runner = runner or get_default_runner()
+    rt = runtime or detect_container_runtime(runner=active_runner)
     if not rt:
         return {
             'success': False,
@@ -547,7 +556,7 @@ def exec_in_session_container(
             'stderr': 'No container runtime (docker or podman) found on PATH.',
         }
 
-    status_info = get_container_status(session_id, runtime=rt)
+    status_info = get_container_status(session_id, runtime=rt, runner=active_runner)
     container_name = status_info['container_name']
 
     if not status_info['running']:
@@ -558,6 +567,7 @@ def exec_in_session_container(
                 workspace_root=workspace_root,
                 distro=distro,
                 runtime=rt,
+                runner=active_runner,
             )
             if not start_res.get('success'):
                 return {
@@ -602,10 +612,8 @@ def exec_in_session_container(
     from .audit import redact_credentials
 
     try:
-        res = subprocess.run(
+        res = active_runner.run(
             [rt, 'exec', '-w', workdir, container_name, 'bash', '-c', wrapped_cmd],
-            capture_output=True,
-            text=True,
             timeout=timeout,
         )
         return {
@@ -626,9 +634,14 @@ def exec_in_session_container(
         }
 
 
-def stop_session_container(session_id: str, runtime: Optional[str] = None) -> Dict[str, Any]:
+def stop_session_container(
+    session_id: str,
+    runtime: Optional[str] = None,
+    runner: Optional[CommandRunner] = None,
+) -> Dict[str, Any]:
     """Stop and remove the sandbox container for a session."""
-    rt = runtime or detect_container_runtime()
+    active_runner = runner or get_default_runner()
+    rt = runtime or detect_container_runtime(runner=active_runner)
     container_name = get_container_name(session_id)
     if not rt:
         return {
@@ -637,7 +650,7 @@ def stop_session_container(session_id: str, runtime: Optional[str] = None) -> Di
             'error': 'No container runtime (docker or podman) found on PATH.',
         }
 
-    res = subprocess.run([rt, 'rm', '-f', container_name], capture_output=True, text=True)
+    res = active_runner.run([rt, 'rm', '-f', container_name])
     return {
         'success': res.returncode == 0,
         'container_name': container_name,

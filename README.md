@@ -245,8 +245,11 @@ When sessions are created with `session create` or `session from-pr`, these clie
 
 ## Documentation
 
+- **[Hub-and-Spoke Architecture & Threat Model](docs/hub_and_spoke.md)**: Three-tier deployment (Dev, Hub, Session), identical-path mounts, launch service boundary, and caller authorization matrix.
+- **[OpenCode Container Architecture](docs/opencode.md)**: How OpenCode runs inside Hub and Session containers behind a single UI.
 - **[End-to-End Walkthrough](docs/walkthrough.md)**: Complete step-by-step example of triaging and fixing a ROS 2 PR.
 - **[AI Agent Integration Guides](docs/agents/index.md)**: Setup tutorials for specific agents:
+  - [OpenCode](docs/agents/opencode.md)
   - [Antigravity / Gemini](docs/agents/antigravity.md)
   - [Claude Code](docs/agents/claude_code.md)
   - [Cursor](docs/agents/cursor.md)
@@ -261,3 +264,4 @@ When sessions are created with `session create` or `session from-pr`, these clie
 ## License
 
 This project is licensed under the [Apache License, Version 2.0](LICENSE).
+

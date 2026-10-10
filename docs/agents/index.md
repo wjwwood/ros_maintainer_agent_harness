@@ -48,8 +48,10 @@ ros-maintainer-harness session launch pr-rclcpp-160 --agent claude --dry-run
 
 For detailed setup instructions, tips, and recommended workflows for specific tools, see:
 
+- [OpenCode](opencode.md): Containerized Hub and Session workflows using OpenCode.
 - [Antigravity / Gemini](antigravity.md): Editor and CLI agent workflows using Antigravity and Gemini.
 - [Claude Code](claude_code.md): Command-line agent workflow using Claude Code.
 - [Cursor](cursor.md): Editor-based workflow using Cursor Composer and MCP tools.
 - [VS Code & Extensions](vscode.md): Using Dev Containers and VS Code extensions (Cline, Roo Code, GitHub Copilot).
 - [Interactive Shell](shell.md): Manual debugging and headless script execution.
+
