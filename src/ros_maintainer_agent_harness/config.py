@@ -75,6 +75,16 @@ class ServerConfig:
 
 
 @dataclasses.dataclass
+class ContainerPolicy:
+    allowed_images: List[str] = dataclasses.field(default_factory=list)
+    cpus: Optional[str] = '4'
+    memory: Optional[str] = '8g'
+    pids_limit: Optional[int] = 1024
+    max_concurrent_sessions: int = 8
+    seccomp_unconfined: bool = True
+
+
+@dataclasses.dataclass
 class HarnessPolicy:
     github_username: str = ''
     signing_key_id: Optional[str] = None
@@ -82,6 +92,7 @@ class HarnessPolicy:
     jenkins_ci: JenkinsCIPolicy = dataclasses.field(default_factory=JenkinsCIPolicy)
     pull_request: PullRequestPolicy = dataclasses.field(default_factory=PullRequestPolicy)
     server: ServerConfig = dataclasses.field(default_factory=ServerConfig)
+    containers: ContainerPolicy = dataclasses.field(default_factory=ContainerPolicy)
 
     def is_branch_push_allowed(
         self,
@@ -312,7 +323,15 @@ def load_policy(config_path: Path) -> HarnessPolicy:
         return HarnessPolicy()
 
     known_top_keys = {
-        'version', 'identity', 'github_username', 'policies', 'git', 'jenkins', 'pull_request', 'server',
+        'version',
+        'identity',
+        'github_username',
+        'policies',
+        'git',
+        'jenkins',
+        'pull_request',
+        'server',
+        'containers',
     }
     unknown_top = set(data.keys()) - known_top_keys
     if unknown_top:
@@ -323,7 +342,9 @@ def load_policy(config_path: Path) -> HarnessPolicy:
 
     policies_block = data.get('policies') or {}
     if isinstance(policies_block, dict):
-        known_policy_keys = {'git_push', 'git', 'jenkins_ci', 'jenkins', 'pull_request', 'server'}
+        known_policy_keys = {
+            'git_push', 'git', 'jenkins_ci', 'jenkins', 'pull_request', 'server', 'containers',
+        }
         unknown_pol = set(policies_block.keys()) - known_policy_keys
         if unknown_pol:
             warnings.warn(
@@ -424,6 +445,21 @@ def load_policy(config_path: Path) -> HarnessPolicy:
         allow_session_release_tools=bool(server_data.get('allow_session_release_tools', False)),
     )
 
+    containers_data = policies_block.get('containers') or data.get('containers') or {}
+    if not isinstance(containers_data, dict):
+        containers_data = {}
+    raw_cpus = containers_data.get('cpus', '4')
+    raw_mem = containers_data.get('memory', '8g')
+    raw_pids = containers_data.get('pids_limit', 1024)
+    container_policy = ContainerPolicy(
+        allowed_images=list(containers_data.get('allowed_images') or []),
+        cpus=str(raw_cpus) if raw_cpus is not None and str(raw_cpus).strip() else None,
+        memory=str(raw_mem) if raw_mem is not None and str(raw_mem).strip() else None,
+        pids_limit=int(raw_pids) if raw_pids is not None else None,
+        max_concurrent_sessions=int(containers_data.get('max_concurrent_sessions', 8)),
+        seccomp_unconfined=bool(containers_data.get('seccomp_unconfined', True)),
+    )
+
     identity_data = data.get('identity') or {}
     return HarnessPolicy(
         github_username=identity_data.get('github_username') or data.get('github_username', ''),
@@ -432,6 +468,7 @@ def load_policy(config_path: Path) -> HarnessPolicy:
         jenkins_ci=jenkins_policy,
         pull_request=pr_policy,
         server=server_config,
+        containers=container_policy,
     )
 
 
@@ -474,4 +511,12 @@ policies:
     transport: 'streamable-http'
     allow_hub_exec_in_session: true
     allow_session_release_tools: false
+
+  containers:
+    allowed_images: []
+    cpus: '4'
+    memory: '8g'
+    pids_limit: 1024
+    max_concurrent_sessions: 8
+    seccomp_unconfined: true
 """
