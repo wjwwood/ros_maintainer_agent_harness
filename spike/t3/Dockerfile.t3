@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+FROM node:22-bookworm-slim
+ARG HTTPS_PROXY
+ARG T3_VERSION=0.0.45
+ARG OPENCODE_VERSION=1.19.0
+COPY ccr-ca.crt /usr/local/share/ca-certificates/ccr-ca.crt
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ccr-ca.crt \
+    https_proxy=${HTTPS_PROXY} HTTPS_PROXY=${HTTPS_PROXY} \
+    npm_config_noproxy=localhost,127.0.0.1 NO_PROXY=localhost,127.0.0.1
+RUN sed -i 's#http://deb.debian.org#https://deb.debian.org#g; s#http://security.debian.org#https://security.debian.org#g' \
+      /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
+    && printf 'Acquire::https::Proxy "%s";\nAcquire::https::CAInfo "/usr/local/share/ca-certificates/ccr-ca.crt";\nAcquire::http::Proxy "false";\n' "$HTTPS_PROXY" > /etc/apt/apt.conf.d/99proxy \
+    && apt-get update && apt-get install -y --no-install-recommends \
+         python3 make g++ git tini curl jq ca-certificates procps \
+    && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99proxy && update-ca-certificates
+RUN npm install -g t3@${T3_VERSION} opencode-ai@${OPENCODE_VERSION} 2>&1 | tail -8
+RUN useradd --uid 1001 --create-home --shell /bin/bash maintainer 2>/dev/null || true
+ENV HTTPS_PROXY= https_proxy=
+USER 1001
+WORKDIR /home/maintainer
+ENTRYPOINT ["/usr/bin/tini","--"]
+CMD ["sleep","infinity"]
