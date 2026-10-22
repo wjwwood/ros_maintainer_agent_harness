@@ -171,6 +171,28 @@ class TestGitOps(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
 
+            # Cross-platform check: non-socket regular file is not a live SSH socket,
+            # dead SSH_AUTH_SOCK is dropped, and GIT_SSH_COMMAND defaults to BatchMode=yes
+            not_a_sock = temp_path / 'regular_file.sock'
+            not_a_sock.write_text('not a socket')
+            self.assertFalse(is_live_ssh_auth_sock(not_a_sock))
+
+            with patch('ros_maintainer_agent_harness.git_ops.Path.home', return_value=temp_path):
+                fake_ssh_dir = temp_path / '.ssh'
+                fake_ssh_dir.mkdir(parents=True, exist_ok=True)
+                (fake_ssh_dir / 'ssh_auth_sock').write_text('stale')
+
+                env_missing = prepare_git_ssh_env({'SSH_AUTH_SOCK': str(not_a_sock), 'PATH': '/usr/bin'})
+                self.assertNotIn('SSH_AUTH_SOCK', env_missing)
+                self.assertEqual(env_missing['GIT_SSH_COMMAND'], 'ssh -o BatchMode=yes')
+                self.assertEqual(env_missing['GIT_TERMINAL_PROMPT'], '0')
+
+                env_custom_only = prepare_git_ssh_env({'GIT_SSH_COMMAND': 'ssh -i /custom/key'})
+                self.assertEqual(env_custom_only['GIT_SSH_COMMAND'], 'ssh -i /custom/key')
+
+            if not hasattr(py_socket, 'AF_UNIX'):
+                return
+
             # 1. Dead UNIX domain socket (exists on disk, Connection refused)
             dead_sock_path = temp_path / 'dead_ssh_agent.sock'
             dead_srv = py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM)
@@ -180,9 +202,9 @@ class TestGitOps(unittest.TestCase):
             self.assertFalse(is_live_ssh_auth_sock(dead_sock_path))
 
             with patch('ros_maintainer_agent_harness.git_ops.Path.home', return_value=temp_path):
-                fake_ssh_dir = temp_path / '.ssh'
-                fake_ssh_dir.mkdir(parents=True, exist_ok=True)
-                default_dead = fake_ssh_dir / 'ssh_auth_sock'
+                default_dead = temp_path / '.ssh' / 'ssh_auth_sock'
+                if default_dead.exists():
+                    default_dead.unlink()
                 s2 = py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM)
                 s2.bind(str(default_dead))
                 s2.close()
@@ -190,7 +212,6 @@ class TestGitOps(unittest.TestCase):
                 env_dead = prepare_git_ssh_env({'SSH_AUTH_SOCK': str(dead_sock_path), 'PATH': '/usr/bin'})
                 self.assertNotIn('SSH_AUTH_SOCK', env_dead)
                 self.assertEqual(env_dead['GIT_SSH_COMMAND'], 'ssh -o BatchMode=yes')
-                self.assertEqual(env_dead['GIT_TERMINAL_PROMPT'], '0')
 
             # 2. Live listening UNIX domain socket
             live_sock_path = temp_path / 'live_ssh_agent.sock'
@@ -214,15 +235,6 @@ class TestGitOps(unittest.TestCase):
                 env_live = prepare_git_ssh_env({'SSH_AUTH_SOCK': str(live_sock_path)})
                 self.assertEqual(env_live['SSH_AUTH_SOCK'], str(live_sock_path))
                 self.assertEqual(env_live['GIT_SSH_COMMAND'], 'ssh -o BatchMode=yes')
-
-                # Caller-supplied GIT_SSH_COMMAND is preserved
-                t3 = threading.Thread(target=_accept_once, daemon=True)
-                t3.start()
-                env_custom = prepare_git_ssh_env({
-                    'SSH_AUTH_SOCK': str(live_sock_path),
-                    'GIT_SSH_COMMAND': 'ssh -i /custom/key',
-                })
-                self.assertEqual(env_custom['GIT_SSH_COMMAND'], 'ssh -i /custom/key')
             finally:
                 live_srv.close()
 

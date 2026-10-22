@@ -22,8 +22,13 @@ from typing import Dict, Optional, Tuple, Union
 
 
 def is_live_ssh_auth_sock(sock_path: Optional[Union[str, Path]]) -> bool:
-    """Return True if ``sock_path`` exists, is a UNIX domain socket, and accepts connections."""
+    """Return True if ``sock_path`` exists and is a live SSH agent socket (or Windows named pipe)."""
     if not sock_path:
+        return False
+    raw = str(sock_path)
+    if os.name == 'nt' and raw.startswith('\\\\.\\pipe\\'):
+        return Path(raw).exists()
+    if not hasattr(socket, 'AF_UNIX'):
         return False
     try:
         p = Path(sock_path)

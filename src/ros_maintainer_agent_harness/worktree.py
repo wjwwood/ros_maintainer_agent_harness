@@ -305,12 +305,6 @@ def migrate_legacy_worktree_to_alternates(repo_path: Path) -> bool:
             raise RuntimeError(f"git init --bare failed for {tmp_git_dir}: {init_res.stderr}")
 
         subprocess.run(
-            ['git', f'--git-dir={tmp_git_dir}', 'config', '--bool', 'core.bare', 'false'],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
             ['git', f'--git-dir={tmp_git_dir}', 'config', '--bool', 'core.logallrefupdates', 'true'],
             check=True,
             capture_output=True,
@@ -366,13 +360,14 @@ def migrate_legacy_worktree_to_alternates(repo_path: Path) -> bool:
                 if fallback_remote_ref not in seen_refs:
                     update_cmds.append(f"update {fallback_remote_ref} {obj_sha}")
             if update_cmds:
-                subprocess.run(
+                upd_res = subprocess.run(
                     ['git', f'--git-dir={tmp_git_dir}', 'update-ref', '--stdin'],
-                    input='\n'.join(update_cmds) + '\n',
-                    check=True,
+                    input=('\n'.join(update_cmds) + '\n').encode('utf-8'),
                     capture_output=True,
-                    text=True,
                 )
+                if upd_res.returncode != 0:
+                    err_txt = upd_res.stderr.decode('utf-8', errors='replace')
+                    raise RuntimeError(f"git update-ref --stdin failed for {tmp_git_dir}: {err_txt}")
 
         if sym_head:
             subprocess.run(
@@ -382,7 +377,7 @@ def migrate_legacy_worktree_to_alternates(repo_path: Path) -> bool:
                 text=True,
             )
         else:
-            (tmp_git_dir / 'HEAD').write_text(f"{head_sha}\n", encoding='utf-8')
+            (tmp_git_dir / 'HEAD').write_bytes(f"{head_sha}\n".encode('utf-8'))
 
         wt_index = wt_gitdir / 'index'
         if wt_index.is_file():
@@ -394,6 +389,13 @@ def migrate_legacy_worktree_to_alternates(repo_path: Path) -> bool:
                 capture_output=True,
                 text=True,
             )
+
+        subprocess.run(
+            ['git', f'--git-dir={tmp_git_dir}', 'config', '--bool', 'core.bare', 'false'],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
         bak_git = repo_path / f'.git.legacy-bak-{os.getpid()}'
         if bak_git.exists():

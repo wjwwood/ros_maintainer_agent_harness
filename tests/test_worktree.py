@@ -241,7 +241,7 @@ class TestSessionManager(unittest.TestCase):
                 text=True,
                 check=True,
             )
-            self.assertNotIn(str(wt_path), wt_list.stdout)
+            self.assertNotIn('maintainer/legacy_fix', wt_list.stdout)
 
             # Make shared_repo recursively read-only to simulate :ro container mount
             original_modes = []
