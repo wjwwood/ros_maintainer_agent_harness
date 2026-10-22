@@ -15,8 +15,65 @@
 import os
 from pathlib import Path
 import re
+import socket
+import stat
 import subprocess
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
+
+
+def is_live_ssh_auth_sock(sock_path: Optional[Union[str, Path]]) -> bool:
+    """Return True if ``sock_path`` exists, is a UNIX domain socket, and accepts connections."""
+    if not sock_path:
+        return False
+    try:
+        p = Path(sock_path)
+        st = p.stat()
+        if not stat.S_ISSOCK(st.st_mode):
+            return False
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            sock.connect(str(p))
+        return True
+    except OSError:
+        return False
+
+
+def prepare_git_ssh_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """
+    Build a non-interactive environment for host ``git push`` / ``bloom-release`` subprocesses.
+
+    - Probes ``SSH_AUTH_SOCK`` and ``~/.ssh/ssh_auth_sock`` so dead sockets (``Connection refused``)
+      are not selected based on ``Path.exists()`` alone.
+    - Sets ``GIT_SSH_COMMAND='ssh -o BatchMode=yes'`` (unless ``GIT_SSH_COMMAND`` or ``GIT_SSH`` is
+      already set) so OpenSSH fails fast instead of hanging on ``/dev/tty`` passphrase prompts.
+    """
+    git_env = dict(base_env if base_env is not None else os.environ)
+    git_env['GIT_TERMINAL_PROMPT'] = '0'
+
+    current_sock = git_env.get('SSH_AUTH_SOCK')
+    default_sock = Path.home() / '.ssh' / 'ssh_auth_sock'
+    if current_sock and is_live_ssh_auth_sock(current_sock):
+        git_env['SSH_AUTH_SOCK'] = str(current_sock)
+    elif is_live_ssh_auth_sock(default_sock):
+        git_env['SSH_AUTH_SOCK'] = str(default_sock)
+    elif 'SSH_AUTH_SOCK' in git_env:
+        git_env.pop('SSH_AUTH_SOCK', None)
+
+    if not git_env.get('GIT_SSH_COMMAND') and not git_env.get('GIT_SSH'):
+        git_env['GIT_SSH_COMMAND'] = 'ssh -o BatchMode=yes'
+
+    return git_env
+
+
+def _append_ssh_auth_hint(err_msg: str) -> str:
+    """Append an actionable hint when non-interactive SSH authentication fails."""
+    if 'permission denied (publickey)' in err_msg.lower() and 'ssh-add' not in err_msg:
+        return (
+            f"{err_msg} "
+            "(SSH authentication failed in non-interactive BatchMode; ensure ssh-agent is running "
+            "on the host and your GitHub SSH key is unlocked via 'ssh-add'.)"
+        )
+    return err_msg
 
 
 def git_safe_cmd(repo_dir: Path, *args: str) -> list[str]:
@@ -290,13 +347,7 @@ def execute_git_push(
         cmd.append('--dry-run')
     cmd.extend(['--', push_target, refspec])
 
-    git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
-    default_sock = Path.home() / '.ssh' / 'ssh_auth_sock'
-    if (
-        (not git_env.get('SSH_AUTH_SOCK') or not Path(git_env['SSH_AUTH_SOCK']).exists())
-        and default_sock.exists()
-    ):
-        git_env['SSH_AUTH_SOCK'] = str(default_sock)
+    git_env = prepare_git_ssh_env()
 
     try:
         res = subprocess.run(
@@ -305,6 +356,7 @@ def execute_git_push(
             capture_output=True,
             text=True,
             timeout=120,
+            stdin=subprocess.DEVNULL,
             env=git_env,
         )
     except subprocess.TimeoutExpired:
@@ -319,7 +371,7 @@ def execute_git_push(
         return (True, msg)
     else:
         err = redact_credentials(res.stderr.strip() or res.stdout.strip() or "git push failed with unknown error.")
-        return (False, err)
+        return (False, _append_ssh_auth_hint(err))
 
 
 VERSION_TAG_PATTERN = re.compile(r'^v?[0-9]+\.[0-9]+\.[0-9]+(?:[._-][0-9A-Za-z._-]+)?$')
@@ -401,13 +453,7 @@ def execute_release_push(
         cmd.append('--dry-run')
     cmd.extend(['--', push_target, branch_refspec, tag_refspec])
 
-    git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
-    default_sock = Path.home() / '.ssh' / 'ssh_auth_sock'
-    if (
-        (not git_env.get('SSH_AUTH_SOCK') or not Path(git_env['SSH_AUTH_SOCK']).exists())
-        and default_sock.exists()
-    ):
-        git_env['SSH_AUTH_SOCK'] = str(default_sock)
+    git_env = prepare_git_ssh_env()
 
     try:
         res = subprocess.run(
@@ -416,6 +462,7 @@ def execute_release_push(
             capture_output=True,
             text=True,
             timeout=120,
+            stdin=subprocess.DEVNULL,
             env=git_env,
         )
     except subprocess.TimeoutExpired:
@@ -434,4 +481,4 @@ def execute_release_push(
         err = redact_credentials(
             res.stderr.strip() or res.stdout.strip() or "git release push failed with unknown error."
         )
-        return (False, err)
+        return (False, _append_ssh_auth_hint(err))

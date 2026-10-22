@@ -384,7 +384,7 @@ def _contains_shell_substitution(command_line: str) -> bool:
 
 
 ALLOWED_SESSION_HARNESS_SUBCOMMANDS: Dict[str, Optional[set]] = {
-    'session': {'exec', 'status', 'up', 'down', 'list', 'devcontainer', None},
+    'session': {'exec', 'status', 'up', 'down', 'list', 'devcontainer', 'migrate-worktrees', None},
     'ci': {'launch', 'status', 'summary', 'cancel', 'find-restarted', 'list', None},
     'git-push': None,
     'release': {'push', 'bloom', None},

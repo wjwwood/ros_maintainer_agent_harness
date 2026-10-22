@@ -21,7 +21,7 @@ import re
 import shutil
 import stat
 import subprocess
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .devcontainer import stop_session_container, write_devcontainer_config
 from .instructions import write_session_agent_instructions
@@ -145,6 +145,335 @@ class SessionInfo:
     devcontainer_path: Optional[Path] = None
     distro: str = 'rolling'
     active_branches: Dict[str, str] = dataclasses.field(default_factory=dict)
+
+
+def migrate_legacy_worktree_to_alternates(repo_path: Path) -> bool:
+    """
+    Migrate a legacy ``git worktree`` linked checkout (where ``<repo_path>/.git`` is a file
+    pointing into ``<shared_repo>/.git/worktrees/<entry>``) in-place to a standalone
+    ``<repo_path>/.git/`` directory backed by ``.git/objects/info/alternates``.
+
+    Preserves working-tree files, symlinks, staged index state, remotes, local/remote/tag refs,
+    and symbolic or detached ``HEAD`` without modifying working-tree files, and cleans up the
+    stale ``worktrees/<entry>`` registration in the shared repo when writable.
+
+    Returns ``True`` if ``repo_path`` was migrated, or ``False`` if it was already standalone
+    or could not be migrated.
+    """
+    from .git_ops import git_safe_cmd
+
+    repo_path = repo_path.resolve()
+    git_entry = repo_path / '.git'
+    if not git_entry.is_file() or git_entry.is_symlink():
+        return False
+
+    try:
+        raw_content = git_entry.read_text(encoding='utf-8', errors='replace').strip()
+    except OSError:
+        return False
+    if not raw_content.startswith('gitdir:'):
+        return False
+
+    raw_gitdir = raw_content[len('gitdir:'):].strip()
+    if not raw_gitdir:
+        return False
+    cand_gitdir = Path(raw_gitdir)
+    wt_gitdir = cand_gitdir.resolve() if cand_gitdir.is_absolute() else (repo_path / cand_gitdir).resolve()
+    if not wt_gitdir.is_dir():
+        return False
+
+    common_git_dir: Optional[Path] = None
+    commondir_file = wt_gitdir / 'commondir'
+    if commondir_file.is_file():
+        try:
+            raw_common = commondir_file.read_text(encoding='utf-8', errors='replace').strip()
+            if raw_common:
+                cand_common = Path(raw_common)
+                common_git_dir = (
+                    cand_common.resolve()
+                    if cand_common.is_absolute()
+                    else (wt_gitdir / cand_common).resolve()
+                )
+        except OSError:
+            common_git_dir = None
+
+    if common_git_dir is None:
+        common_res = subprocess.run(
+            git_safe_cmd(repo_path, 'rev-parse', '--git-common-dir'),
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+        )
+        if common_res.returncode == 0 and common_res.stdout.strip():
+            cand = Path(common_res.stdout.strip())
+            common_git_dir = cand.resolve() if cand.is_absolute() else (repo_path / cand).resolve()
+
+    if common_git_dir is None or not (common_git_dir / 'objects').is_dir():
+        return False
+    source_objects_dir = (common_git_dir / 'objects').resolve()
+
+    sym_res = subprocess.run(
+        git_safe_cmd(repo_path, 'symbolic-ref', '-q', 'HEAD'),
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    sym_head: Optional[str] = None
+    if sym_res.returncode == 0 and sym_res.stdout.strip():
+        cand_sym = sym_res.stdout.strip()
+        if cand_sym != 'refs/heads/.invalid':
+            sym_head = cand_sym
+
+    head_res = subprocess.run(
+        git_safe_cmd(repo_path, 'rev-parse', '--verify', 'HEAD'),
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    if head_res.returncode != 0 or not head_res.stdout.strip():
+        return False
+    head_sha = head_res.stdout.strip()
+
+    remotes: List[Tuple[str, str]] = []
+    remotes_res = subprocess.run(
+        git_safe_cmd(repo_path, 'remote'),
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    if remotes_res.returncode == 0:
+        for rem in remotes_res.stdout.splitlines():
+            rem_name = rem.strip()
+            if not rem_name:
+                continue
+            url_res = subprocess.run(
+                git_safe_cmd(repo_path, 'config', '--local', '--get', f'remote.{rem_name}.url'),
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+            )
+            if url_res.returncode != 0 or not url_res.stdout.strip():
+                url_res = subprocess.run(
+                    git_safe_cmd(repo_path, 'remote', 'get-url', '--', rem_name),
+                    cwd=str(repo_path),
+                    capture_output=True,
+                    text=True,
+                )
+            if url_res.returncode == 0 and url_res.stdout.strip():
+                remotes.append((rem_name, url_res.stdout.strip()))
+
+    extra_configs: List[Tuple[str, str]] = []
+    config_keys = ['user.name', 'user.email']
+    if sym_head and sym_head.startswith('refs/heads/'):
+        short_cur = sym_head[len('refs/heads/'):]
+        config_keys.extend([f'branch.{short_cur}.remote', f'branch.{short_cur}.merge'])
+    for cfg_key in config_keys:
+        cfg_res = subprocess.run(
+            git_safe_cmd(repo_path, 'config', '--local', '--get', cfg_key),
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+        )
+        if cfg_res.returncode == 0 and cfg_res.stdout.strip():
+            extra_configs.append((cfg_key, cfg_res.stdout.strip()))
+
+    refs_res = subprocess.run(
+        git_safe_cmd(
+            repo_path,
+            'for-each-ref',
+            '--format=%(refname) %(objectname)',
+            'refs/heads/',
+            'refs/remotes/',
+            'refs/tags/',
+        ),
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+
+    tmp_git_dir = repo_path / f'.git.migrating-{os.getpid()}'
+    if tmp_git_dir.exists():
+        _rmtree_force(tmp_git_dir)
+
+    try:
+        init_res = subprocess.run(
+            ['git', '-c', 'init.defaultRefFormat=files', 'init', '--bare', str(tmp_git_dir)],
+            capture_output=True,
+            text=True,
+        )
+        if init_res.returncode != 0:
+            raise RuntimeError(f"git init --bare failed for {tmp_git_dir}: {init_res.stderr}")
+
+        subprocess.run(
+            ['git', f'--git-dir={tmp_git_dir}', 'config', '--bool', 'core.bare', 'false'],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ['git', f'--git-dir={tmp_git_dir}', 'config', '--bool', 'core.logallrefupdates', 'true'],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        alternates_file = tmp_git_dir / 'objects' / 'info' / 'alternates'
+        alternates_file.parent.mkdir(parents=True, exist_ok=True)
+        alternates_file.write_bytes(f"{source_objects_dir.as_posix()}\n".encode('utf-8'))
+
+        wt_objects_dir = wt_gitdir / 'objects'
+        if wt_objects_dir.is_dir():
+            for src_obj in wt_objects_dir.rglob('*'):
+                if not src_obj.is_file():
+                    continue
+                rel_obj = src_obj.relative_to(wt_objects_dir)
+                if rel_obj.as_posix() == 'info/alternates':
+                    continue
+                dst_obj = tmp_git_dir / 'objects' / rel_obj
+                if not dst_obj.exists():
+                    dst_obj.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_obj, dst_obj)
+
+        for rem_name, rem_url in remotes:
+            subprocess.run(
+                ['git', f'--git-dir={tmp_git_dir}', 'remote', 'add', '--', rem_name, rem_url],
+                capture_output=True,
+                text=True,
+            )
+
+        for cfg_key, cfg_val in extra_configs:
+            subprocess.run(
+                ['git', f'--git-dir={tmp_git_dir}', 'config', cfg_key, cfg_val],
+                capture_output=True,
+                text=True,
+            )
+
+        if refs_res.returncode == 0 and refs_res.stdout.strip():
+            seen_refs = set()
+            update_cmds: List[str] = []
+            head_branches: List[Tuple[str, str]] = []
+            for line in refs_res.stdout.splitlines():
+                parts = line.strip().split()
+                if len(parts) != 2:
+                    continue
+                ref_name, obj_sha = parts
+                seen_refs.add(ref_name)
+                update_cmds.append(f"update {ref_name} {obj_sha}")
+                if ref_name.startswith('refs/heads/'):
+                    head_branches.append((ref_name[len('refs/heads/'):], obj_sha))
+            for short_b, obj_sha in head_branches:
+                fallback_remote_ref = f"refs/remotes/origin/{short_b}"
+                if fallback_remote_ref not in seen_refs:
+                    update_cmds.append(f"update {fallback_remote_ref} {obj_sha}")
+            if update_cmds:
+                subprocess.run(
+                    ['git', f'--git-dir={tmp_git_dir}', 'update-ref', '--stdin'],
+                    input='\n'.join(update_cmds) + '\n',
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+        if sym_head:
+            subprocess.run(
+                ['git', f'--git-dir={tmp_git_dir}', 'symbolic-ref', 'HEAD', sym_head],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        else:
+            (tmp_git_dir / 'HEAD').write_text(f"{head_sha}\n", encoding='utf-8')
+
+        wt_index = wt_gitdir / 'index'
+        if wt_index.is_file():
+            shutil.copy2(wt_index, tmp_git_dir / 'index')
+        else:
+            subprocess.run(
+                ['git', f'--git-dir={tmp_git_dir}', 'read-tree', head_sha],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        bak_git = repo_path / f'.git.legacy-bak-{os.getpid()}'
+        if bak_git.exists():
+            bak_git.unlink()
+        git_entry.rename(bak_git)
+        try:
+            tmp_git_dir.rename(git_entry)
+        except Exception:
+            if bak_git.exists() and not git_entry.exists():
+                bak_git.rename(git_entry)
+            raise
+        bak_git.unlink(missing_ok=True)
+    except Exception:
+        if tmp_git_dir.exists():
+            _rmtree_force(tmp_git_dir)
+        raise
+
+    subprocess.run(
+        git_safe_cmd(repo_path, 'update-index', '--refresh', '-q'),
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+
+    if (
+        wt_gitdir.is_dir()
+        and wt_gitdir.parent.name == 'worktrees'
+        and wt_gitdir.parent.parent.resolve() == common_git_dir.resolve()
+    ):
+        try:
+            if os.access(wt_gitdir.parent, os.W_OK):
+                _rmtree_force(wt_gitdir)
+                shared_repo_root = common_git_dir.parent
+                if shared_repo_root.is_dir() and os.access(common_git_dir, os.W_OK):
+                    subprocess.run(
+                        git_safe_cmd(shared_repo_root, 'worktree', 'prune'),
+                        cwd=str(shared_repo_root),
+                        capture_output=True,
+                        text=True,
+                    )
+        except Exception:
+            pass
+
+    return True
+
+
+def migrate_session_legacy_worktrees(
+    session_dir: Path,
+    audit_log_path: Optional[Path] = None,
+) -> List[Path]:
+    """
+    Scan ``<session_dir>/src/*`` for legacy linked Git worktrees (``.git`` file) and migrate
+    each in-place to a standalone ``.git/`` directory backed by ``.git/objects/info/alternates``.
+    """
+    src_dir = session_dir / 'src'
+    if not src_dir.is_dir():
+        return []
+
+    migrated: List[Path] = []
+    for sub in sorted(src_dir.iterdir()):
+        if not sub.is_dir() or sub.is_symlink():
+            continue
+        git_entry = sub / '.git'
+        if not git_entry.is_file() or git_entry.is_symlink():
+            continue
+        if migrate_legacy_worktree_to_alternates(sub):
+            migrated.append(sub)
+
+    if migrated and audit_log_path is not None:
+        try:
+            timeline = TimelineLogger(session_dir.name, session_dir, audit_log_path)
+            names = ', '.join(f"`{p.name}`" for p in migrated)
+            timeline.log_status(
+                f"Migrated legacy linked Git worktree(s) ({names}) to standalone session `.git/` "
+                "with `objects/info/alternates` for read-only `shared_repos/` compatibility."
+            )
+        except Exception:
+            pass
+
+    return migrated
 
 
 class SessionManager:
@@ -324,7 +653,7 @@ class SessionManager:
 
         worktree_target.mkdir(parents=True, exist_ok=True)
         init_res = subprocess.run(
-            ['git', 'init'],
+            ['git', '-c', 'init.defaultRefFormat=files', 'init'],
             cwd=str(worktree_target),
             capture_output=True,
             text=True,
@@ -337,7 +666,7 @@ class SessionManager:
         alternates_file.parent.mkdir(parents=True, exist_ok=True)
         alternates_file.write_bytes(f"{source_objects_dir.as_posix()}\n".encode('utf-8'))
 
-        # Copy remotes from repo_dir into worktree_target
+        # Copy remotes from repo_dir into worktree_target (preferring local config to avoid global url.*.insteadOf)
         remotes_res = subprocess.run(
             git_safe_cmd(repo_dir, 'remote'),
             cwd=str(repo_dir),
@@ -350,11 +679,18 @@ class SessionManager:
                 if not rem_name:
                     continue
                 url_res = subprocess.run(
-                    git_safe_cmd(repo_dir, 'remote', 'get-url', '--', rem_name),
+                    git_safe_cmd(repo_dir, 'config', '--local', '--get', f'remote.{rem_name}.url'),
                     cwd=str(repo_dir),
                     capture_output=True,
                     text=True,
                 )
+                if url_res.returncode != 0 or not url_res.stdout.strip():
+                    url_res = subprocess.run(
+                        git_safe_cmd(repo_dir, 'remote', 'get-url', '--', rem_name),
+                        cwd=str(repo_dir),
+                        capture_output=True,
+                        text=True,
+                    )
                 if url_res.returncode == 0 and url_res.stdout.strip():
                     subprocess.run(
                         git_safe_cmd(worktree_target, 'remote', 'add', '--', rem_name, url_res.stdout.strip()),
@@ -432,6 +768,19 @@ class SessionManager:
         timeline.log_status(f"Attached worktree for `{repo_name}` on branch `{branch_name}`.")
 
         return worktree_target
+
+    def migrate_legacy_worktrees(self, session_id: str) -> List[Path]:
+        """
+        Migrate any legacy linked Git worktrees in ``<session_dir>/src/*`` to standalone
+        ``.git/`` directories backed by ``.git/objects/info/alternates``.
+        """
+        if not self.session_exists(session_id):
+            return []
+        session_dir = self.get_session_dir(session_id)
+        return migrate_session_legacy_worktrees(
+            session_dir=session_dir,
+            audit_log_path=self.workspace.audit_log_path,
+        )
 
     def list_sessions(self) -> List[SessionInfo]:
         """List all active sessions in the workspace."""

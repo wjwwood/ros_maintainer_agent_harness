@@ -1652,7 +1652,11 @@ def start_session_container(
     import secrets
     from .gateway import load_state_credentials
     from .mcp_config import write_opencode_config
-    from .worktree import read_session_metadata, write_session_metadata
+    from .worktree import (
+        migrate_session_legacy_worktrees,
+        read_session_metadata,
+        write_session_metadata,
+    )
 
     active_runner = runner or get_default_runner()
     rt = runtime or detect_container_runtime(runner=active_runner)
@@ -1684,6 +1688,15 @@ def start_session_container(
                 )
             except Exception:
                 pass
+
+    if not use_writable_shared and session_dir.is_dir():
+        try:
+            migrate_session_legacy_worktrees(
+                session_dir=session_dir.resolve(),
+                audit_log_path=workspace_root.resolve() / 'audit' / 'audit.jsonl',
+            )
+        except Exception:
+            pass
 
     status_info = get_container_status(session_id, runtime=rt, runner=active_runner)
     container_name = status_info['container_name']
@@ -1939,6 +1952,28 @@ def exec_in_session_container(
                     f"Start it first with `ros-maintainer-harness session up {session_id}`."
                 ),
             }
+    elif session_dir is not None and (session_dir / 'src').is_dir():
+        try:
+            has_legacy = any(
+                sub.is_dir() and not sub.is_symlink() and (sub / '.git').is_file()
+                for sub in (session_dir / 'src').iterdir()
+            )
+            if has_legacy:
+                from .worktree import migrate_session_legacy_worktrees, read_session_metadata
+
+                meta = read_session_metadata(session_dir)
+                if not bool(meta.get('writable_shared_repos', False)):
+                    audit_path = (
+                        workspace_root.resolve() / 'audit' / 'audit.jsonl'
+                        if workspace_root is not None
+                        else None
+                    )
+                    migrate_session_legacy_worktrees(
+                        session_dir=session_dir.resolve(),
+                        audit_log_path=audit_path,
+                    )
+        except Exception:
+            pass
 
     chown_trap = ""
     if hasattr(os, 'getuid') and hasattr(os, 'getgid'):

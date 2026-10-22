@@ -26,7 +26,9 @@ from ros_maintainer_agent_harness.git_ops import (
     get_current_commit_sha,
     get_repo_remote_url,
     git_safe_cmd,
+    is_live_ssh_auth_sock,
     is_remote_tracking_writable,
+    prepare_git_ssh_env,
     strip_harmless_remote_ref_lock_errors,
 )
 
@@ -161,6 +163,88 @@ class TestGitOps(unittest.TestCase):
             cleaned = strip_harmless_remote_ref_lock_errors(raw_stderr)
             self.assertIn('To github.com:ros2/launch_ros.git', cleaned)
             self.assertNotIn('update_ref failed', cleaned)
+
+    def test_ssh_socket_probing_and_batch_mode(self):
+        import socket as py_socket
+        import threading
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            # 1. Dead UNIX domain socket (exists on disk, Connection refused)
+            dead_sock_path = temp_path / 'dead_ssh_agent.sock'
+            dead_srv = py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM)
+            dead_srv.bind(str(dead_sock_path))
+            dead_srv.close()
+            self.assertTrue(dead_sock_path.exists())
+            self.assertFalse(is_live_ssh_auth_sock(dead_sock_path))
+
+            with patch('ros_maintainer_agent_harness.git_ops.Path.home', return_value=temp_path):
+                fake_ssh_dir = temp_path / '.ssh'
+                fake_ssh_dir.mkdir(parents=True, exist_ok=True)
+                default_dead = fake_ssh_dir / 'ssh_auth_sock'
+                s2 = py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM)
+                s2.bind(str(default_dead))
+                s2.close()
+
+                env_dead = prepare_git_ssh_env({'SSH_AUTH_SOCK': str(dead_sock_path), 'PATH': '/usr/bin'})
+                self.assertNotIn('SSH_AUTH_SOCK', env_dead)
+                self.assertEqual(env_dead['GIT_SSH_COMMAND'], 'ssh -o BatchMode=yes')
+                self.assertEqual(env_dead['GIT_TERMINAL_PROMPT'], '0')
+
+            # 2. Live listening UNIX domain socket
+            live_sock_path = temp_path / 'live_ssh_agent.sock'
+            live_srv = py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM)
+            live_srv.bind(str(live_sock_path))
+            live_srv.listen(2)
+
+            def _accept_once():
+                try:
+                    conn, _ = live_srv.accept()
+                    conn.close()
+                except OSError:
+                    pass
+
+            t = threading.Thread(target=_accept_once, daemon=True)
+            t.start()
+            try:
+                self.assertTrue(is_live_ssh_auth_sock(live_sock_path))
+                t2 = threading.Thread(target=_accept_once, daemon=True)
+                t2.start()
+                env_live = prepare_git_ssh_env({'SSH_AUTH_SOCK': str(live_sock_path)})
+                self.assertEqual(env_live['SSH_AUTH_SOCK'], str(live_sock_path))
+                self.assertEqual(env_live['GIT_SSH_COMMAND'], 'ssh -o BatchMode=yes')
+
+                # Caller-supplied GIT_SSH_COMMAND is preserved
+                t3 = threading.Thread(target=_accept_once, daemon=True)
+                t3.start()
+                env_custom = prepare_git_ssh_env({
+                    'SSH_AUTH_SOCK': str(live_sock_path),
+                    'GIT_SSH_COMMAND': 'ssh -i /custom/key',
+                })
+                self.assertEqual(env_custom['GIT_SSH_COMMAND'], 'ssh -i /custom/key')
+            finally:
+                live_srv.close()
+
+    def test_ssh_publickey_error_hint(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / 'repo'
+            repo_path.mkdir()
+
+            def _fake_run(cmd, **kwargs):
+                if 'push' in cmd:
+                    return MagicMock(
+                        returncode=128,
+                        stdout='',
+                        stderr='git@github.com: Permission denied (publickey).\nfatal: Could not read from remote.\n',
+                    )
+                return MagicMock(returncode=0, stdout='wjwwood/fix\n', stderr='')
+
+            with patch('ros_maintainer_agent_harness.git_ops.subprocess.run', side_effect=_fake_run):
+                ok, err = execute_git_push(repo_dir=repo_path, branch='wjwwood/fix')
+                self.assertFalse(ok)
+                self.assertIn('Permission denied (publickey)', err)
+                self.assertIn('ssh-add', err)
 
 
 if __name__ == '__main__':

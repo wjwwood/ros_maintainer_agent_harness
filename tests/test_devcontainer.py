@@ -658,6 +658,55 @@ class TestDevcontainer(unittest.TestCase):
             self.assertGreaterEqual(stop1['revoked_tokens'], 1)
             self.assertEqual(load_session_attach_state('sess-1', state_dir=state_dir), {})
 
+    def test_auto_migrate_legacy_worktree_in_exec_and_start(self):
+        import subprocess
+        from ros_maintainer_agent_harness.devcontainer import exec_in_session_container
+        from ros_maintainer_agent_harness.runner import FakeCommandRunner
+        from ros_maintainer_agent_harness.workspace import WorkspaceLayout
+        from ros_maintainer_agent_harness.worktree import SessionManager
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir).resolve()
+            ws_root = base / 'ws'
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+
+            shared_repo = layout.shared_repos_dir / 'rosidl'
+            shared_repo.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['git', 'init'], cwd=str(shared_repo), check=True, capture_output=True)
+            subprocess.run(['git', 'config', 'user.name', 'Tester'], cwd=str(shared_repo), check=True)
+            subprocess.run(['git', 'config', 'user.email', 't@example.com'], cwd=str(shared_repo), check=True)
+            (shared_repo / 'README.md').write_text('# rosidl\n')
+            subprocess.run(['git', 'add', 'README.md'], cwd=str(shared_repo), check=True)
+            subprocess.run(['git', 'commit', '-m', 'init'], cwd=str(shared_repo), check=True)
+
+            mgr = SessionManager(layout)
+            sess = mgr.create_session('sess-legacy')
+            wt_path = sess.src_dir / 'rosidl'
+            subprocess.run(
+                ['git', 'worktree', 'add', '-b', 'pr-986', str(wt_path), 'HEAD'],
+                cwd=str(shared_repo),
+                check=True,
+                capture_output=True,
+            )
+            self.assertTrue((wt_path / '.git').is_file())
+
+            # Simulate an already-running session container (e.g. rosidl-rust) executing a command
+            runner = FakeCommandRunner(available_binaries={'docker': '/usr/bin/docker'})
+            runner.add_canned(['inspect', 'ros-harness-sess-legacy'], returncode=0, stdout='true\n')
+            runner.add_canned(['exec', '-w', '/workspace', 'ros-harness-sess-legacy'], returncode=0, stdout='ok\n')
+
+            res = exec_in_session_container(
+                session_id='sess-legacy',
+                command='git status',
+                session_dir=sess.session_dir,
+                workspace_root=ws_root,
+                runner=runner,
+            )
+            self.assertTrue(res['success'])
+            self.assertTrue((wt_path / '.git').is_dir())
+            self.assertTrue((wt_path / '.git' / 'objects' / 'info' / 'alternates').is_file())
+
 
 if __name__ == '__main__':
     unittest.main()

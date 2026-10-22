@@ -176,6 +176,168 @@ class TestSessionManager(unittest.TestCase):
                     except OSError:
                         pass
 
+    def test_migrate_legacy_linked_worktree_to_alternates(self):
+        import os
+        import stat
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir).resolve()
+            ws_root = temp_path / 'ws'
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+
+            shared_repo = layout.shared_repos_dir / 'legacy_pkg'
+            self._init_git_repo(shared_repo)
+            subprocess.run(
+                ['git', 'remote', 'add', 'origin', 'https://github.com/ros2/legacy_pkg.git'],
+                cwd=str(shared_repo),
+                check=True,
+            )
+            subprocess.run(['git', 'tag', '1.0.0'], cwd=str(shared_repo), check=True)
+
+            mgr = SessionManager(layout)
+            session = mgr.create_session('session-legacy', topic='Legacy linked worktree')
+            wt_path = session.src_dir / 'legacy_pkg'
+
+            # Simulate a pre-#31 linked git worktree pointing into shared_repos/legacy_pkg/.git/worktrees/...
+            subprocess.run(
+                ['git', 'worktree', 'add', '-b', 'maintainer/legacy_fix', str(wt_path), 'HEAD'],
+                cwd=str(shared_repo),
+                check=True,
+                capture_output=True,
+            )
+            self.assertTrue((wt_path / '.git').is_file())
+            self.assertTrue((shared_repo / '.git' / 'worktrees').is_dir())
+
+            # Create a local commit, a staged file, an unstaged edit, and an untracked file
+            (wt_path / 'local_commit.txt').write_text('committed on legacy worktree\n')
+            subprocess.run(['git', 'add', 'local_commit.txt'], cwd=str(wt_path), check=True)
+            subprocess.run(
+                ['git', 'commit', '-m', 'Local commit before migration'],
+                cwd=str(wt_path),
+                check=True,
+            )
+
+            (wt_path / 'staged.txt').write_text('staged content\n')
+            subprocess.run(['git', 'add', 'staged.txt'], cwd=str(wt_path), check=True)
+            (wt_path / 'README.md').write_text('# Unstaged modification\n')
+            (wt_path / 'untracked.txt').write_text('untracked notes\n')
+
+            migrated = mgr.migrate_legacy_worktrees('session-legacy')
+            self.assertEqual(migrated, [wt_path.resolve()])
+            # Second call is a no-op
+            self.assertEqual(mgr.migrate_legacy_worktrees('session-legacy'), [])
+
+            self.assertTrue((wt_path / '.git').is_dir())
+            cfg_text = (wt_path / '.git' / 'config').read_text(encoding='utf-8')
+            self.assertNotIn('refstorage = reftable', cfg_text)
+            self.assertIn('https://github.com/ros2/legacy_pkg.git', cfg_text)
+
+            # Verify shared_repo worktree lock was cleaned up
+            wt_list = subprocess.run(
+                ['git', 'worktree', 'list'],
+                cwd=str(shared_repo),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertNotIn(str(wt_path), wt_list.stdout)
+
+            # Make shared_repo recursively read-only to simulate :ro container mount
+            original_modes = []
+            for root, dirs, files in os.walk(shared_repo):
+                root_p = Path(root)
+                for f_name in files:
+                    fp = root_p / f_name
+                    mode = fp.stat().st_mode
+                    original_modes.append((fp, mode))
+                    fp.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+                for d_name in dirs:
+                    dp = root_p / d_name
+                    mode = dp.stat().st_mode
+                    original_modes.append((dp, mode))
+                    dp.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+            root_mode = shared_repo.stat().st_mode
+            original_modes.append((shared_repo, root_mode))
+            shared_repo.chmod(root_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+            try:
+                status_res = subprocess.run(
+                    ['git', 'status', '--porcelain'],
+                    cwd=str(wt_path),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertIn('A  staged.txt', status_res.stdout)
+                self.assertIn(' M README.md', status_res.stdout)
+                self.assertIn('?? untracked.txt', status_res.stdout)
+
+                # Commit staged + unstaged tracked changes and create a branch while shared_repo is RO
+                subprocess.run(
+                    ['git', 'commit', '-a', '-m', 'Commit after migration with RO shared_repo'],
+                    cwd=str(wt_path),
+                    check=True,
+                )
+                subprocess.run(
+                    ['git', 'branch', '-f', 'wjwwood/migrated-branch', 'HEAD'],
+                    cwd=str(wt_path),
+                    check=True,
+                )
+                tag_res = subprocess.run(
+                    ['git', 'rev-parse', '--verify', 'refs/tags/1.0.0'],
+                    cwd=str(wt_path),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertEqual(len(tag_res.stdout.strip()), 40)
+                self.assertEqual((wt_path / 'untracked.txt').read_text(), 'untracked notes\n')
+            finally:
+                for p, mode in reversed(original_modes):
+                    try:
+                        p.chmod(mode)
+                    except OSError:
+                        pass
+
+    def test_migrate_detached_head_legacy_worktree(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir).resolve()
+            layout = WorkspaceLayout(temp_path / 'ws')
+            layout.initialize()
+
+            shared_repo = layout.shared_repos_dir / 'detached_pkg'
+            self._init_git_repo(shared_repo)
+            expected_sha = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                cwd=str(shared_repo),
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+
+            mgr = SessionManager(layout)
+            session = mgr.create_session('session-detached')
+            wt_path = session.src_dir / 'detached_pkg'
+            subprocess.run(
+                ['git', 'worktree', 'add', '--detach', str(wt_path), expected_sha],
+                cwd=str(shared_repo),
+                check=True,
+                capture_output=True,
+            )
+
+            migrated = mgr.migrate_legacy_worktrees('session-detached')
+            self.assertEqual(migrated, [wt_path.resolve()])
+            self.assertTrue((wt_path / '.git').is_dir())
+            actual_sha = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                cwd=str(wt_path),
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            self.assertEqual(actual_sha, expected_sha)
+
 
 if __name__ == '__main__':
     unittest.main()

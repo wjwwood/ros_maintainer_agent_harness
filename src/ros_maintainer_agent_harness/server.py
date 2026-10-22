@@ -1604,11 +1604,12 @@ def perform_run_bloom_release(
         cmd.append('--pull-request-only')
     cmd.append(repo_name)
 
-    bloom_env = {
+    from .git_ops import prepare_git_ssh_env
+
+    bloom_env = prepare_git_ssh_env({
         **os.environ,
-        'GIT_TERMINAL_PROMPT': '0',
         'BLOOM_NO_WEBBROWSER': '1',
-    }
+    })
     if non_interactive:
         bloom_env['BLOOM_DONT_ASK_FOR_DOCS'] = '1'
         bloom_env['BLOOM_DONT_ASK_FOR_SOURCE'] = '1'
@@ -1618,13 +1619,6 @@ def perform_run_bloom_release(
     curr_path = bloom_env.get('PATH', '')
     if local_bin_str not in curr_path.split(os.pathsep):
         bloom_env['PATH'] = f"{local_bin_str}{os.pathsep}{curr_path}" if curr_path else local_bin_str
-
-    default_sock = Path.home() / '.ssh' / 'ssh_auth_sock'
-    if (
-        (not bloom_env.get('SSH_AUTH_SOCK') or not Path(bloom_env['SSH_AUTH_SOCK']).exists())
-        and default_sock.exists()
-    ):
-        bloom_env['SSH_AUTH_SOCK'] = str(default_sock)
 
     from .audit import redact_credentials
 
