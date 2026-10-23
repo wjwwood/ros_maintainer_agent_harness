@@ -687,6 +687,7 @@ def perform_find_restarted_ci(
         pr_or_comment_url=pr_or_comment_url,
         update_comment=update_comment,
         dry_run=dry_run,
+        session_id=session_id,
     )
 
     if update_comment:

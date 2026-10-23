@@ -809,6 +809,238 @@ class TestCI(unittest.TestCase):
             self.assertEqual(tracker.get_active_runs_count('ros2/rosidl#1013'), 0)
             self.assertEqual(tracker.get_run('31039').status, 'FAILURE')
 
+    def test_fetch_build_status_and_poll_when_queued(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = CITracker(Path(temp_dir) / 'ci_runs.json')
+            mgr = JenkinsManager(
+                ci_server='https://ci.ros2.org',
+                tracker=tracker,
+                auth=('testuser', 'testtoken'),
+            )
+
+            # 1. Untracked queued build via /queue/api/json + nextBuildNumber vs bogus build #99999
+            def fake_untracked_get(url, **kwargs):
+                resp = MagicMock()
+                resp.status_code = 200
+                if url.endswith('/job/ci_launcher/20862/api/json') or url.endswith('/job/ci_launcher/99999/api/json'):
+                    resp.status_code = 404
+                    resp.text = 'Not Found'
+                elif '/queue/api/json' in url:
+                    resp.json.return_value = {
+                        'items': [
+                            {'id': 501, 'task': {'name': 'ci_launcher'}, 'why': 'Waiting for next available executor'},
+                        ]
+                    }
+                elif 'tree=nextBuildNumber' in url:
+                    resp.json.return_value = {'nextBuildNumber': 20862}
+                return resp
+
+            with patch.object(mgr.session, 'get', side_effect=fake_untracked_get):
+                queued_st = mgr.fetch_build_status('https://ci.ros2.org/job/ci_launcher/20862/')
+                self.assertTrue(queued_st['success'])
+                self.assertEqual(queued_st['status'], 'QUEUED')
+                self.assertTrue(queued_st.get('queued'))
+
+                missing_st = mgr.fetch_build_status('https://ci.ros2.org/job/ci_launcher/99999/')
+                self.assertFalse(missing_st['success'])
+                self.assertEqual(missing_st['status'], 'NOT_FOUND')
+
+            # 2. Tracked queued build with queue_item_url that shifts to #20863 and completes during --wait poll
+            tracker.record_run(
+                pr_url='https://github.com/ros2/rosidl/pull/988',
+                session_id='rosidl-perf',
+                job_name='ci_launcher',
+                build_num=20862,
+                job_url='https://ci.ros2.org/job/ci_launcher/20862/',
+                status='QUEUED',
+                queue_item_url='https://ci.ros2.org/queue/item/777/',
+            )
+            self.assertEqual(tracker.get_active_runs_count('ros2/rosidl#988'), 1)
+
+            queue_calls = {'count': 0}
+
+            def fake_poll_get(url, **kwargs):
+                resp = MagicMock()
+                resp.status_code = 200
+                if url.endswith('/job/ci_launcher/20862/api/json'):
+                    resp.status_code = 404
+                elif url.endswith('/queue/item/777/api/json'):
+                    queue_calls['count'] += 1
+                    if queue_calls['count'] == 1:
+                        resp.json.return_value = {'why': 'Waiting for executor', 'executable': {}}
+                    else:
+                        resp.json.return_value = {
+                            'executable': {
+                                'number': 20863,
+                                'url': 'https://ci.ros2.org/job/ci_launcher/20863/',
+                            },
+                        }
+                elif url.endswith('/job/ci_launcher/20863/api/json'):
+                    resp.json.return_value = {
+                        'building': False,
+                        'result': 'SUCCESS',
+                        'duration': 8000,
+                        'estimatedDuration': 10000,
+                        'artifacts': [],
+                        'fullDisplayName': 'ci_launcher #20863',
+                    }
+                elif url.endswith('/job/ci_launcher/20863/testReport/api/json'):
+                    resp.status_code = 404
+                return resp
+
+            with patch.object(mgr.session, 'get', side_effect=fake_poll_get):
+                poll_res = mgr.poll_job_until_complete(
+                    'https://ci.ros2.org/job/ci_launcher/20862/',
+                    timeout_seconds=10.0,
+                    poll_interval_seconds=0.05,
+                )
+
+            self.assertTrue(poll_res['success'])
+            self.assertEqual(poll_res['status'], 'SUCCESS')
+            self.assertEqual(poll_res['job_url'], 'https://ci.ros2.org/job/ci_launcher/20863')
+            shifted_rec = tracker.get_run('20863')
+            self.assertIsNotNone(shifted_rec)
+            self.assertEqual(shifted_rec.build_num, 20863)
+
+    def test_find_restarted_ci_backfills_missing_launcher_badges_and_shifted_build(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = CITracker(Path(temp_dir) / 'ci_runs.json')
+            tracker.record_run(
+                pr_url='https://github.com/ros2/rosidl/pull/988',
+                session_id='rosidl-perf',
+                job_name='ci_launcher',
+                build_num=20862,
+                job_url='https://ci.ros2.org/job/ci_launcher/20862/',
+                status='QUEUED',
+                parameters={
+                    'CI_ROS2_REPOS_URL': 'https://gist.githubusercontent.com/wjwwood/gist988hash/raw/ros2.repos',
+                },
+            )
+            mgr = JenkinsManager(
+                ci_server='https://ci.ros2.org',
+                tracker=tracker,
+                auth=('testuser', 'testtoken'),
+            )
+
+            initial_comment = (
+                "Pull Requests:\n* ros2/rosidl#988\n\n"
+                "Gist: https://gist.githubusercontent.com/wjwwood/gist988hash/raw/ros2.repos\n"
+                "BUILD args: --packages-above-and-dependencies rosidl_cmake\n"
+                "TEST args: --packages-above rosidl_cmake\n"
+                "ROS Distro: rolling\n"
+                "Job: ci_launcher\n"
+                "ci_launcher ran: https://ci.ros2.org/job/ci_launcher/20862/\n"
+            )
+
+            def fake_get(url, **kwargs):
+                resp = MagicMock()
+                resp.status_code = 200
+                if 'api.github.com/repos/ros2/rosidl/issues/988/comments' in url:
+                    resp.json.return_value = [
+                        {
+                            'id': 6357221276,
+                            'html_url': 'https://github.com/ros2/rosidl/pull/988#issuecomment-6357221276',
+                            'body': initial_comment,
+                        }
+                    ]
+                elif '/job/ci_launcher/20862/api/json' in url:
+                    # Simulate queue reordering: #20862 belonged to an unrelated nightly/PR gist
+                    resp.json.return_value = {
+                        'building': False,
+                        'result': 'SUCCESS',
+                        'actions': [
+                            {
+                                'parameters': [
+                                    {
+                                        'name': 'CI_ROS2_REPOS_URL',
+                                        'value': 'https://gist.githubusercontent.com/other/othergist/raw/ros2.repos',
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                elif '/job/ci_launcher/api/json' in url:
+                    resp.json.return_value = {
+                        'builds': [
+                            {'number': 20863, 'result': 'SUCCESS', 'building': False},
+                            {'number': 20862, 'result': 'SUCCESS', 'building': False},
+                        ]
+                    }
+                elif '/job/ci_launcher/20863/api/json' in url:
+                    resp.json.return_value = {
+                        'building': False,
+                        'result': 'SUCCESS',
+                        'actions': [
+                            {
+                                'parameters': [
+                                    {
+                                        'name': 'CI_ROS2_REPOS_URL',
+                                        'value': (
+                                            'https://gist.githubusercontent.com/wjwwood/gist988hash/raw/ros2.repos'
+                                        ),
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                elif url == 'https://ci.ros2.org/job/ci_launcher/20863/consoleText':
+                    resp.text = (
+                        "Started by user testuser\n"
+                        "* Linux [![Build Status](http://ci.ros2.org/buildStatus/icon?job=ci_linux&build=31201)]"
+                        "(http://ci.ros2.org/job/ci_linux/31201/)\n"
+                        "* Linux-aarch64 [![Build Status]"
+                        "(http://ci.ros2.org/buildStatus/icon?job=ci_linux-aarch64&build=23701)]"
+                        "(http://ci.ros2.org/job/ci_linux-aarch64/23701/)\n"
+                        "* Linux-rhel [![Build Status]"
+                        "(http://ci.ros2.org/buildStatus/icon?job=ci_linux-rhel&build=10901)]"
+                        "(http://ci.ros2.org/job/ci_linux-rhel/10901/)\n"
+                        "* Windows [![Build Status](http://ci.ros2.org/buildStatus/icon?job=ci_windows&build=29901)]"
+                        "(http://ci.ros2.org/job/ci_windows/29901/)\n"
+                        "Finished: SUCCESS\n"
+                    )
+                elif '/api/json?tree=builds' in url:
+                    resp.json.return_value = {'builds': []}
+                elif '/queue/api/json' in url:
+                    resp.json.return_value = {'items': []}
+                else:
+                    resp.json.return_value = {}
+                return resp
+
+            captured_patch = []
+
+            def fake_patch(url, **kwargs):
+                captured_patch.append((url, kwargs))
+                resp = MagicMock()
+                resp.status_code = 200
+                return resp
+
+            with patch.object(mgr.session, 'get', side_effect=fake_get):
+                with patch.object(mgr.session, 'patch', side_effect=fake_patch):
+                    res = mgr.find_restarted_ci(
+                        'ros2/rosidl#988',
+                        update_comment=True,
+                        dry_run=False,
+                        session_id='rosidl-perf',
+                    )
+
+            self.assertTrue(res['success'])
+            self.assertTrue(res['updated_comment'])
+            self.assertEqual(res['backfilled_badges'], 4)
+            self.assertEqual(res['launcher_build'], 20863)
+            self.assertEqual(len(captured_patch), 1)
+            patched_body = res['updated_comment_markdown']
+            self.assertIn('ci_launcher ran: https://ci.ros2.org/job/ci_launcher/20863/', patched_body)
+            self.assertIn('http://ci.ros2.org/job/ci_linux/31201/', patched_body)
+            self.assertIn('http://ci.ros2.org/job/ci_linux-aarch64/23701/', patched_body)
+            self.assertIn('http://ci.ros2.org/job/ci_linux-rhel/10901/', patched_body)
+            self.assertIn('http://ci.ros2.org/job/ci_windows/29901/', patched_body)
+
+            runs = tracker.list_runs(session_id='rosidl-perf')
+            self.assertEqual(len(runs), 5)
+            self.assertEqual(tracker.get_run('20863').status, 'SUCCESS')
+            self.assertIsNotNone(tracker.get_run('31201'))
+            self.assertIsNotNone(tracker.get_run('29901'))
+
 
 if __name__ == '__main__':
     unittest.main()
