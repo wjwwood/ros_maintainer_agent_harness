@@ -148,7 +148,8 @@ To conserve tokens and context window:
 - **One-Step CI Launch**:
   - Launch Jenkins CI using the MCP `launch_jenkins_ci(session_id="<id>", comment=True, reason="...")` tool or CLI
     `ros-maintainer-harness ci launch -s <id> --comment -m "Run CI"`. The PR URL, target distro, and affected ROS 2
-    packages are auto-detected from the session when omitted.
+    packages are auto-detected from the session when omitted. For multi-repository PR stacks, pass companion PRs via
+    `extra_repos=["owner/repo#num", ...]` (or `--extra-repos owner/repo#num ...` / `owner/repo:branch`).
 - **Do not poll Jenkins in a manual loop**:
   - Use the host gateway tool `get_ci_status(wait_for_completion=True)` or run `ros-ci-status <job_url> --wait`.
 - **Concise Error Summaries**:
@@ -389,7 +390,8 @@ def get_session_agent_instructions(
     - CLI:
       `ros-maintainer-harness -w {ws_str} ci launch -s {session_id} --comment -m "Run CI"`
       *(Note: `--pr`, `--distro`, and `--packages` are automatically detected from `{session_id}` when omitted; pass
-      `--only-fixes-test` if the PR only modifies tests).*
+      `--only-fixes-test` if the PR only modifies tests, and `--extra-repos <owner/repo#num ...>` or
+      `<owner/repo:branch>` for multi-repository companion PRs).*
   - **Monitor & Summarize CI**:
     - MCP: `get_ci_status(session_id="{session_id}", wait_for_completion=True)` / `get_ci_summary(job_url_or_id="...")`
     - CLI: `ros-maintainer-harness -w {ws_str} ci status <job_url> --wait` or

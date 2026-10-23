@@ -142,10 +142,19 @@ def detect_session_packages(session_dir: Path) -> List[str]:
     packages: List[str] = []
     seen: set[str] = set()
 
+    primary_repo_str, _ = parse_pr_url(str(meta.get('pr_ref') or meta.get('pr_url') or ''))
+    primary_repo_name = (primary_repo_str or '').rsplit('/', 1)[-1]
+
     for repo_dir in repo_dirs:
         changed_files: List[str] = []
-        if isinstance(meta.get('changed_files'), list) and len(repo_dirs) == 1:
-            changed_files.extend([str(f) for f in meta['changed_files'] if f])
+        raw_changed = meta.get('changed_files')
+        if isinstance(raw_changed, list) and raw_changed:
+            if (
+                len(repo_dirs) == 1
+                or (primary_repo_name and repo_dir.name == primary_repo_name)
+                or any((repo_dir / str(f)).exists() for f in raw_changed if f)
+            ):
+                changed_files.extend([str(f) for f in raw_changed if f])
 
         if not changed_files and (repo_dir / '.git').exists():
             from .git_ops import git_safe_cmd
@@ -167,21 +176,24 @@ def detect_session_packages(session_dir: Path) -> List[str]:
                 except Exception:
                     pass
 
+        found_in_repo = False
         for rel_path in changed_files:
             curr = (repo_dir / rel_path).parent
             while True:
                 pkg_xml = curr / 'package.xml'
                 if pkg_xml.is_file():
                     pkg_name = _extract_package_name(pkg_xml)
-                    if pkg_name and pkg_name not in seen:
-                        seen.add(pkg_name)
-                        packages.append(pkg_name)
+                    if pkg_name:
+                        found_in_repo = True
+                        if pkg_name not in seen:
+                            seen.add(pkg_name)
+                            packages.append(pkg_name)
                     break
                 if curr == repo_dir or curr.parent == curr or not str(curr).startswith(str(repo_dir)):
                     break
                 curr = curr.parent
 
-        if not packages:
+        if not found_in_repo:
             pkg_xml = repo_dir / 'package.xml'
             if pkg_xml.is_file():
                 pkg_name = _extract_package_name(pkg_xml)
@@ -276,6 +288,17 @@ class CITracker:
             self._save_runs(runs)
         return rec
 
+    @staticmethod
+    def _pr_matches(run_pr_url: str, query_pr_url: str) -> bool:
+        if not run_pr_url or not query_pr_url:
+            return False
+        if run_pr_url.strip().rstrip('/') == query_pr_url.strip().rstrip('/'):
+            return True
+        parsed_query = parse_pr_url(query_pr_url)
+        if parsed_query != (None, None):
+            return parse_pr_url(run_pr_url) == parsed_query
+        return False
+
     def get_run(self, job_url_or_id: str) -> Optional[CIRunRecord]:
         """Find a run by job_url or build number or PR URL."""
         with self._lock:
@@ -294,9 +317,9 @@ class CITracker:
                 if r.build_num == b_num:
                     return r
 
-        # Match by PR URL
+        # Match by PR URL or shorthand
         for r in reversed(runs):
-            if r.pr_url == target:
+            if self._pr_matches(r.pr_url, target):
                 return r
 
         return None
@@ -315,13 +338,13 @@ class CITracker:
             runs = self._load_runs()
         active = [
             r for r in runs
-            if r.pr_url == pr_url and r.status.upper() in ('PENDING', 'RUNNING', 'BUILDING')
+            if self._pr_matches(r.pr_url, pr_url) and r.status.upper() in ('PENDING', 'RUNNING', 'BUILDING')
         ]
         return len(active)
 
     def get_seconds_since_last_run(self, pr_url: str) -> Optional[float]:
         with self._lock:
-            runs = [r for r in self._load_runs() if r.pr_url == pr_url]
+            runs = [r for r in self._load_runs() if self._pr_matches(r.pr_url, pr_url)]
         if not runs:
             return None
         latest = max(runs, key=lambda r: r.timestamp)
@@ -348,7 +371,7 @@ class CITracker:
         if session_id:
             res = [r for r in res if r.session_id == session_id]
         if pr_url:
-            res = [r for r in res if r.pr_url == pr_url]
+            res = [r for r in res if self._pr_matches(r.pr_url, pr_url)]
         if status:
             res = [r for r in res if r.status.upper() == status.upper()]
 
@@ -458,6 +481,19 @@ class JenkinsManager:
             return [p.strip() for p in re.split(r'[\s,]+', packages) if p.strip()]
         return [str(p).strip() for p in packages if str(p).strip()]
 
+    @staticmethod
+    def normalize_extra_repos(extra_repos: Optional[Union[List[str], str]]) -> List[str]:
+        if not extra_repos:
+            return []
+        if isinstance(extra_repos, str):
+            return [item.strip() for item in re.split(r'[\s,]+', extra_repos) if item.strip()]
+        result: List[str] = []
+        for raw in extra_repos:
+            if not raw:
+                continue
+            result.extend([item.strip() for item in re.split(r'[\s,]+', str(raw)) if item.strip()])
+        return result
+
     @classmethod
     def build_extra_ci_args(
         cls,
@@ -555,6 +591,108 @@ class JenkinsManager:
             pass
         return None
 
+    def _apply_repo_override(
+        self,
+        master_repos: Dict[str, Any],
+        target_repo: str,
+        version: str,
+        gh_headers: Dict[str, str],
+        known_base_repo: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Insert or replace a repository entry in ``master_repos`` without leaving duplicate
+        checkouts of the same repository (e.g. ``ros2/rosidl_dds`` alongside ``nwn/rosidl_dds``).
+
+        Returns the resolved upstream base repository full name (if identified).
+        """
+        cleaned_repo = target_repo.strip().strip('/')
+        if cleaned_repo.lower().endswith('.git'):
+            cleaned_repo = cleaned_repo[:-4]
+
+        exact_keys = [k for k in list(master_repos.keys()) if k.lower() == cleaned_repo.lower()]
+        for k in exact_keys:
+            master_repos.pop(k, None)
+        had_exact = bool(exact_keys)
+
+        resolved_base_repo: Optional[str] = known_base_repo.strip() if known_base_repo else None
+        if resolved_base_repo:
+            for k in list(master_repos.keys()):
+                if k.lower() == resolved_base_repo.lower():
+                    master_repos.pop(k, None)
+        elif not had_exact:
+            try:
+                repo_resp = self.session.get(
+                    f'https://api.github.com/repos/{cleaned_repo}',
+                    headers=gh_headers,
+                    timeout=15,
+                )
+                if repo_resp.status_code == 200:
+                    repo_info = repo_resp.json()
+                    if isinstance(repo_info, dict):
+                        parent_name = (repo_info.get('parent') or {}).get('full_name')
+                        source_name = (repo_info.get('source') or {}).get('full_name')
+                        for cand in (parent_name, source_name):
+                            if isinstance(cand, str) and cand.strip():
+                                cand_clean = cand.strip()
+                                if resolved_base_repo is None:
+                                    resolved_base_repo = cand_clean
+                                for k in list(master_repos.keys()):
+                                    if k.lower() == cand_clean.lower():
+                                        master_repos.pop(k, None)
+            except Exception:
+                pass
+
+        repo_basename = cleaned_repo.rsplit('/', 1)[-1].lower()
+        for k, v in list(master_repos.items()):
+            k_base = k.rsplit('/', 1)[-1].lower()
+            v_url = str((v or {}).get('url') or '').rstrip('/')
+            if v_url.lower().endswith('.git'):
+                v_url = v_url[:-4]
+            url_base = v_url.rsplit('/', 1)[-1].lower() if '/' in v_url else ''
+            if k_base == repo_basename or (url_base and url_base == repo_basename):
+                master_repos.pop(k, None)
+                if resolved_base_repo is None:
+                    resolved_base_repo = k
+
+        master_repos[cleaned_repo] = {
+            'type': 'git',
+            'url': f'https://github.com/{cleaned_repo}.git',
+            'version': version.strip(),
+        }
+        return resolved_base_repo
+
+    def _discover_open_pr_for_branch(
+        self,
+        base_repo: Optional[str],
+        head_repo: str,
+        branch: str,
+        gh_headers: Dict[str, str],
+    ) -> Optional[str]:
+        """Return ``<base_repo>#<num>`` if a single open PR matches ``<head_owner>:<branch>``."""
+        upstream = (base_repo or head_repo).strip()
+        if '/' not in upstream or '/' not in head_repo:
+            return None
+        head_owner = head_repo.strip().split('/', 1)[0]
+        try:
+            resp = self.session.get(
+                f'https://api.github.com/repos/{upstream}/pulls',
+                headers=gh_headers,
+                params={'state': 'open', 'head': f'{head_owner}:{branch.strip()}'},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                pulls = resp.json()
+                if (
+                    isinstance(pulls, list)
+                    and len(pulls) == 1
+                    and isinstance(pulls[0], dict)
+                    and isinstance(pulls[0].get('number'), int)
+                ):
+                    return f"{upstream}#{pulls[0]['number']}"
+        except Exception:
+            pass
+        return None
+
     def create_ci_gist(
         self,
         repo: str,
@@ -562,8 +700,8 @@ class JenkinsManager:
         target_distro: str,
         token: str,
         extra_repos: Optional[List[str]] = None,
-    ) -> Dict[str, str]:
-        """Create a public ros2.repos GitHub Gist pointing the PR repository at the PR branch."""
+    ) -> Dict[str, Any]:
+        """Create a public ros2.repos GitHub Gist pointing the PR and any companion repos at their branches."""
         gh_headers = {
             'Authorization': f'token {token}',
             'Accept': 'application/vnd.github+json',
@@ -579,17 +717,7 @@ class JenkinsManager:
         toplevel = yaml.safe_load(repos_resp.text) or {}
         master_repos = dict(toplevel.get('repositories') or {})
 
-        if extra_repos:
-            for entry in extra_repos:
-                if ':' in entry:
-                    r_name, r_branch = entry.split(':', 1)
-                    master_repos[r_name.strip()] = {
-                        'type': 'git',
-                        'url': f'https://github.com/{r_name.strip()}.git',
-                        'version': r_branch.strip(),
-                    }
-
-        # 2. Fetch PR details from GitHub API
+        # 2. Fetch primary PR details from GitHub API
         pr_api_url = f'https://api.github.com/repos/{repo}/pulls/{pr_num}'
         pr_resp = self.session.get(pr_api_url, headers=gh_headers, timeout=20)
         if pr_resp.status_code != 200:
@@ -603,16 +731,78 @@ class JenkinsManager:
         pr_repo = head_repo_info.get('full_name') or repo
         base_repo = base_repo_info.get('full_name') or repo
 
-        master_repos.pop(base_repo, None)
-        master_repos[pr_repo] = {
-            'type': 'git',
-            'url': f'https://github.com/{pr_repo}.git',
-            'version': pr_ref,
-        }
+        self._apply_repo_override(
+            master_repos=master_repos,
+            target_repo=pr_repo,
+            version=pr_ref,
+            gh_headers=gh_headers,
+            known_base_repo=base_repo,
+        )
+        pull_requests: List[str] = [f'{base_repo}#{pr_num}']
+
+        # 3. Apply companion PRs or extra owner/repo:branch overrides (deduplicating upstream keys)
+        for entry in self.normalize_extra_repos(extra_repos):
+            comp_repo, comp_pr_num = parse_pr_url(entry)
+            if comp_repo and comp_pr_num:
+                comp_api_url = f'https://api.github.com/repos/{comp_repo}/pulls/{comp_pr_num}'
+                comp_resp = self.session.get(comp_api_url, headers=gh_headers, timeout=20)
+                if comp_resp.status_code != 200:
+                    raise RuntimeError(
+                        f"Failed to fetch companion PR metadata from {comp_api_url} "
+                        f"(HTTP {comp_resp.status_code})."
+                    )
+                comp_data = comp_resp.json()
+                comp_ref = comp_data['head']['ref']
+                comp_head_repo = (comp_data['head'].get('repo') or {}).get('full_name') or comp_repo
+                comp_base_repo = (comp_data['base'].get('repo') or {}).get('full_name') or comp_repo
+                self._apply_repo_override(
+                    master_repos=master_repos,
+                    target_repo=comp_head_repo,
+                    version=comp_ref,
+                    gh_headers=gh_headers,
+                    known_base_repo=comp_base_repo,
+                )
+                comp_label = f'{comp_base_repo}#{comp_pr_num}'
+                if comp_label not in pull_requests:
+                    pull_requests.append(comp_label)
+            else:
+                sep = ':' if ':' in entry else ('@' if '@' in entry else '')
+                if not sep or entry.startswith(('http://', 'https://')):
+                    raise ValueError(
+                        f"Invalid extra_repos entry '{entry}': expected 'owner/repo:branch', "
+                        "'owner/repo#num', or a GitHub PR URL."
+                    )
+                r_name, r_branch = entry.split(sep, 1)
+                r_name = r_name.strip()
+                r_branch = r_branch.strip()
+                if '/' not in r_name or not r_branch:
+                    raise ValueError(
+                        f"Invalid extra_repos entry '{entry}': expected 'owner/repo:branch', "
+                        "'owner/repo#num', or a GitHub PR URL."
+                    )
+                resolved_base = self._apply_repo_override(
+                    master_repos=master_repos,
+                    target_repo=r_name,
+                    version=r_branch,
+                    gh_headers=gh_headers,
+                )
+                discovered_pr = self._discover_open_pr_for_branch(
+                    base_repo=resolved_base,
+                    head_repo=r_name,
+                    branch=r_branch,
+                    gh_headers=gh_headers,
+                )
+                if discovered_pr and discovered_pr not in pull_requests:
+                    pull_requests.append(discovered_pr)
 
         yaml_out = yaml.dump({'repositories': master_repos}, default_flow_style=False)
+        gist_desc = (
+            f'CI input for PR {pull_requests[0]}'
+            if len(pull_requests) == 1
+            else f"CI input for PRs {', '.join(pull_requests)}"
+        )
         gist_payload = {
-            'description': f'CI input for PR {base_repo}#{pr_num}',
+            'description': gist_desc,
             'public': True,
             'files': {
                 'ros2.repos': {'content': yaml_out},
@@ -637,6 +827,7 @@ class JenkinsManager:
             'pr_ref': pr_ref,
             'pr_repo': pr_repo,
             'base_repo': base_repo,
+            'pull_requests': pull_requests,
         }
 
     def launch_ci(
@@ -853,8 +1044,10 @@ class JenkinsManager:
                         )
 
                 badges_block = '\n'.join(badge_lines)
+                pr_list = gist_info.get('pull_requests') or [f"{gist_info['base_repo']}#{pr_num}"]
+                prs_bullets = '\n'.join(f'* {p}' for p in pr_list)
                 comment_md = (
-                    f"Pull Requests:\n* {gist_info['base_repo']}#{pr_num}\n\n"
+                    f"Pull Requests:\n{prs_bullets}\n\n"
                     f"Gist: {gist_info['raw_url']}\n"
                     f"BUILD args: {extra_build_args.strip()}\n"
                     f"TEST args: {extra_test_args.strip()}\n"
@@ -885,6 +1078,7 @@ class JenkinsManager:
                     'job_url': job_url,
                     'gist_url': gist_info['raw_url'],
                     'gist_html_url': gist_info['html_url'],
+                    'pull_requests': pr_list,
                     'child_jobs': child_jobs,
                     'comment_markdown': comment_md,
                     'comment_url': comment_url,
@@ -930,6 +1124,37 @@ class JenkinsManager:
             'parameters': params,
             'dry_run': dry_run,
         }
+
+    def refresh_active_runs_for_pr(self, pr_url: str) -> int:
+        """
+        Poll Jenkins for any tracked active (PENDING/RUNNING/BUILDING) runs matching ``pr_url``
+        and update ``self.tracker`` if they have transitioned to a new or terminal state.
+
+        Returns the number of tracker records updated.
+        """
+        if not self.tracker or not pr_url:
+            return 0
+        target_parsed = parse_pr_url(pr_url)
+        updated_count = 0
+        for run in self.tracker.get_active_runs():
+            matches_pr = (run.pr_url == pr_url)
+            if not matches_pr and target_parsed != (None, None):
+                matches_pr = (parse_pr_url(run.pr_url) == target_parsed)
+            if not matches_pr:
+                continue
+            status_info = self.fetch_build_status(run.job_url)
+            if not status_info.get('success'):
+                continue
+            live_status = status_info.get('status')
+            if live_status and live_status != run.status:
+                self.tracker.update_run(
+                    job_url=run.job_url,
+                    status=live_status,
+                    duration_seconds=status_info.get('duration_seconds'),
+                    artifacts=status_info.get('artifacts'),
+                )
+                updated_count += 1
+        return updated_count
 
     def _get_with_auth_retry(self, url: str, timeout: int) -> requests.Response:
         """Perform a GET request and retry once with GitHub OAuth credentials if Jenkins returns 401/403."""
