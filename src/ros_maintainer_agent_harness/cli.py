@@ -714,6 +714,40 @@ def handle_session_attach(args: argparse.Namespace) -> int:
     return 0 if res.get('success') else 1
 
 
+def handle_session_migrate_worktrees(args: argparse.Namespace) -> int:
+    ws_path = Path(args.workspace).resolve() if args.workspace else get_default_workspace_path()
+    layout = WorkspaceLayout(ws_path)
+    mgr = SessionManager(layout)
+
+    if getattr(args, 'all_sessions', False):
+        target_ids = [s.session_id for s in mgr.list_sessions()]
+    elif getattr(args, 'session_id', None):
+        if not mgr.session_exists(args.session_id):
+            print(f"Error: Session '{args.session_id}' does not exist.", file=sys.stderr)
+            return 1
+        target_ids = [args.session_id]
+    else:
+        print("Error: Specify a <session_id> or pass --all.", file=sys.stderr)
+        return 1
+
+    migrated_map = {}
+    for sid in target_ids:
+        paths = mgr.migrate_legacy_worktrees(sid)
+        migrated_map[sid] = [p.name for p in paths]
+
+    if getattr(args, 'json', False):
+        print(json.dumps({'migrated': migrated_map}, indent=2))
+    else:
+        total = sum(len(v) for v in migrated_map.values())
+        if total == 0:
+            print("✅ No legacy linked Git worktrees required migration.")
+        else:
+            for sid, repos in migrated_map.items():
+                if repos:
+                    print(f"✅ Migrated session '{sid}': {', '.join(repos)}")
+    return 0
+
+
 def handle_hub(args: argparse.Namespace) -> int:
     from .hub_container import (
         attach_to_hub_opencode,
@@ -2203,6 +2237,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     s_stat.add_argument('--milestone', type=str, default=None, help='Log milestone to timeline.md')
     s_stat.add_argument('--message', type=str, default=None, help='Log status message to timeline.md')
 
+    # session migrate-worktrees
+    s_mig = session_subparsers.add_parser(
+        'migrate-worktrees', parents=[ws_parent],
+        help='Migrate legacy linked Git worktrees to standalone session .git/ with alternates',
+    )
+    s_mig.add_argument('session_id', type=str, nargs='?', default=None, help='Session ID to migrate')
+    s_mig.add_argument('--all', dest='all_sessions', action='store_true', help='Migrate all sessions in workspace')
+    s_mig.add_argument('--json', action='store_true', help='Output migration result as JSON')
+
     # git-push (policy-guarded remote push)
     gp_parser = subparsers.add_parser(
         'git-push', parents=[ws_parent],
@@ -2618,6 +2661,8 @@ def main():
             return handle_session_start_conversation(args)
         elif args.session_action == 'status':
             return handle_session_status(args)
+        elif args.session_action == 'migrate-worktrees':
+            return handle_session_migrate_worktrees(args)
         else:
             print("Run `ros-maintainer-harness session --help` for session commands.")
             return 0
