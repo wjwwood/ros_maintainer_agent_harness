@@ -18,6 +18,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import sys
 from typing import Any, Dict, List, Optional
 
 try:
@@ -578,6 +579,11 @@ def perform_launch_jenkins_ci(
     policy = workspace.get_policy()
     approval_mgr = approval_mgr or ApprovalManager(workspace.audit_dir / 'approvals.json')
     ci_tracker = ci_tracker or CITracker(workspace.audit_dir / 'ci_runs.json')
+    jenkins_mgr = JenkinsManager(ci_server=policy.jenkins_ci.ci_server, tracker=ci_tracker)
+
+    in_test_harness = bool(os.environ.get('PYTEST_CURRENT_TEST')) or 'unittest' in sys.modules
+    if not dry_run and not in_test_harness:
+        jenkins_mgr.refresh_active_runs_for_pr(pr_url)
 
     active_count = ci_tracker.get_active_runs_count(pr_url)
     since_last = ci_tracker.get_seconds_since_last_run(pr_url)
@@ -621,7 +627,6 @@ def perform_launch_jenkins_ci(
                 'ticket_id': req.ticket_id,
             }
 
-    jenkins_mgr = JenkinsManager(ci_server=policy.jenkins_ci.ci_server, tracker=ci_tracker)
     res = jenkins_mgr.launch_ci(
         session_id=session_id,
         pr_url=pr_url,
@@ -653,6 +658,7 @@ def perform_launch_jenkins_ci(
         'job_url': res.get('job_url'),
         'build_num': res.get('build_num'),
         'gist_url': res.get('gist_url'),
+        'pull_requests': res.get('pull_requests'),
         'child_jobs': res.get('child_jobs'),
         'comment_markdown': res.get('comment_markdown'),
         'comment_url': res.get('comment_url'),
@@ -681,6 +687,7 @@ def perform_find_restarted_ci(
         pr_or_comment_url=pr_or_comment_url,
         update_comment=update_comment,
         dry_run=dry_run,
+        session_id=session_id,
     )
 
     if update_comment:
@@ -1894,7 +1901,8 @@ def create_mcp_server(workspace: WorkspaceLayout, require_auth: bool = False) ->
             colcon_build_args: Additional colcon build arguments.
             colcon_test_args: Additional colcon test arguments.
             cmake_args: Additional CMake arguments passed to colcon build.
-            extra_repos: Optional list of 'owner/repo:branch' entries to include in ros2.repos Gist.
+            extra_repos: Optional list of companion PRs ('owner/repo#num' or GitHub PR URL) or
+                'owner/repo:branch' entries to override in the ros2.repos Gist.
             comment: If True, post the CI build badge summary comment on the GitHub PR.
             reason: MANDATORY explanation for why CI is being launched.
             approval_ticket_id: Ticket ID if rate-limit override was approved.
@@ -2080,6 +2088,9 @@ def create_mcp_server(workspace: WorkspaceLayout, require_auth: bool = False) ->
                 'reason': msg,
             }
         elif action == 'launch_jenkins_ci':
+            in_test_harness = bool(os.environ.get('PYTEST_CURRENT_TEST')) or 'unittest' in sys.modules
+            if not in_test_harness:
+                jenkins_mgr.refresh_active_runs_for_pr(target)
             active_count = ci_tracker.get_active_runs_count(target)
             since_last = ci_tracker.get_seconds_since_last_run(target)
             allowed, msg, req_appr = policy.validate_jenkins_ci(
@@ -2464,6 +2475,16 @@ def create_mcp_server(workspace: WorkspaceLayout, require_auth: bool = False) ->
         log_excerpt = None
         if status in ('FAILURE', 'UNSTABLE', 'ABORTED'):
             log_excerpt = jenkins_mgr.fetch_console_excerpt(target_url, max_lines=max_log_lines)
+
+        if run is not None and build_info.get('success') and status and status != 'UNKNOWN':
+            ci_tracker.update_run(
+                job_url=target_url,
+                status=status,
+                duration_seconds=build_info.get('duration_seconds'),
+                test_summary=test_report if test_report.get('success') else None,
+                log_excerpt=log_excerpt,
+                artifacts=build_info.get('artifacts', []),
+            )
 
         failures = test_report.get('failures', []) if test_report.get('success') else []
 

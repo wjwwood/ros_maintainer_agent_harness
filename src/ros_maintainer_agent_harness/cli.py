@@ -1412,6 +1412,13 @@ def handle_ci(args: argparse.Namespace) -> int:
     elif args.ci_action == 'status':
         run = ci_tracker.get_run(args.target)
         target_url = run.job_url if run else args.target
+        if not target_url or not target_url.startswith(('http://', 'https://')):
+            print(
+                f"Error: No tracked Jenkins CI run found for '{args.target}'. "
+                "Pass a full Jenkins build URL or launch CI first.",
+                file=sys.stderr,
+            )
+            return 1
 
         if args.wait:
             print(f"Polling CI build at '{target_url}' (timeout: {args.timeout}s)...")
@@ -1432,6 +1439,13 @@ def handle_ci(args: argparse.Namespace) -> int:
                 )
         else:
             res = jenkins_mgr.fetch_build_status(target_url)
+            if run and res.get('success') and res.get('status') and res.get('status') != 'UNKNOWN':
+                ci_tracker.update_run(
+                    job_url=target_url,
+                    status=res.get('status'),
+                    duration_seconds=res.get('duration_seconds'),
+                    artifacts=res.get('artifacts', []),
+                )
 
         if not res.get('success'):
             print(f"Error: {res.get('error', 'Failed to fetch build status')}", file=sys.stderr)
@@ -1463,10 +1477,31 @@ def handle_ci(args: argparse.Namespace) -> int:
     elif args.ci_action == 'summary':
         run = ci_tracker.get_run(args.target)
         target_url = run.job_url if run else args.target
+        if not target_url or not target_url.startswith(('http://', 'https://')):
+            print(
+                f"Error: No tracked Jenkins CI run found for '{args.target}'. "
+                "Pass a full Jenkins build URL or launch CI first.",
+                file=sys.stderr,
+            )
+            return 1
 
         build_info = jenkins_mgr.fetch_build_status(target_url)
         test_report = jenkins_mgr.fetch_test_report(target_url)
         status = build_info.get('status', 'UNKNOWN')
+
+        excerpt = None
+        if status in ('FAILURE', 'UNSTABLE', 'ABORTED'):
+            excerpt = jenkins_mgr.fetch_console_excerpt(target_url, max_lines=args.max_lines)
+
+        if run and build_info.get('success') and status and status != 'UNKNOWN':
+            ci_tracker.update_run(
+                job_url=target_url,
+                status=status,
+                duration_seconds=build_info.get('duration_seconds'),
+                test_summary=test_report if test_report.get('success') else None,
+                log_excerpt=excerpt,
+                artifacts=build_info.get('artifacts', []),
+            )
 
         print(f"=== CI Summary for {target_url} ===")
         print(f"Status: {status}")
@@ -1480,8 +1515,7 @@ def handle_ci(args: argparse.Namespace) -> int:
             for f in test_report.get('failures', [])[:10]:
                 print(f"  ❌ {f.get('name')}: {f.get('error_details', '')[:100]}")
 
-        if status in ('FAILURE', 'UNSTABLE'):
-            excerpt = jenkins_mgr.fetch_console_excerpt(target_url, max_lines=args.max_lines)
+        if excerpt is not None:
             print("\n--- Console Log Excerpt ---")
             print(excerpt)
         return 0
@@ -1489,6 +1523,13 @@ def handle_ci(args: argparse.Namespace) -> int:
     elif args.ci_action == 'cancel':
         run = ci_tracker.get_run(args.target)
         target_url = run.job_url if run else args.target
+        if not target_url or not target_url.startswith(('http://', 'https://')):
+            print(
+                f"Error: No tracked Jenkins CI run found for '{args.target}'. "
+                "Pass a full Jenkins build URL or launch CI first.",
+                file=sys.stderr,
+            )
+            return 1
         res = jenkins_mgr.cancel_job(target_url)
         if res.get('success'):
             print(f"✅ Successfully cancelled CI build at '{target_url}'.")
@@ -1510,11 +1551,7 @@ def handle_ci(args: argparse.Namespace) -> int:
             for p in args.packages:
                 packages.extend([item.strip() for item in p.split(',') if item.strip()])
 
-        extra_repos = None
-        if args.extra_repos:
-            extra_repos = []
-            for er in args.extra_repos:
-                extra_repos.extend([item.strip() for item in er.split(',') if item.strip()])
+        extra_repos = JenkinsManager.normalize_extra_repos(args.extra_repos) or None
 
         res = _lazy('perform_launch_jenkins_ci')(
             workspace=layout,
@@ -1539,6 +1576,8 @@ def handle_ci(args: argparse.Namespace) -> int:
         else:
             if res.get('success'):
                 print(f"✅ Launched Jenkins CI ({res.get('status')}): {res.get('job_url')}")
+                if res.get('pull_requests'):
+                    print(f"  - Pull Requests: {', '.join(res['pull_requests'])}")
                 if res.get('packages'):
                     print(f"  - Packages: {', '.join(res['packages'])}")
                 if res.get('gist_url'):
@@ -2516,7 +2555,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ci_launch.add_argument('--colcon-build-args', type=str, default=None, help='Additional colcon build args')
     ci_launch.add_argument('--colcon-test-args', type=str, default=None, help='Additional colcon test args')
     ci_launch.add_argument('--cmake-args', type=str, default=None, help='Additional CMake args')
-    ci_launch.add_argument('--extra-repos', nargs='*', default=None, help='Extra owner/repo:branch entries')
+    ci_launch.add_argument(
+        '--extra-repos', '--companion-prs',
+        dest='extra_repos', action='extend', nargs='*', default=None,
+        help='Companion PRs (owner/repo#num or URL) or extra owner/repo:branch entries',
+    )
     ci_launch.add_argument('--comment', action='store_true', help='Post CI build badge comment on the GitHub PR')
     ci_launch.add_argument('-m', '--reason', type=str, required=True, help='Mandatory explanation for launching CI')
     ci_launch.add_argument(

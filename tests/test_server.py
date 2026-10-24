@@ -970,6 +970,64 @@ class TestMCPServer(unittest.TestCase):
         valid_chain, chain_msg = verify_audit_chain(self.workspace.audit_log_path)
         self.assertTrue(valid_chain, chain_msg)
 
+    def test_get_ci_summary_updates_tracker_and_cli_companion_prs(self):
+        from unittest.mock import patch
+        from ros_maintainer_agent_harness.ci import CITracker
+        from ros_maintainer_agent_harness.cli import parse_args
+
+        args = parse_args([
+            'ci', 'launch',
+            '-s', 'pr-rosidl-1013',
+            '--extra-repos', 'nwn/rosidl_dds:nwn-rosidl-find-package-idl',
+            '--companion-prs', 'ros2/rosidl_python#260', 'https://github.com/ros2/rosidl_typesupport/pull/185',
+            '-m', 'Run multi-repo CI',
+        ])
+        self.assertEqual(
+            args.extra_repos,
+            [
+                'nwn/rosidl_dds:nwn-rosidl-find-package-idl',
+                'ros2/rosidl_python#260',
+                'https://github.com/ros2/rosidl_typesupport/pull/185',
+            ],
+        )
+
+        tracker = CITracker(self.workspace.ci_runs_path)
+        job_url = 'https://ci.ros2.org/job/ci_linux/31039/'
+        tracker.record_run(
+            pr_url='https://github.com/ros2/rosidl/pull/1013',
+            session_id='pr-rosidl-1013',
+            job_name='ci_linux',
+            build_num=31039,
+            job_url=job_url,
+            status='RUNNING',
+        )
+        self.assertEqual(tracker.get_active_runs_count('ros2/rosidl#1013'), 1)
+
+        with patch(
+            'ros_maintainer_agent_harness.ci.JenkinsManager.fetch_build_status',
+            return_value={
+                'success': True,
+                'job_url': job_url.rstrip('/'),
+                'status': 'FAILURE',
+                'building': False,
+                'result': 'FAILURE',
+                'duration_seconds': 112.0,
+                'artifacts': [],
+            },
+        ), patch(
+            'ros_maintainer_agent_harness.ci.JenkinsManager.fetch_test_report',
+            return_value={'success': False},
+        ), patch(
+            'ros_maintainer_agent_harness.ci.JenkinsManager.fetch_console_excerpt',
+            return_value='colcon build: Duplicate package names not supported',
+        ):
+            summary = self._call('get_ci_summary', {'job_url_or_id': job_url})
+
+        self.assertTrue(summary['success'])
+        self.assertEqual(summary['status'], 'FAILURE')
+        self.assertEqual(tracker.get_run('31039').status, 'FAILURE')
+        self.assertEqual(tracker.get_active_runs_count('ros2/rosidl#1013'), 0)
+
 
 if __name__ == '__main__':
     unittest.main()
