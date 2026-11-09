@@ -16,6 +16,17 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from ros_maintainer_agent_harness.instructions import (
+    get_agent_system_prompt,
+    get_in_container_session_instructions,
+    get_opencode_session_instructions,
+    get_session_agent_instructions,
+    get_workspace_coordinator_instructions,
+)
+from ros_maintainer_agent_harness.rules import (
+    dump_default_rules_md,
+    get_default_maintainer_rules_template,
+)
 from ros_maintainer_agent_harness.workspace import WorkspaceLayout
 
 
@@ -50,6 +61,28 @@ class TestWorkspaceLayout(unittest.TestCase):
             # Verify policy loading
             policy = layout.get_policy()
             self.assertTrue(policy.is_branch_push_allowed('maintainer/test_branch'))
+
+            # Verify default maintainer rules include writing style & copy-pasteable snippet rules
+            rules_content = layout.rules_path.read_text(encoding='utf-8')
+            self.assertEqual(rules_content, dump_default_rules_md())
+            self.assertEqual(rules_content, get_default_maintainer_rules_template())
+            self.assertIn('## Writing Style & Copy-Pasteable Snippets', rules_content)
+            self.assertIn('````markdown', rules_content)
+            self.assertIn('raw GitHub permalink URLs', rules_content)
+
+    def test_instructions_reference_maintainer_writing_style_rules(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_root = Path(temp_dir) / 'test_ws'
+            sess_dir = ws_root / 'sessions' / 'pr-rclcpp-160'
+            for content in (
+                get_agent_system_prompt(),
+                get_workspace_coordinator_instructions(ws_root),
+                get_session_agent_instructions('pr-rclcpp-160', sess_dir, ws_root),
+                get_opencode_session_instructions('pr-rclcpp-160', sess_dir, ws_root),
+                get_in_container_session_instructions('pr-rclcpp-160', sess_dir, ws_root),
+            ):
+                self.assertIn('Writing Style & Copy-Pasteable Snippets', content)
+                self.assertIn('maintainer_rules.md', content)
 
 
 if __name__ == '__main__':

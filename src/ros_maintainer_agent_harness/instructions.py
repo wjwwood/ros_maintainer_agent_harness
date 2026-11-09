@@ -128,8 +128,14 @@ by the Host MCP Gateway:
    - Only include `### Additional Information` when there is a problem or extra context needed to understand the
      change; otherwise omit that section entirely.
    - Do NOT mention running local tests or builds in PR descriptions (that is assumed).
+   - Before drafting any copy-pasteable GitHub comment, review, issue reply, or PR description, read
+     `/workspace/MAINTAINER_RULES.md` (`config/maintainer_rules.md` or call MCP `get_maintainer_rules()`) and
+     apply its `## Writing Style & Copy-Pasteable Snippets` section directly rather than scraping GitHub issues/PRs
+     to learn the maintainer's style.
    - When drafting PR descriptions or comments for the user, prefer providing a copy-pasteable markdown block
-     directly in the conversation (with a file as an acceptable fallback).
+     directly in the conversation (with a file as an acceptable fallback). When the snippet itself contains inner
+     triple-backtick (` ``` `) code blocks, wrap the outer fence in four backticks (` ````markdown `) so it renders
+     as a single copy-pasteable block.
 6. **ROS Package Release Workflow (`release push` & `release bloom`)**:
    - Step 1 (Container): Run `catkin_generate_changelog`, polish `CHANGELOG.rst` with the maintainer, commit the
      changelog changes, and run `catkin_prepare_release --no-push` to create the local version bump commit and tag.
@@ -274,7 +280,9 @@ happen inside the session's isolated container (`ros-harness-<session_id>`), **N
 
 When spawning a subagent to work on a session:
 - You **MUST** instruct the subagent in its prompt to:
-  1. Read `{ws_str}/sessions/<session_id>/AGENTS.md` and `{ws_str}/sessions/<session_id>/TASK.md`.
+  1. Read `{ws_str}/sessions/<session_id>/AGENTS.md`, `{ws_str}/sessions/<session_id>/TASK.md`, and
+     `{ws_str}/config/maintainer_rules.md` (applying `## Writing Style & Copy-Pasteable Snippets` directly without
+     scraping GitHub history to learn the maintainer's style).
   2. Perform the pre-build diff security review before compiling.
   3. Set `Cwd` to `{ws_str}/sessions/<session_id>` so the `PreToolUse` hook routes shell commands into the container
      automatically (or use `exec_in_session(session_id="<session_id>", command="...")` if hooks are unavailable).
@@ -311,8 +319,10 @@ def get_session_agent_instructions(
    - Check for committed secrets, modified `.github/workflows/`, or suspicious code in `CMakeLists.txt`,
      `setup.py`, `package.xml`, or tests. If anything suspicious is found, halt and notify the maintainer.
 3. **Maintainer Style & Conventions**:
-   - Read `{ws_str}/config/maintainer_rules.md` (mounted at `/workspace/MAINTAINER_RULES.md` inside the container)
-     or call the MCP tool `get_maintainer_rules()`.
+   - Before drafting any copy-pasteable GitHub comment, review, issue reply, or PR description, read
+     `{ws_str}/config/maintainer_rules.md` (mounted at `/workspace/MAINTAINER_RULES.md` inside the container, or call
+     the MCP tool `get_maintainer_rules()`) and apply its `## Writing Style & Copy-Pasteable Snippets` section
+     directly rather than scraping GitHub issues or PRs to learn the maintainer's style.
 
 ---
 
@@ -383,7 +393,9 @@ def get_session_agent_instructions(
         change; otherwise omit that section entirely.
       - Do NOT mention running local tests or builds in PR descriptions (that is assumed).
       - When drafting PR descriptions or comments for the user, prefer providing a copy-pasteable markdown block
-        directly in the conversation (with a file as an acceptable fallback).
+        directly in the conversation (with a file as an acceptable fallback). When the snippet itself contains inner
+        triple-backtick (` ``` `) code blocks, wrap the outer fence in four backticks (` ````markdown `) so it
+        renders as a single copy-pasteable block.
       - When calling `create-pr` or `edit-pr`, prefer passing `-F <file>` (`--body-file`) or single quotes (`'...'`).
   - **Launch Jenkins CI (One-Step)**:
     - MCP: `launch_jenkins_ci(session_id="{session_id}", comment=True, reason="...")`
@@ -531,8 +543,12 @@ def get_opencode_session_instructions(
 
 ## 2. Mandatory Session Workflow
 
-1. **Read Task & Perform Pre-Build Diff Security Check**:
-   - Read `{sess_str}/TASK.md` and `{ws_str}/config/maintainer_rules.md`.
+1. **Read Task, Maintainer Style & Perform Pre-Build Diff Security Check**:
+   - Read `{sess_str}/TASK.md` and `{ws_str}/config/maintainer_rules.md` (`/workspace/MAINTAINER_RULES.md`).
+     Before drafting any copy-pasteable GitHub comment, review, issue reply, or PR description, apply the
+     `## Writing Style & Copy-Pasteable Snippets` section of `maintainer_rules.md` directly rather than scraping
+     GitHub issues or PRs to learn the maintainer's style (and wrap snippets containing inner triple-backtick
+     code blocks in four backticks ` ````markdown `).
    - Inspect `git diff` in `{sess_str}/src/` before compiling. Halt immediately if secrets, CI workflow modifications,
      or suspicious build/test commands are present.
 2. **Build & Test**:
@@ -546,9 +562,12 @@ def get_opencode_session_instructions(
 3. **Log Milestones & Use Gateway Tools**:
    - Record milestones with `log_status(session_id="{session_id}", milestone="...", message="...")` and update status
      with `update_session_status(session_id="{session_id}", status="...")`.
-   - Use `git_push`, `launch_jenkins_ci`, `get_ci_status`, `get_ci_summary`, `create_pull_request`, and
+    - Use `git_push`, `launch_jenkins_ci`, `get_ci_status`, `get_ci_summary`, `create_pull_request`, and
      `edit_pull_request` for all remote GitHub and Jenkins operations.
 """
+
+
+get_in_container_session_instructions = get_opencode_session_instructions
 
 
 def write_workspace_agent_instructions(workspace_root: Path) -> Dict[str, Path]:
