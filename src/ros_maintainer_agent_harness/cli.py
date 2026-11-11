@@ -310,7 +310,7 @@ def handle_mcp_install(args: argparse.Namespace) -> int:
     hook_written = install_hooks_config(
         target_dir=ws_path,
         workspace_root=ws_path,
-        include_global=True,
+        include_global=bool(getattr(args, 'global_hooks', False)),
     )
     print(f"✅ Registered ros-maintainer-harness MCP server for workspace '{ws_path}':")
     for target_name, path in written.items():
@@ -1918,6 +1918,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     mcp_inst.add_argument('--host', type=str, default='127.0.0.1', help='Host for network transport')
     mcp_inst.add_argument('--port', type=int, default=8765, help='Port for network transport')
+    mcp_inst.add_argument(
+        '--global-hooks', action='store_true', default=False,
+        help='Also install PreToolUse hooks in ~/.gemini/config/hooks.json (default: workspace-scoped only)',
+    )
 
     # serve
     serve_parser = subparsers.add_parser(
