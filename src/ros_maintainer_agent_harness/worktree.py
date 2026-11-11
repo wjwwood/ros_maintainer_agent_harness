@@ -36,7 +36,16 @@ SUBFOLDER_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_.-]+$')
 def _rmtree_force(target: Path) -> None:
     def _handle_readonly(func, path, _exc_info):
         try:
-            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            parent = os.path.dirname(path)
+            if parent:
+                try:
+                    os.chmod(parent, stat.S_IRWXU)
+                except OSError:
+                    pass
+            if os.path.isdir(path) and not os.path.islink(path):
+                os.chmod(path, stat.S_IRWXU)
+            else:
+                os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
             func(path)
         except Exception:
             pass
@@ -68,13 +77,13 @@ def read_session_metadata(session_dir: Path) -> Dict[str, Any]:
     """Read structured session metadata from <session_dir>/session.json with fallback inference."""
     meta_path = get_session_metadata_path(session_dir)
     data: Dict[str, Any] = {}
-    if meta_path.exists():
-        try:
+    try:
+        if meta_path.exists():
             loaded = json.loads(meta_path.read_text(encoding='utf-8'))
             if isinstance(loaded, dict):
                 data = loaded
-        except Exception:
-            data = {}
+    except Exception:
+        data = {}
 
     session_id = session_dir.name
     data.setdefault('session_id', session_id)
@@ -90,18 +99,18 @@ def read_session_metadata(session_dir: Path) -> Dict[str, Any]:
     data.setdefault('updated_at', None)
 
     dc_path = session_dir / '.devcontainer' / 'devcontainer.json'
-    if dc_path.exists():
-        try:
+    try:
+        if dc_path.exists():
             dc = json.loads(dc_path.read_text(encoding='utf-8'))
             dc_distro = dc.get('containerEnv', {}).get('ROS_DISTRO')
             if dc_distro:
                 data['distro'] = dc_distro
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     task_path = session_dir / 'TASK.md'
-    if task_path.exists() and not data.get('pr_url'):
-        try:
+    try:
+        if task_path.exists() and not data.get('pr_url'):
             task_text = task_path.read_text(encoding='utf-8')
             m_pr = re.search(r'\*\*Pull Request\*\*:\s*\[([^\]]+)\]\(([^)]+)\)', task_text)
             if m_pr:
@@ -113,8 +122,8 @@ def read_session_metadata(session_dir: Path) -> Dict[str, Any]:
             m_author = re.search(r'\*\*Author\*\*:\s*`@?([^`\n]+)`', task_text)
             if m_author:
                 data['pr_author'] = m_author.group(1).strip()
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     return data
 
@@ -786,12 +795,19 @@ class SessionManager:
 
     def list_sessions(self) -> List[SessionInfo]:
         """List all active sessions in the workspace."""
-        if not self.workspace.sessions_dir.exists():
+        try:
+            if not self.workspace.sessions_dir.exists():
+                return []
+            entries = sorted(self.workspace.sessions_dir.iterdir())
+        except Exception:
             return []
 
         sessions = []
-        for s_dir in sorted(self.workspace.sessions_dir.iterdir()):
-            if not s_dir.is_dir():
+        for s_dir in entries:
+            try:
+                if not s_dir.is_dir():
+                    continue
+            except Exception:
                 continue
 
             session_id = s_dir.name
@@ -804,18 +820,21 @@ class SessionManager:
 
             # Inspect active worktree branches in src
             active_branches = {}
-            if src_dir.exists():
-                from .git_ops import git_safe_cmd
-                for sub in src_dir.iterdir():
-                    if sub.is_dir() and (sub / '.git').exists():
-                        res = subprocess.run(
-                            git_safe_cmd(sub, 'rev-parse', '--abbrev-ref', 'HEAD'),
-                            cwd=str(sub),
-                            capture_output=True,
-                            text=True,
-                        )
-                        if res.returncode == 0:
-                            active_branches[sub.name] = res.stdout.strip()
+            try:
+                if src_dir.exists():
+                    from .git_ops import git_safe_cmd
+                    for sub in src_dir.iterdir():
+                        if sub.is_dir() and (sub / '.git').exists():
+                            res = subprocess.run(
+                                git_safe_cmd(sub, 'rev-parse', '--abbrev-ref', 'HEAD'),
+                                cwd=str(sub),
+                                capture_output=True,
+                                text=True,
+                            )
+                            if res.returncode == 0:
+                                active_branches[sub.name] = res.stdout.strip()
+            except Exception:
+                pass
 
             sessions.append(SessionInfo(
                 session_id=session_id,

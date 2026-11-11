@@ -600,6 +600,96 @@ class TestContainerHooks(unittest.TestCase):
         claude_data = json.loads(second['claude'].read_text(encoding='utf-8'))
         self.assertEqual(len(claude_data['hooks']['PreToolUse']), 1)
 
+    def test_hook_ignores_unreadable_session_directory_permission_error(self):
+        from ros_maintainer_agent_harness.worktree import read_session_metadata
+
+        unreadable_session = self.mgr.create_session('pr-rosidl-1013', topic='Unreadable session')
+        orig_exists = Path.exists
+
+        def fake_exists(path_obj: Path) -> bool:
+            if 'pr-rosidl-1013' in str(path_obj):
+                raise PermissionError(13, 'Permission denied', str(path_obj))
+            return orig_exists(path_obj)
+
+        with patch.object(Path, 'exists', autospec=True, side_effect=fake_exists):
+            meta = read_session_metadata(unreadable_session.session_dir)
+            self.assertEqual(meta['session_id'], 'pr-rosidl-1013')
+
+            # Inside ws_root with an unreadable sibling session: hook still works and routes spoke-conv-1234
+            payload = {
+                'conversationId': 'spoke-conv-1234',
+                'workspacePaths': [str(self.ws_root)],
+                'toolCall': {
+                    'name': 'run_command',
+                    'arguments': {
+                        'CommandLine': 'git status',
+                        'Cwd': str(self.ws_root),
+                    },
+                },
+            }
+            res = evaluate_pre_tool_use(payload, workspace_root=self.ws_root)
+            self.assertEqual(res.get('decision'), 'allow')
+            self.assertIn('rmah-session-exec', res['overwrite']['CommandLine'])
+
+    def test_early_exit_when_outside_workspace_root_and_global_hook_cleanup(self):
+        # 1. When Cwd and workspacePaths are outside ws_root (e.g. insrc), evaluate_pre_tool_use
+        #    returns {} immediately without scanning sessions/*/session.json or blocking colcon/pytest
+        outside_payload = {
+            'conversationId': 'spoke-conv-1234',
+            'workspacePaths': ['/tmp/unrelated_repo'],
+            'toolCall': {
+                'name': 'run_command',
+                'arguments': {
+                    'CommandLine': 'colcon build',
+                    'Cwd': '/tmp/unrelated_repo',
+                },
+            },
+        }
+        with patch('ros_maintainer_agent_harness.hooks.read_session_metadata') as mock_read_meta:
+            res = evaluate_pre_tool_use(outside_payload, workspace_root=self.ws_root)
+            self.assertEqual(res, {})
+            mock_read_meta.assert_not_called()
+
+        # 2. install_hooks_config with include_global=False cleans up ros-maintainer-container-exec
+        #    from ~/.gemini/config/hooks.json while preserving other global hooks
+        with tempfile.TemporaryDirectory() as fake_home:
+            home_path = Path(fake_home)
+            global_hooks_file = home_path / '.gemini' / 'config' / 'hooks.json'
+            global_hooks_file.parent.mkdir(parents=True, exist_ok=True)
+            global_hooks_file.write_text(
+                json.dumps({
+                    'other-hook': {'enabled': True},
+                    'ros-maintainer-container-exec': {'enabled': True, 'PreToolUse': []},
+                }),
+                encoding='utf-8',
+            )
+            with patch('pathlib.Path.home', return_value=home_path):
+                written = install_hooks_config(
+                    workspace_root=self.ws_root,
+                    target_dir=self.ws_root,
+                    include_global=False,
+                )
+                self.assertNotIn('global', written)
+                cleaned = json.loads(global_hooks_file.read_text(encoding='utf-8'))
+                self.assertNotIn('ros-maintainer-container-exec', cleaned)
+                self.assertIn('other-hook', cleaned)
+
+    def test_rmtree_force_preserves_directory_exec_bit_on_readonly_tree(self):
+        import os
+        from ros_maintainer_agent_harness.worktree import _rmtree_force
+
+        ro_session = self.mgr.create_session('pr-readonly-test', topic='Read-only dir test')
+        nested_dir = ro_session.build_dir / 'pkg' / 'sub'
+        nested_dir.mkdir(parents=True, exist_ok=True)
+        ro_file = nested_dir / 'artifact.txt'
+        ro_file.write_text('data', encoding='utf-8')
+        os.chmod(ro_file, 0o444)
+        os.chmod(nested_dir, 0o555)
+        os.chmod(ro_session.build_dir, 0o555)
+
+        _rmtree_force(ro_session.session_dir)
+        self.assertFalse(ro_session.session_dir.exists())
+
 
 if __name__ == '__main__':
     unittest.main()

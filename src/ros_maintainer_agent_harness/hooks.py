@@ -95,6 +95,36 @@ def ensure_agent_bin_symlinks() -> Dict[str, Path]:
     return created
 
 
+def _is_path_within(path_str: str, base_dir: Path) -> bool:
+    """Return True if `path_str` is `/workspace` or resolves inside `base_dir`."""
+    if not path_str:
+        return False
+    if path_str == '/workspace' or path_str.startswith('/workspace/'):
+        return True
+    try:
+        candidate = Path(path_str).expanduser().resolve()
+        base_resolved = base_dir.resolve()
+        return candidate == base_resolved or base_resolved in candidate.parents
+    except Exception:
+        return False
+
+
+def _is_invocation_in_workspace(
+    cwd: str,
+    workspace_paths: Optional[List[str]],
+    ws_root: Path,
+) -> bool:
+    """
+    Return True if at least one provided path (`cwd` or `workspace_paths`) is inside `ws_root`
+    (or `/workspace`), or if neither `cwd` nor `workspace_paths` was provided.
+    Return False when paths were provided and all of them are outside `ws_root`.
+    """
+    candidates = [str(p).strip() for p in ([cwd] + list(workspace_paths or [])) if p and str(p).strip()]
+    if not candidates:
+        return True
+    return any(_is_path_within(p, ws_root) for p in candidates)
+
+
 def _extract_session_from_path(
     path_str: str,
     sessions_dir: Path,
@@ -135,7 +165,10 @@ def resolve_session_for_hook(
     """
     ws_root = workspace_root.resolve()
     sessions_dir = ws_root / 'sessions'
-    if not sessions_dir.is_dir():
+    try:
+        if not sessions_dir.is_dir():
+            return None
+    except Exception:
         return None
 
     # 1. Check Cwd
@@ -151,13 +184,24 @@ def resolve_session_for_hook(
             sid, sdir = found
             return sid, sdir, read_session_metadata(sdir)
 
+    # Early exit when Cwd/workspace_paths are provided and none are inside ws_root
+    if not _is_invocation_in_workspace(cwd, workspace_paths, ws_root):
+        return None
+
     # 3. Check conversation_id in sessions/*/session.json
     is_hub_conversation = False
     if conversation_id:
-        for sdir in sorted(sessions_dir.iterdir()):
-            if not sdir.is_dir():
+        try:
+            session_entries = sorted(sessions_dir.iterdir())
+        except Exception:
+            session_entries = []
+        for sdir in session_entries:
+            try:
+                if not sdir.is_dir():
+                    continue
+                meta = read_session_metadata(sdir)
+            except Exception:
                 continue
-            meta = read_session_metadata(sdir)
             if meta.get('hub_conversation_id') == conversation_id:
                 is_hub_conversation = True
             if (
@@ -177,8 +221,11 @@ def resolve_session_for_hook(
         except Exception:
             pass
         sdir = sessions_dir / explicit_session_id
-        if sdir.is_dir():
-            return explicit_session_id, sdir, read_session_metadata(sdir)
+        try:
+            if sdir.is_dir():
+                return explicit_session_id, sdir, read_session_metadata(sdir)
+        except Exception:
+            return None
 
     return None
 
@@ -886,6 +933,9 @@ def evaluate_pre_tool_use(
         explicit_session_id=explicit_session_id,
     )
 
+    if session_match is None and not _is_invocation_in_workspace(cwd, workspace_paths, ws_root):
+        return {}
+
     if session_match is not None:
         session_deny = is_forbidden_session_command(command_line, session_match[0])
         if session_deny:
@@ -1026,6 +1076,24 @@ def _merge_claude_settings_hooks(settings_path: Path, hook_cmd: str) -> Path:
     return settings_path
 
 
+def _remove_global_hook_entry(hooks_path: Path) -> bool:
+    """Remove `ros-maintainer-container-exec` from a global `hooks.json` file if present."""
+    try:
+        if not hooks_path.exists():
+            return False
+        content = hooks_path.read_text(encoding='utf-8').strip()
+        if not content:
+            return False
+        loaded = json.loads(content)
+        if not isinstance(loaded, dict) or 'ros-maintainer-container-exec' not in loaded:
+            return False
+        loaded.pop('ros-maintainer-container-exec', None)
+        hooks_path.write_text(json.dumps(loaded, indent=2) + '\n', encoding='utf-8')
+        return True
+    except Exception:
+        return False
+
+
 def install_hooks_config(
     workspace_root: Path,
     target_dir: Optional[Path] = None,
@@ -1039,8 +1107,7 @@ def install_hooks_config(
     """
     ws_root = workspace_root.resolve()
     base_dir = (target_dir or ws_root).resolve()
-    if include_global:
-        ensure_agent_bin_symlinks()
+    ensure_agent_bin_symlinks()
     hook_cmd = get_harness_hook_command(ws_root, session_id=session_id)
 
     # Remove duplicate _agents/hooks.json if present so hooks do not fire twice per directory
@@ -1057,12 +1124,14 @@ def install_hooks_config(
     written['antigravity'] = _merge_hooks_json(base_dir / '.agents' / 'hooks.json', hook_cmd)
     written['claude'] = _merge_claude_settings_hooks(base_dir / '.claude' / 'settings.json', hook_cmd)
 
+    global_hooks = Path.home() / '.gemini' / 'config' / 'hooks.json'
     if include_global:
         try:
-            global_hooks = Path.home() / '.gemini' / 'config' / 'hooks.json'
             global_cmd = get_harness_hook_command(ws_root, session_id=None)
             written['global'] = _merge_hooks_json(global_hooks, global_cmd)
         except Exception:
             pass
+    else:
+        _remove_global_hook_entry(global_hooks)
 
     return written

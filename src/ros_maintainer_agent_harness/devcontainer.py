@@ -1982,7 +1982,10 @@ def exec_in_session_container(
             gid = os.getgid()
             if uid != 0:
                 chown_trap = (
-                    f"trap 'find /workspace/src -user 0 -exec chown -h {uid}:{gid} {{}} + "
+                    f"trap 'chown -h {uid}:{gid} /workspace /workspace/session.json "
+                    f"/workspace/timeline.md /workspace/TASK.md 2>/dev/null || true; "
+                    f"chmod u+rwx /workspace 2>/dev/null || true; "
+                    f"find /workspace -user 0 -exec chown -h {uid}:{gid} {{}} + "
                     f"2>/dev/null || true' EXIT; "
                 )
         except Exception:
@@ -2049,6 +2052,26 @@ def stop_session_container(
             'freed_port': freed_port,
             'error': 'No container runtime (docker or podman) found on PATH.',
         }
+
+    if hasattr(os, 'getuid') and hasattr(os, 'getgid'):
+        try:
+            uid = os.getuid()
+            gid = os.getgid()
+            if uid != 0:
+                st = get_container_status(session_id, runtime=rt, runner=active_runner)
+                if st.get('running'):
+                    active_runner.run(
+                        [
+                            rt, 'exec', container_name, 'sh', '-c',
+                            (
+                                f"chmod u+rwx /workspace 2>/dev/null || true; "
+                                f"find /workspace -user 0 -exec chown -h {uid}:{gid} {{}} + 2>/dev/null || true"
+                            ),
+                        ],
+                        timeout=30,
+                    )
+        except Exception:
+            pass
 
     res = active_runner.run([rt, 'rm', '-f', container_name])
     return {
