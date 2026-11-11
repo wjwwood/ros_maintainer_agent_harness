@@ -79,7 +79,11 @@ def generate_task_prompt(meta: PRMetadata, distro: str) -> str:
 ---
 
 ## Agent Objectives & Guidelines
-1. **Workspace Inspection & Security Review**:
+1. **Workspace Inspection, Maintainer Style & Security Review**:
+   - Before drafting any copy-pasteable GitHub comment, review, issue reply, or PR description, read
+     `/workspace/MAINTAINER_RULES.md` (`config/maintainer_rules.md` or call MCP `get_maintainer_rules()`) and apply
+     its `## Writing Style & Copy-Pasteable Snippets` section directly rather than scraping GitHub issues or PRs to
+     learn the maintainer's style (wrapping snippets with inner ` ``` ` blocks in four backticks ` ````markdown `).
    - Inspect the checked-out PR branch in `src/{meta.repo}` and review the diff against `origin/{meta.base_ref}`.
    - **Important**: Inspect the diff *before* building or running tests. Check for accidentally committed
      secrets, modified CI workflows, or suspicious changes in build scripts and test code (e.g. unexpected

@@ -54,6 +54,9 @@ class TestScaffolder(unittest.TestCase):
         self.assertIn('src/rclcpp/timer.cpp', prompt)
         self.assertIn('jazzy', prompt)
         self.assertIn('colcon test', prompt)
+        self.assertIn('MAINTAINER_RULES.md', prompt)
+        self.assertIn('Writing Style & Copy-Pasteable Snippets', prompt)
+        self.assertIn('````markdown', prompt)
 
     @patch('ros_maintainer_agent_harness.scaffolder.fetch_pr_metadata')
     def test_scaffold_session_from_pr(self, mock_fetch):

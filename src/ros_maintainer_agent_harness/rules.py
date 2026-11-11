@@ -48,7 +48,34 @@ def dump_default_rules_md() -> str:
   (tool/model name only, no long disclosure paragraph), e.g. `Yes, Claude Opus 5.5` or `Yes, Gemini`.
 - Do NOT mention running local builds or tests in PR descriptions (that is assumed).
 - When drafting PR descriptions or comments for the maintainer, prefer providing a copy-pasteable markdown block
-  directly in the conversation (with a file as an acceptable fallback).
+  directly in the conversation (with a file as an acceptable fallback). When the snippet itself contains inner
+  triple-backtick (` ``` `) code blocks, wrap the outer fence in four backticks (` ````markdown `) so it renders
+  as a single copy-pasteable block.
+
+## Writing Style & Copy-Pasteable Snippets
+When drafting GitHub review comments, issue/PR replies, PR descriptions, or documentation for the maintainer,
+apply these rules directly **without** scraping GitHub history to rediscover the maintainer's voice:
+- **Voice & Audience**:
+  - Write in a natural, conversational first-person tone (`I think...`, `It might make sense to...`,
+    `Looks mostly reasonable to me, but I had a few comments:`, `lgtm! Good catch...`, `For context on why...`).
+  - Write for an audience of engineers who already know ROS, C++/Python, and the codebase. Jump straight to the
+    concrete problem, mechanism, or trade-off without AI throat-clearing or promotional fluff.
+  - Provide just enough technical context (exact function, signal, CMake variable, or race window) that the reader
+    can understand the problem and solution without looking things up from scratch, needing only to verify that
+    what we are saying is true.
+- **Formatting & Punctuation (No "AI-isms")**:
+  - Use **minimal or no bold text** in prose and bullets. Never use `- **Bold header:** explanation` bullet prefixes.
+  - Never use em-dashes (`--` or unicode em-dash); use parentheses, commas, colons, or separate sentences instead.
+  - Never use decorative emojis in section headings or bullet points.
+  - Use inline backticks for all code symbols, filenames, CMake variables, CLI flags, and commit SHAs.
+  - Use **raw GitHub permalink URLs** (`https://github.com/<org>/<repo>/blob/<sha>/path/to/file#L10-L20` or
+    `#discussion_r...`) either on their own line or in parentheses rather than `[line 10](url)` Markdown links,
+    so GitHub automatically renders inline code snippet previews when pasted.
+- **Structure of Review Comments**:
+  - Start with a brief 1-sentence overall take when appropriate, then use flat `-` or numbered bullets walking
+    through the specific code path.
+  - Separate minor items under a simple line like `A few minor things / nits:` or `One optional cleanup:`.
+  - Close with a concrete question when inviting discussion (`What do you think about...?`).
 
 ## Releases
 - Follow the 3-step release workflow when releasing ROS packages:
@@ -62,6 +89,9 @@ def dump_default_rules_md() -> str:
 ## General
 - Always review linter errors before launching Jenkins CI.
 """
+
+
+get_default_maintainer_rules_template = dump_default_rules_md
 
 
 class MaintainerRules:
