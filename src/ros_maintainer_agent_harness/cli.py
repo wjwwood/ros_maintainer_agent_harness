@@ -410,12 +410,20 @@ def handle_session_prune(args: argparse.Namespace) -> int:
         print(f"Error: Session '{args.session_id}' does not exist.", file=sys.stderr)
         return 1
 
+    session_dir = mgr.get_session_dir(args.session_id)
     success = mgr.prune_session(args.session_id, force=args.force)
     if success:
         print(f"✅ Successfully pruned session '{args.session_id}'.")
         return 0
     else:
-        print(f"Failed to prune session '{args.session_id}'.", file=sys.stderr)
+        if session_dir.exists():
+            print(
+                f"Error: Failed to completely prune session '{args.session_id}': "
+                f"'{session_dir}' still exists (root-owned container artifacts could not be removed).",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Failed to prune session '{args.session_id}'.", file=sys.stderr)
         return 1
 
 

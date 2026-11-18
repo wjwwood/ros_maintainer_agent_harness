@@ -338,6 +338,114 @@ class TestSessionManager(unittest.TestCase):
             ).stdout.strip()
             self.assertEqual(actual_sha, expected_sha)
 
+    def test_prune_session_falls_back_to_container_chown_when_host_deletion_blocked(self):
+        from unittest.mock import patch
+        from ros_maintainer_agent_harness.runner import CommandResult, FakeCommandRunner
+        import ros_maintainer_agent_harness.worktree as wt_mod
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            layout = WorkspaceLayout(Path(temp_dir) / 'ws')
+            layout.initialize()
+            mgr = SessionManager(layout)
+            session = mgr.create_session('pr-rclcpp-3395', topic='Root build artifacts', distro='rolling')
+            blocked_file = session.build_dir / 'rclcpp' / 'artifact.o'
+            blocked_file.parent.mkdir(parents=True, exist_ok=True)
+            blocked_file.write_text('binary', encoding='utf-8')
+
+            orig_remove_children = wt_mod._remove_session_children_except_metadata
+            call_count = {'n': 0}
+            docker_chown_cmds = []
+
+            def simulated_remove_children(sdir: Path) -> bool:
+                call_count['n'] += 1
+                if call_count['n'] == 1:
+                    # Simulate root-owned build/rclcpp preventing removal on the first pass
+                    return False
+                return orig_remove_children(sdir)
+
+            runner = FakeCommandRunner(available_binaries={'docker': '/usr/bin/docker'})
+
+            def handle_docker(argv, _call):
+                if argv[:3] == ['docker', 'image', 'inspect']:
+                    return CommandResult(args=list(argv), returncode=0, stdout='[]\n')
+                if argv[:3] == ['docker', 'run', '--rm']:
+                    docker_chown_cmds.append(list(argv))
+                    return CommandResult(args=list(argv), returncode=0, stdout='')
+                return CommandResult(args=list(argv), returncode=0, stdout='')
+
+            runner.add_handler(lambda _argv: True, handle_docker)
+
+            with patch.object(
+                wt_mod, '_remove_session_children_except_metadata', side_effect=simulated_remove_children
+            ):
+                with patch('os.getuid', return_value=1000), patch('os.getgid', return_value=1000):
+                    ok = mgr.prune_session('pr-rclcpp-3395', force=True, runtime='docker', runner=runner)
+
+            self.assertTrue(ok)
+            self.assertFalse(session.session_dir.exists())
+            self.assertEqual(len(docker_chown_cmds), 1)
+            self.assertIn('--network=none', docker_chown_cmds[0])
+            self.assertIn(f"{session.session_dir.resolve()}:/cleanup", docker_chown_cmds[0])
+            self.assertTrue(any('chown -R 1000:1000 /cleanup' in arg for arg in docker_chown_cmds[0]))
+
+    def test_prune_session_returns_false_and_preserves_metadata_when_cleanup_fails(self):
+        import io
+        from unittest.mock import patch
+        from ros_maintainer_agent_harness.cli import main
+        from ros_maintainer_agent_harness.runner import FakeCommandRunner
+        import ros_maintainer_agent_harness.worktree as wt_mod
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            layout = WorkspaceLayout(Path(temp_dir) / 'ws')
+            layout.initialize()
+            mgr = SessionManager(layout)
+            session = mgr.create_session('pr-unremovable-1', topic='Unremovable root dir')
+            (session.build_dir / 'rclcpp').mkdir(parents=True, exist_ok=True)
+            (session.build_dir / 'rclcpp' / 'obj.o').write_text('x', encoding='utf-8')
+
+            no_docker_runner = FakeCommandRunner(available_binaries={})
+            with patch.object(wt_mod, '_remove_session_children_except_metadata', return_value=False):
+                ok = mgr.prune_session('pr-unremovable-1', force=True, runner=no_docker_runner)
+
+            self.assertFalse(ok)
+            self.assertTrue(session.session_dir.exists())
+            # session.json is preserved so it never becomes a metadata-less phantom session
+            self.assertTrue((session.session_dir / 'session.json').is_file())
+
+            stderr_buf = io.StringIO()
+            stdout_buf = io.StringIO()
+            with patch.object(SessionManager, 'prune_session', return_value=False):
+                with patch(
+                    'sys.argv',
+                    ['ros-maintainer-harness', '-w', str(layout.root), 'session', 'prune', '-f', 'pr-unremovable-1'],
+                ):
+                    with patch('sys.stdout', stdout_buf), patch('sys.stderr', stderr_buf):
+                        rc = main()
+            self.assertEqual(rc, 1)
+            self.assertNotIn('Successfully pruned', stdout_buf.getvalue())
+            self.assertIn('still exists', stderr_buf.getvalue())
+
+    def test_list_sessions_ignores_orphaned_directories_without_session_markers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            layout = WorkspaceLayout(Path(temp_dir) / 'ws')
+            layout.initialize()
+            mgr = SessionManager(layout)
+            valid = mgr.create_session('pr-valid-1', topic='Valid session')
+
+            # Simulate an orphaned directory with only build/install/log and no session markers
+            orphan_dir = layout.sessions_dir / 'pr-orphan-3395'
+            (orphan_dir / 'build' / 'rclcpp').mkdir(parents=True, exist_ok=True)
+            (orphan_dir / 'install' / 'rclcpp').mkdir(parents=True, exist_ok=True)
+            (orphan_dir / 'log').mkdir(parents=True, exist_ok=True)
+
+            listed = mgr.list_sessions()
+            self.assertEqual([s.session_id for s in listed], [valid.session_id])
+
+            # session_exists and prune_session can still target and clean up the orphaned directory
+            self.assertTrue(mgr.session_exists('pr-orphan-3395'))
+            self.assertTrue(mgr.prune_session('pr-orphan-3395', force=True))
+            self.assertFalse(orphan_dir.exists())
+
 
 if __name__ == '__main__':
     unittest.main()
