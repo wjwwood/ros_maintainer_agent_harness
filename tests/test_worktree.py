@@ -378,7 +378,10 @@ class TestSessionManager(unittest.TestCase):
             with patch.object(
                 wt_mod, '_remove_session_children_except_metadata', side_effect=simulated_remove_children
             ):
-                with patch('os.getuid', return_value=1000), patch('os.getgid', return_value=1000):
+                with (
+                    patch('os.getuid', create=True, return_value=1000),
+                    patch('os.getgid', create=True, return_value=1000),
+                ):
                     ok = mgr.prune_session('pr-rclcpp-3395', force=True, runtime='docker', runner=runner)
 
             self.assertTrue(ok)
