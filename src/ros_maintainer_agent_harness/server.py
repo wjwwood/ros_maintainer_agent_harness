@@ -2227,17 +2227,38 @@ def create_mcp_server(workspace: WorkspaceLayout, require_auth: bool = False) ->
                 'error': 'Mandatory parameter `reason` must not be empty.',
             }
 
-        session_dir = workspace.sessions_dir / session_id
-        timeline = TimelineLogger(session_id, session_dir, workspace.audit_log_path)
-        timeline.log_action(
-            action='prune_session',
-            target=session_id,
-            reason=reason,
-            status='APPROVED',
-            details={'force': force},
-        )
+        if not session_mgr.session_exists(session_id):
+            return {
+                'success': False,
+                'session_id': session_id,
+                'error': f"Session '{session_id}' not found.",
+            }
+
+        session_dir = session_mgr.get_session_dir(session_id)
         success = session_mgr.prune_session(session_id, force=force)
-        return {'success': success, 'session_id': session_id}
+        if workspace.audit_log_path:
+            append_audit_record(
+                workspace.audit_log_path,
+                {
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'session_id': session_id,
+                    'action': 'prune_session',
+                    'target': session_id,
+                    'reason': reason,
+                    'status': 'APPROVED' if success else 'FAILED',
+                    'details': {'force': force, 'removed': success},
+                },
+            )
+        if not success:
+            return {
+                'success': False,
+                'session_id': session_id,
+                'error': (
+                    f"Failed to completely prune session '{session_id}': "
+                    f"'{session_dir}' still exists on disk."
+                ),
+            }
+        return {'success': True, 'session_id': session_id}
 
     # 10. get_maintainer_rules
     @server.tool()

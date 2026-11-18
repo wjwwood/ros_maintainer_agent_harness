@@ -46,6 +46,7 @@ class ScaffoldResult:
             'pr_author': self.pr_metadata.author,
             'base_ref': self.pr_metadata.base_ref,
             'head_ref': self.pr_metadata.head_ref,
+            'head_sha': self.pr_metadata.head_sha,
             'distro': self.distro,
             'worktree_path': str(self.worktree_path),
             'task_file': str(self.task_file),
@@ -207,12 +208,31 @@ def fetch_pr_ref_in_repo(repo_dir: Path, meta: PRMetadata) -> str:
                     env=git_env,
                 )
 
-    # Try fetching GitHub PR head ref: pull/{number}/head:pr-{number}
+    # Refresh origin/<base_ref> best-effort so base diffs in the session checkout are up to date
+    if meta.base_ref:
+        subprocess.run(
+            git_safe_cmd(
+                repo_dir,
+                '-c', 'url.https://github.com/.insteadOf=git@github.com:', 'fetch',
+                'origin', f"+refs/heads/{meta.base_ref}:refs/remotes/origin/{meta.base_ref}",
+            ),
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=git_env,
+        )
+
+    fetched_ok = False
+    # Force-fetch GitHub PR head into explicit refs/heads/pr-{number} (using --update-head-ok and
+    # fully-qualified refs/heads/... so an upstream branch named origin/pr-{number} or checked-out
+    # HEAD in shared_repos can never hijack or block the update)
     fetch_res = subprocess.run(
         git_safe_cmd(
             repo_dir,
             '-c', 'url.https://github.com/.insteadOf=git@github.com:', 'fetch',
-            'origin', f"pull/{meta.number}/head:{local_branch}", '--force',
+            '--update-head-ok',
+            'origin', f"+refs/pull/{meta.number}/head:refs/heads/{local_branch}",
         ),
         cwd=str(repo_dir),
         capture_output=True,
@@ -220,17 +240,16 @@ def fetch_pr_ref_in_repo(repo_dir: Path, meta: PRMetadata) -> str:
         timeout=60,
         env=git_env,
     )
-
     if fetch_res.returncode == 0:
-        return local_branch
-
-    # If pull ref fails (e.g. mocked git repos or private forks), attempt fetching head_repo_url / head_ref
-    if meta.head_repo_url:
+        fetched_ok = True
+    elif meta.head_repo_url:
+        # Fallback for mocked git repos or private forks without refs/pull/<num>/head
         fork_res = subprocess.run(
             git_safe_cmd(
                 repo_dir,
                 '-c', 'url.https://github.com/.insteadOf=git@github.com:', 'fetch',
-                meta.head_repo_url, f"{meta.head_ref}:{local_branch}", '--force',
+                '--update-head-ok',
+                meta.head_repo_url, f"+refs/heads/{meta.head_ref}:refs/heads/{local_branch}",
             ),
             cwd=str(repo_dir),
             capture_output=True,
@@ -239,9 +258,83 @@ def fetch_pr_ref_in_repo(repo_dir: Path, meta: PRMetadata) -> str:
             env=git_env,
         )
         if fork_res.returncode == 0:
-            return local_branch
+            fetched_ok = True
 
-    # Fallback to checking if branch already exists locally
+    expected_sha = (meta.head_sha or '').strip()
+    if expected_sha:
+        cur_res = subprocess.run(
+            git_safe_cmd(repo_dir, 'rev-parse', '--verify', f"refs/heads/{local_branch}"),
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            env=git_env,
+        )
+        cur_sha = cur_res.stdout.strip() if cur_res.returncode == 0 else ''
+        if cur_sha != expected_sha:
+            # Ensure expected_sha commit object is present locally (fetching directly if needed)
+            obj_check = subprocess.run(
+                git_safe_cmd(repo_dir, 'rev-parse', '--verify', f"{expected_sha}^{{commit}}"),
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+            if obj_check.returncode != 0:
+                for src_remote in ([meta.head_repo_url, 'origin'] if meta.head_repo_url else ['origin']):
+                    if not src_remote:
+                        continue
+                    subprocess.run(
+                        git_safe_cmd(
+                            repo_dir,
+                            '-c', 'url.https://github.com/.insteadOf=git@github.com:', 'fetch',
+                            src_remote, expected_sha,
+                        ),
+                        cwd=str(repo_dir),
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                        env=git_env,
+                    )
+                obj_check = subprocess.run(
+                    git_safe_cmd(repo_dir, 'rev-parse', '--verify', f"{expected_sha}^{{commit}}"),
+                    cwd=str(repo_dir),
+                    capture_output=True,
+                    text=True,
+                    env=git_env,
+                )
+
+            if obj_check.returncode == 0:
+                resolved_expected = obj_check.stdout.strip()
+                keep_newer_tip = False
+                if fetched_ok and cur_sha:
+                    anc_res = subprocess.run(
+                        git_safe_cmd(repo_dir, 'merge-base', '--is-ancestor', resolved_expected, cur_sha),
+                        cwd=str(repo_dir),
+                        capture_output=True,
+                        text=True,
+                        env=git_env,
+                    )
+                    keep_newer_tip = (anc_res.returncode == 0)
+                if not keep_newer_tip:
+                    subprocess.run(
+                        git_safe_cmd(repo_dir, 'update-ref', f"refs/heads/{local_branch}", resolved_expected),
+                        cwd=str(repo_dir),
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        env=git_env,
+                    )
+                return local_branch
+            elif not fetched_ok:
+                raise RuntimeError(
+                    f"Failed to fetch PR #{meta.number} expected commit '{expected_sha}' into {repo_dir} "
+                    f"(local refs/heads/{local_branch} resolves to '{cur_sha or 'missing'}')."
+                )
+
+    if fetched_ok:
+        return local_branch
+
+    # Fallback to checking if branch already exists locally (when head_sha was not specified)
     check_res = subprocess.run(
         git_safe_cmd(repo_dir, 'rev-parse', '--verify', f"refs/heads/{local_branch}"),
         cwd=str(repo_dir),
@@ -254,7 +347,7 @@ def fetch_pr_ref_in_repo(repo_dir: Path, meta: PRMetadata) -> str:
 
     # Create local PR branch based on base_ref
     subprocess.run(
-        git_safe_cmd(repo_dir, 'branch', local_branch, meta.base_ref),
+        git_safe_cmd(repo_dir, 'branch', '-f', local_branch, meta.base_ref),
         cwd=str(repo_dir),
         capture_output=True,
         text=True,
@@ -292,6 +385,13 @@ def scaffold_session_from_pr(
     # 3. Ensure repo exists and fetch PR ref
     repo_dir = ensure_shared_repo(workspace, meta, clone_if_missing=clone_if_missing)
     branch_name = fetch_pr_ref_in_repo(repo_dir, meta)
+    ref_sha_res = subprocess.run(
+        git_safe_cmd(repo_dir, 'rev-parse', '--verify', f"refs/heads/{branch_name}"),
+        cwd=str(repo_dir),
+        capture_output=True,
+        text=True,
+    )
+    resolved_head_sha = ref_sha_res.stdout.strip() if ref_sha_res.returncode == 0 else (meta.head_sha or None)
 
     # 4. Create session
     mgr = SessionManager(workspace)
@@ -304,13 +404,14 @@ def scaffold_session_from_pr(
 
     session_dir = mgr.get_session_dir(final_session_id)
 
-    # 5. Attach worktree
+    # 5. Attach worktree pinned to resolved_head_sha
     worktree_path = mgr.attach_worktree(
         session_id=final_session_id,
         repo_dir=repo_dir,
         branch_name=branch_name,
         base_ref=meta.base_ref,
         target_subfolder=target_subfolder,
+        expected_sha=resolved_head_sha,
     )
 
     # 6. Initialize rich timeline with PR details
@@ -340,6 +441,7 @@ def scaffold_session_from_pr(
             'pr_author': meta.author,
             'base_ref': meta.base_ref,
             'head_ref': meta.head_ref,
+            'head_sha': resolved_head_sha or meta.head_sha,
             'head_repo_owner': meta.head_repo_owner,
             'head_repo_url': meta.head_repo_url,
             'is_fork': meta.is_fork,

@@ -23,9 +23,16 @@ import stat
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
-from .devcontainer import stop_session_container, write_devcontainer_config
+from .devcontainer import (
+    DEFAULT_HUB_IMAGE,
+    detect_container_runtime,
+    get_image_for_distro,
+    stop_session_container,
+    write_devcontainer_config,
+)
 from .instructions import write_session_agent_instructions
 from .mcp_config import write_session_mcp_configs
+from .runner import CommandRunner, get_default_runner
 from .timeline import TimelineLogger
 from .workspace import WorkspaceLayout
 
@@ -51,6 +58,142 @@ def _rmtree_force(target: Path) -> None:
             pass
 
     shutil.rmtree(target, onerror=_handle_readonly)
+
+
+def _has_session_markers(session_dir: Path) -> bool:
+    """
+    Return True if `session_dir` contains at least one recognized session marker file
+    (`session.json`, `timeline.md`, `TASK.md`, `AGENTS.md`, or `.devcontainer/devcontainer.json`).
+    Orphaned directories containing only leftover `build/`, `install/`, or `log/` subdirectories
+    return False so they are not synthesized as phantom `[active]` sessions.
+    """
+    for marker in ('session.json', 'timeline.md', 'TASK.md', 'AGENTS.md'):
+        try:
+            if (session_dir / marker).exists():
+                return True
+        except Exception:
+            continue
+    try:
+        if (session_dir / '.devcontainer' / 'devcontainer.json').exists():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _remove_session_children_except_metadata(session_dir: Path) -> bool:
+    """
+    Remove all children inside `session_dir` except `session.json`.
+    Returns True if no non-`session.json` children remain on disk.
+    """
+    try:
+        entries = list(session_dir.iterdir())
+    except Exception:
+        return False
+
+    for child in entries:
+        if child.name == 'session.json':
+            continue
+        try:
+            if child.is_dir() and not child.is_symlink():
+                _rmtree_force(child)
+            else:
+                try:
+                    os.chmod(session_dir, stat.S_IRWXU)
+                except OSError:
+                    pass
+                child.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    try:
+        remaining = [c for c in session_dir.iterdir() if c.name != 'session.json']
+        return len(remaining) == 0
+    except Exception:
+        return False
+
+
+def _find_cached_cleanup_image(
+    rt: str,
+    preferred_image: Optional[str],
+    distro: str,
+    runner: CommandRunner,
+) -> Optional[str]:
+    """Find a locally cached container image with `sh`, `chown`, and `chmod` without pulling."""
+    candidates: List[str] = []
+    for cand in (preferred_image, get_image_for_distro(distro), DEFAULT_HUB_IMAGE):
+        if cand and cand not in candidates:
+            candidates.append(cand)
+
+    for img in candidates:
+        res = runner.run([rt, 'image', 'inspect', img], timeout=15)
+        if res.returncode == 0:
+            return img
+
+    list_res = runner.run([rt, 'images', '--format', '{{.Repository}}:{{.Tag}}'], timeout=15)
+    if list_res.returncode != 0 or not list_res.stdout.strip():
+        return None
+
+    available = [
+        line.strip()
+        for line in list_res.stdout.splitlines()
+        if line.strip() and '<none>' not in line
+    ]
+    preferred_prefixes = (
+        'osrf/ros:',
+        'docker.io/osrf/ros:',
+        'ros:',
+        'ubuntu:',
+        'debian:',
+        'alpine:',
+        'busybox:',
+        'ros-maintainer-harness-hub:',
+    )
+    for prefix in preferred_prefixes:
+        for img in available:
+            if img.startswith(prefix):
+                return img
+    return available[0] if available else None
+
+
+def _cleanup_root_owned_dir_via_container(
+    target_dir: Path,
+    distro: str = 'rolling',
+    custom_image: Optional[str] = None,
+    runtime: Optional[str] = None,
+    runner: Optional[CommandRunner] = None,
+) -> bool:
+    """
+    Use an ephemeral local container (`--rm --network=none`) to restore host `{uid}:{gid}` ownership
+    and `u+rwX` permissions on `target_dir` when an exited container left `root:root` artifacts behind.
+    """
+    if not (hasattr(os, 'getuid') and hasattr(os, 'getgid') and os.getuid() != 0):
+        return False
+
+    active_runner = runner or get_default_runner()
+    rt = runtime or detect_container_runtime(runner=active_runner)
+    if not rt:
+        return False
+
+    image = _find_cached_cleanup_image(rt, custom_image, distro, active_runner)
+    if not image:
+        return False
+
+    uid = os.getuid()
+    gid = os.getgid()
+    res = active_runner.run(
+        [
+            rt, 'run', '--rm',
+            '--network=none',
+            '--security-opt=no-new-privileges:true',
+            '--entrypoint', 'sh',
+            '-v', f"{target_dir.resolve()}:/cleanup",
+            image,
+            '-c', f"chown -R {uid}:{gid} /cleanup && chmod -R u+rwX /cleanup",
+        ],
+        timeout=120,
+    )
+    return res.returncode == 0
 
 
 def validate_session_id(session_id: str) -> str:
@@ -596,6 +739,7 @@ class SessionManager:
         branch_name: str,
         base_ref: str = 'HEAD',
         target_subfolder: Optional[str] = None,
+        expected_sha: Optional[str] = None,
     ) -> Path:
         """
         Create a session checkout for ``repo_dir`` inside the session's ``src/`` directory
@@ -640,27 +784,43 @@ class SessionManager:
             source_git_dir = (repo_dir / '.git').resolve()
         source_objects_dir = (source_git_dir / 'objects').resolve()
 
-        # Resolve target commit SHA in repo_dir (prefer branch_name if present, else base_ref)
-        branch_check = subprocess.run(
-            git_safe_cmd(repo_dir, 'rev-parse', '--verify', f'refs/heads/{branch_name}'),
-            cwd=str(repo_dir),
-            capture_output=True,
-            text=True,
-        )
-        if branch_check.returncode == 0 and branch_check.stdout.strip():
-            target_sha = branch_check.stdout.strip()
-        else:
-            base_check = subprocess.run(
-                git_safe_cmd(repo_dir, 'rev-parse', '--verify', base_ref),
+        # Resolve target commit SHA in repo_dir (prefer explicit expected_sha, then refs/heads/branch_name,
+        # else base_ref)
+        target_sha = ''
+        if expected_sha:
+            exp_check = subprocess.run(
+                git_safe_cmd(repo_dir, 'rev-parse', '--verify', f'{expected_sha}^{{commit}}'),
                 cwd=str(repo_dir),
                 capture_output=True,
                 text=True,
             )
-            if base_check.returncode != 0 or not base_check.stdout.strip():
+            if exp_check.returncode != 0 or not exp_check.stdout.strip():
                 raise RuntimeError(
-                    f"Failed to resolve ref '{branch_name}' or '{base_ref}' in {repo_dir}: {base_check.stderr}"
+                    f"Expected commit '{expected_sha}' for branch '{branch_name}' not found in {repo_dir}: "
+                    f"{exp_check.stderr}"
                 )
-            target_sha = base_check.stdout.strip()
+            target_sha = exp_check.stdout.strip()
+        else:
+            branch_check = subprocess.run(
+                git_safe_cmd(repo_dir, 'rev-parse', '--verify', f'refs/heads/{branch_name}'),
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+            )
+            if branch_check.returncode == 0 and branch_check.stdout.strip():
+                target_sha = branch_check.stdout.strip()
+            else:
+                base_check = subprocess.run(
+                    git_safe_cmd(repo_dir, 'rev-parse', '--verify', base_ref),
+                    cwd=str(repo_dir),
+                    capture_output=True,
+                    text=True,
+                )
+                if base_check.returncode != 0 or not base_check.stdout.strip():
+                    raise RuntimeError(
+                        f"Failed to resolve ref '{branch_name}' or '{base_ref}' in {repo_dir}: {base_check.stderr}"
+                    )
+                target_sha = base_check.stdout.strip()
 
         worktree_target.mkdir(parents=True, exist_ok=True)
         init_res = subprocess.run(
@@ -740,24 +900,33 @@ class SessionManager:
             text=True,
         )
         if refs_res.returncode == 0:
+            remote_entries: List[Tuple[str, str]] = []
+            head_entries: List[Tuple[str, str]] = []
+            seen_remote_refs = set()
             for line in refs_res.stdout.splitlines():
                 parts = line.strip().split()
                 if len(parts) != 2:
                     continue
                 ref_name, obj_sha = parts
                 if ref_name.startswith('refs/remotes/'):
-                    subprocess.run(
-                        git_safe_cmd(worktree_target, 'update-ref', ref_name, obj_sha),
-                        cwd=str(worktree_target),
-                        capture_output=True,
-                        text=True,
-                    )
+                    remote_entries.append((ref_name, obj_sha))
+                    seen_remote_refs.add(ref_name)
                 elif ref_name.startswith('refs/heads/'):
-                    short_branch = ref_name[len('refs/heads/'):]
+                    head_entries.append((ref_name, obj_sha))
+
+            for ref_name, obj_sha in remote_entries:
+                subprocess.run(
+                    git_safe_cmd(worktree_target, 'update-ref', ref_name, obj_sha),
+                    cwd=str(worktree_target),
+                    capture_output=True,
+                    text=True,
+                )
+            for ref_name, obj_sha in head_entries:
+                short_branch = ref_name[len('refs/heads/'):]
+                fallback_remote = f'refs/remotes/origin/{short_branch}'
+                if fallback_remote not in seen_remote_refs and not short_branch.startswith('pr-'):
                     subprocess.run(
-                        git_safe_cmd(
-                            worktree_target, 'update-ref', f'refs/remotes/origin/{short_branch}', obj_sha
-                        ),
+                        git_safe_cmd(worktree_target, 'update-ref', fallback_remote, obj_sha),
                         cwd=str(worktree_target),
                         capture_output=True,
                         text=True,
@@ -773,6 +942,19 @@ class SessionManager:
             shutil.rmtree(worktree_target, ignore_errors=True)
             raise RuntimeError(
                 f"Failed to checkout branch '{branch_name}' in {worktree_target}: {checkout_res.stderr}"
+            )
+
+        head_verify = subprocess.run(
+            git_safe_cmd(worktree_target, 'rev-parse', '--verify', 'HEAD'),
+            cwd=str(worktree_target),
+            capture_output=True,
+            text=True,
+        )
+        actual_head = head_verify.stdout.strip() if head_verify.returncode == 0 else ''
+        if actual_head != target_sha:
+            shutil.rmtree(worktree_target, ignore_errors=True)
+            raise RuntimeError(
+                f"Worktree HEAD mismatch in {worktree_target}: expected '{target_sha}', got '{actual_head}'."
             )
 
         timeline = TimelineLogger(session_id, session_dir, self.workspace.audit_log_path)
@@ -805,7 +987,7 @@ class SessionManager:
         sessions = []
         for s_dir in entries:
             try:
-                if not s_dir.is_dir():
+                if not s_dir.is_dir() or not _has_session_markers(s_dir):
                     continue
             except Exception:
                 continue
@@ -902,34 +1084,79 @@ class SessionManager:
             active_branches=active_branches,
         )
 
-    def prune_session(self, session_id: str, force: bool = False) -> bool:
+    def prune_session(
+        self,
+        session_id: str,
+        force: bool = False,
+        runtime: Optional[str] = None,
+        runner: Optional[CommandRunner] = None,
+    ) -> bool:
         """
         Prune a session by stopping any running container, removing linked Git worktrees,
-        and deleting the session directory.
+        and deleting the session directory (falling back to a one-shot container chown if
+        an exited container left root-owned build/install/log artifacts behind).
+        Returns True only when `session_dir` has been completely removed from disk.
         """
         session_dir = self.get_session_dir(session_id)
         if not session_dir.exists():
             return False
 
+        meta = read_session_metadata(session_dir)
+        distro = str(meta.get('distro') or 'rolling')
+        custom_image: Optional[str] = None
+        dc_path = session_dir / '.devcontainer' / 'devcontainer.json'
         try:
-            stop_session_container(session_id)
+            if dc_path.exists():
+                dc = json.loads(dc_path.read_text(encoding='utf-8'))
+                if isinstance(dc, dict) and dc.get('image'):
+                    custom_image = str(dc['image'])
+        except Exception:
+            pass
+
+        try:
+            stop_session_container(session_id, runtime=runtime, runner=runner)
         except Exception:
             pass
 
         from .git_ops import git_safe_cmd
 
         src_dir = session_dir / 'src'
-        if src_dir.exists():
-            for sub in src_dir.iterdir():
-                if sub.is_dir() and (sub / '.git').is_file():
-                    # Attempt clean git worktree remove for legacy linked worktrees
-                    subprocess.run(
-                        git_safe_cmd(sub, 'worktree', 'remove', str(sub)) + (['--force'] if force else []),
-                        cwd=str(sub),
-                        capture_output=True,
-                    )
+        try:
+            if src_dir.exists():
+                for sub in src_dir.iterdir():
+                    if sub.is_dir() and (sub / '.git').is_file():
+                        # Attempt clean git worktree remove for legacy linked worktrees
+                        subprocess.run(
+                            git_safe_cmd(sub, 'worktree', 'remove', str(sub)) + (['--force'] if force else []),
+                            cwd=str(sub),
+                            capture_output=True,
+                        )
+        except Exception:
+            pass
 
-        _rmtree_force(session_dir)
+        # Remove non-metadata children first so `session.json` is preserved if deletion fails
+        children_cleared = _remove_session_children_except_metadata(session_dir)
+        if not children_cleared and session_dir.exists():
+            if _cleanup_root_owned_dir_via_container(
+                session_dir,
+                distro=distro,
+                custom_image=custom_image,
+                runtime=runtime,
+                runner=runner,
+            ):
+                children_cleared = _remove_session_children_except_metadata(session_dir)
+
+        if children_cleared:
+            _rmtree_force(session_dir)
+            if session_dir.exists():
+                if _cleanup_root_owned_dir_via_container(
+                    session_dir,
+                    distro=distro,
+                    custom_image=custom_image,
+                    runtime=runtime,
+                    runner=runner,
+                ):
+                    _rmtree_force(session_dir)
 
         if self.workspace.shared_repos_dir.exists():
             for repo_dir in self.workspace.shared_repos_dir.iterdir():
@@ -940,4 +1167,4 @@ class SessionManager:
                         capture_output=True,
                     )
 
-        return True
+        return not session_dir.exists()
