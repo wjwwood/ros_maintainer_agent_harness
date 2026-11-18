@@ -116,6 +116,95 @@ class TestScaffolder(unittest.TestCase):
             self.assertTrue(res.task_file.exists())
             self.assertIn('Fix race condition in timer callback', res.task_file.read_text(encoding='utf-8'))
 
+    @patch('ros_maintainer_agent_harness.scaffolder.fetch_pr_metadata')
+    def test_scaffold_pr_with_colliding_upstream_pr_branch_and_checked_out_head(self, mock_fetch):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            upstream = root / 'upstream_rosidl.git'
+            fork_work = root / 'fork_rosidl'
+            ws_root = root / 'ws'
+
+            # 1. Create bare upstream repo with rolling + colliding branch named `pr-1018`
+            subprocess.run(['git', 'init', '--bare', str(upstream)], check=True, capture_output=True)
+            seed = root / 'seed'
+            seed.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['git', 'init'], cwd=str(seed), check=True, capture_output=True)
+            subprocess.run(['git', 'config', 'user.name', 'Tester'], cwd=str(seed), check=True)
+            subprocess.run(['git', 'config', 'user.email', 'tester@example.com'], cwd=str(seed), check=True)
+            (seed / 'README.md').write_text('base rolling\n', encoding='utf-8')
+            subprocess.run(['git', 'add', 'README.md'], cwd=str(seed), check=True)
+            subprocess.run(['git', 'commit', '-m', 'Base rolling'], cwd=str(seed), check=True, capture_output=True)
+            subprocess.run(['git', 'branch', '-M', 'rolling'], cwd=str(seed), check=True)
+            subprocess.run(['git', 'remote', 'add', 'origin', str(upstream)], cwd=str(seed), check=True)
+            subprocess.run(['git', 'push', 'origin', 'rolling'], cwd=str(seed), check=True, capture_output=True)
+
+            # Push colliding upstream branch `pr-1018` (simulating unrelated upstream branch)
+            subprocess.run(['git', 'checkout', '-b', 'pr-1018'], cwd=str(seed), check=True, capture_output=True)
+            (seed / 'unrelated.txt').write_text('wrong commit\n', encoding='utf-8')
+            subprocess.run(['git', 'add', 'unrelated.txt'], cwd=str(seed), check=True)
+            subprocess.run(['git', 'commit', '-m', 'Unrelated pr-1018 branch'], cwd=str(seed), check=True)
+            unrelated_sha = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'], cwd=str(seed), check=True, capture_output=True, text=True
+            ).stdout.strip()
+            subprocess.run(['git', 'push', 'origin', 'pr-1018'], cwd=str(seed), check=True, capture_output=True)
+
+            # Create actual PR commit and publish it as refs/pull/1018/head on upstream
+            subprocess.run(['git', 'clone', str(upstream), str(fork_work)], check=True, capture_output=True)
+            subprocess.run(['git', 'config', 'user.name', 'Contributor'], cwd=str(fork_work), check=True)
+            subprocess.run(['git', 'config', 'user.email', 'contrib@example.com'], cwd=str(fork_work), check=True)
+            subprocess.run(
+                ['git', 'checkout', '-B', 'bas/type-description-dependencies', 'origin/rolling'],
+                cwd=str(fork_work), check=True, capture_output=True,
+            )
+            (fork_work / 'pr_fix.txt').write_text('expected PR 1018 fix\n', encoding='utf-8')
+            subprocess.run(['git', 'add', 'pr_fix.txt'], cwd=str(fork_work), check=True)
+            subprocess.run(['git', 'commit', '-m', 'PR 1018 commit'], cwd=str(fork_work), check=True)
+            expected_pr_sha = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'], cwd=str(fork_work), check=True, capture_output=True, text=True
+            ).stdout.strip()
+            subprocess.run(
+                ['git', 'push', 'origin', f"{expected_pr_sha}:refs/pull/1018/head"],
+                cwd=str(fork_work), check=True, capture_output=True,
+            )
+
+            # 2. Initialize workspace and clone upstream into shared_repos/rosidl with pr-1018 checked out
+            layout = WorkspaceLayout(ws_root)
+            layout.initialize()
+            shared_rosidl = layout.shared_repos_dir / 'rosidl'
+            subprocess.run(['git', 'clone', str(upstream), str(shared_rosidl)], check=True, capture_output=True)
+            subprocess.run(
+                ['git', 'checkout', '-B', 'pr-1018', 'origin/pr-1018'],
+                cwd=str(shared_rosidl), check=True, capture_output=True,
+            )
+
+            mock_fetch.return_value = PRMetadata(
+                owner='ros2',
+                repo='rosidl',
+                number=1018,
+                title='Type description dependencies fix',
+                body='Fixes type description dependencies.',
+                base_ref='rolling',
+                head_ref='bas/type-description-dependencies',
+                head_repo_owner='baszalmstra',
+                head_repo_url=str(fork_work),
+                is_fork=True,
+                url='https://github.com/ros2/rosidl/pull/1018',
+                detected_distro='rolling',
+                changed_files=['pr_fix.txt'],
+                labels=['rolling'],
+                author='baszalmstra',
+                head_sha=expected_pr_sha,
+            )
+
+            res = scaffold_session_from_pr(workspace=layout, pr_ref='ros2/rosidl#1018')
+            checked_out_sha = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                cwd=str(res.worktree_path), check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            self.assertNotEqual(checked_out_sha, unrelated_sha)
+            self.assertEqual(checked_out_sha, expected_pr_sha)
+            self.assertTrue((res.worktree_path / 'pr_fix.txt').is_file())
+
 
 if __name__ == '__main__':
     unittest.main()

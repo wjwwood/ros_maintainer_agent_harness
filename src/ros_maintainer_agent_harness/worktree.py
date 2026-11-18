@@ -739,6 +739,7 @@ class SessionManager:
         branch_name: str,
         base_ref: str = 'HEAD',
         target_subfolder: Optional[str] = None,
+        expected_sha: Optional[str] = None,
     ) -> Path:
         """
         Create a session checkout for ``repo_dir`` inside the session's ``src/`` directory
@@ -783,27 +784,43 @@ class SessionManager:
             source_git_dir = (repo_dir / '.git').resolve()
         source_objects_dir = (source_git_dir / 'objects').resolve()
 
-        # Resolve target commit SHA in repo_dir (prefer branch_name if present, else base_ref)
-        branch_check = subprocess.run(
-            git_safe_cmd(repo_dir, 'rev-parse', '--verify', f'refs/heads/{branch_name}'),
-            cwd=str(repo_dir),
-            capture_output=True,
-            text=True,
-        )
-        if branch_check.returncode == 0 and branch_check.stdout.strip():
-            target_sha = branch_check.stdout.strip()
-        else:
-            base_check = subprocess.run(
-                git_safe_cmd(repo_dir, 'rev-parse', '--verify', base_ref),
+        # Resolve target commit SHA in repo_dir (prefer explicit expected_sha, then refs/heads/branch_name,
+        # else base_ref)
+        target_sha = ''
+        if expected_sha:
+            exp_check = subprocess.run(
+                git_safe_cmd(repo_dir, 'rev-parse', '--verify', f'{expected_sha}^{{commit}}'),
                 cwd=str(repo_dir),
                 capture_output=True,
                 text=True,
             )
-            if base_check.returncode != 0 or not base_check.stdout.strip():
+            if exp_check.returncode != 0 or not exp_check.stdout.strip():
                 raise RuntimeError(
-                    f"Failed to resolve ref '{branch_name}' or '{base_ref}' in {repo_dir}: {base_check.stderr}"
+                    f"Expected commit '{expected_sha}' for branch '{branch_name}' not found in {repo_dir}: "
+                    f"{exp_check.stderr}"
                 )
-            target_sha = base_check.stdout.strip()
+            target_sha = exp_check.stdout.strip()
+        else:
+            branch_check = subprocess.run(
+                git_safe_cmd(repo_dir, 'rev-parse', '--verify', f'refs/heads/{branch_name}'),
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+            )
+            if branch_check.returncode == 0 and branch_check.stdout.strip():
+                target_sha = branch_check.stdout.strip()
+            else:
+                base_check = subprocess.run(
+                    git_safe_cmd(repo_dir, 'rev-parse', '--verify', base_ref),
+                    cwd=str(repo_dir),
+                    capture_output=True,
+                    text=True,
+                )
+                if base_check.returncode != 0 or not base_check.stdout.strip():
+                    raise RuntimeError(
+                        f"Failed to resolve ref '{branch_name}' or '{base_ref}' in {repo_dir}: {base_check.stderr}"
+                    )
+                target_sha = base_check.stdout.strip()
 
         worktree_target.mkdir(parents=True, exist_ok=True)
         init_res = subprocess.run(
@@ -883,24 +900,33 @@ class SessionManager:
             text=True,
         )
         if refs_res.returncode == 0:
+            remote_entries: List[Tuple[str, str]] = []
+            head_entries: List[Tuple[str, str]] = []
+            seen_remote_refs = set()
             for line in refs_res.stdout.splitlines():
                 parts = line.strip().split()
                 if len(parts) != 2:
                     continue
                 ref_name, obj_sha = parts
                 if ref_name.startswith('refs/remotes/'):
-                    subprocess.run(
-                        git_safe_cmd(worktree_target, 'update-ref', ref_name, obj_sha),
-                        cwd=str(worktree_target),
-                        capture_output=True,
-                        text=True,
-                    )
+                    remote_entries.append((ref_name, obj_sha))
+                    seen_remote_refs.add(ref_name)
                 elif ref_name.startswith('refs/heads/'):
-                    short_branch = ref_name[len('refs/heads/'):]
+                    head_entries.append((ref_name, obj_sha))
+
+            for ref_name, obj_sha in remote_entries:
+                subprocess.run(
+                    git_safe_cmd(worktree_target, 'update-ref', ref_name, obj_sha),
+                    cwd=str(worktree_target),
+                    capture_output=True,
+                    text=True,
+                )
+            for ref_name, obj_sha in head_entries:
+                short_branch = ref_name[len('refs/heads/'):]
+                fallback_remote = f'refs/remotes/origin/{short_branch}'
+                if fallback_remote not in seen_remote_refs and not short_branch.startswith('pr-'):
                     subprocess.run(
-                        git_safe_cmd(
-                            worktree_target, 'update-ref', f'refs/remotes/origin/{short_branch}', obj_sha
-                        ),
+                        git_safe_cmd(worktree_target, 'update-ref', fallback_remote, obj_sha),
                         cwd=str(worktree_target),
                         capture_output=True,
                         text=True,
@@ -916,6 +942,19 @@ class SessionManager:
             shutil.rmtree(worktree_target, ignore_errors=True)
             raise RuntimeError(
                 f"Failed to checkout branch '{branch_name}' in {worktree_target}: {checkout_res.stderr}"
+            )
+
+        head_verify = subprocess.run(
+            git_safe_cmd(worktree_target, 'rev-parse', '--verify', 'HEAD'),
+            cwd=str(worktree_target),
+            capture_output=True,
+            text=True,
+        )
+        actual_head = head_verify.stdout.strip() if head_verify.returncode == 0 else ''
+        if actual_head != target_sha:
+            shutil.rmtree(worktree_target, ignore_errors=True)
+            raise RuntimeError(
+                f"Worktree HEAD mismatch in {worktree_target}: expected '{target_sha}', got '{actual_head}'."
             )
 
         timeline = TimelineLogger(session_id, session_dir, self.workspace.audit_log_path)

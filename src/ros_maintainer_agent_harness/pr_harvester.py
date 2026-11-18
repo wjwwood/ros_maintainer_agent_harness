@@ -63,6 +63,7 @@ class PRMetadata:
     labels: List[str] = dataclasses.field(default_factory=list)
     author: str = ''
     state: str = 'OPEN'
+    head_sha: str = ''
 
     @property
     def shorthand(self) -> str:
@@ -134,7 +135,7 @@ def fetch_pr_metadata_via_gh(owner: str, repo: str, number: int) -> Optional[PRM
             'gh', 'pr', 'view', f"{owner}/{repo}#{number}",
             '--json',
             (
-                'number,title,body,baseRefName,headRefName,headRepository,'
+                'number,title,body,baseRefName,headRefName,headRefOid,headRepository,'
                 'headRepositoryOwner,url,files,labels,author,state'
             ),
         ]
@@ -173,6 +174,7 @@ def fetch_pr_metadata_via_gh(owner: str, repo: str, number: int) -> Optional[PRM
             labels=labels_list,
             author=(data.get('author') or {}).get('login', ''),
             state=data.get('state', 'OPEN'),
+            head_sha=str(data.get('headRefOid') or '').strip(),
         )
     except Exception:
         return None
@@ -240,6 +242,7 @@ def fetch_pr_metadata_via_api(owner: str, repo: str, number: int) -> PRMetadata:
         labels=labels_list,
         author=(data.get('user') or {}).get('login', ''),
         state=data.get('state', 'OPEN'),
+        head_sha=str(head_data.get('sha') or '').strip(),
     )
 
 
